@@ -5,13 +5,21 @@
 
 SoftwareSerial virtualSerial(10, 11); // RX, TX
 
+// Pin 13 has an LED connected on most Arduino boards.
+// give it a name:
+uint8_t diagnosticLed = 13;
 
-#define STRINGBUFFER_LEN 200      // The length of the buffer used to read a new string from the serial port
+#define STRINGBUFFER_LEN 280      // The length of the buffer used to read a new string from the serial port
 
-char str[STRINGBUFFER_LEN + 1];     // Leave room for a safety null terminator at the end.
+// Leave room for a safety null terminator at the end.
+char displayString[STRINGBUFFER_LEN + 1] = "Beware the Jabberwock, my son! "
+                                           "The jaws that bite, the claws that catch! "
+                                           "Beware the Jubjub bird, and shun "
+                                           "The frumious Bandersnatch! ";
+
 
 // Change this to be at least as long as your pixel string (too long will work fine, just be a little slower)
-#define PIXELS 60*4  // Number of pixels in the string. I am using 4 meters of 96LED/M
+#define PIXELS 60*2  // Number of pixels in the string. I am using 4 meters of 96LED/M
 
 // These values depend on which pins your 8 strings are connected to and what board you are using 
 // More info on how to find these at http://www.arduino.cc/en/Reference/PortManipulation
@@ -26,7 +34,7 @@ char str[STRINGBUFFER_LEN + 1];     // Leave room for a safety null terminator a
 #define PIXEL_DDR   DDRD   // Port of the pin the pixels are connected to
 
 
-static const uint8_t onBits = 0b11111111;   // Bit pattern to write to port to turn on all pins connected to LED strips.
+static const uint8_t onBits = 0b11111110;   // Bit pattern to write to port to turn on all pins connected to LED strips.
 // If you do not want to use all 8 pins, you can mask off the ones you don't want
 // Note that these will still get 0 written to them when we send pixels
 // TODO: If we have time, we could even add a variable that will and/or into the bits before writing to the port to support any combination of bits/values                                  
@@ -153,7 +161,7 @@ static inline void sendBitx8(const uint8_t row, const uint8_t colorbyte, const u
 }
 
 
-// Just wait long enough without sending any bots to cause the pixels to latch and display the last sent frame
+// Just wait long enough without sending any bits to cause the pixels to latch and display the last sent frame
 
 void show() {
     delayMicroseconds((RES / 1000UL) +
@@ -454,6 +462,30 @@ const uint8_t altfont[] PROGMEM = {
 // Keep track of where we are in the color cycle between chars
 static uint8_t altbright = 0;
 
+void diagnosticLedOn() {
+    digitalWrite(diagnosticLed, HIGH);   // turn the LED on (HIGH is the voltage level)
+}
+
+
+void diagnosticLedOff() {
+    digitalWrite(diagnosticLed, LOW);   // turn the LED on (HIGH is the voltage level)
+}
+
+void diagnosticBlink() {
+    diagnosticLedOn();
+    delay(1000);
+    diagnosticLedOff();
+    delay(300);
+    diagnosticLedOn();
+    delay(1000);
+    diagnosticLedOff();
+    delay(300);
+    diagnosticLedOn();
+    delay(1000);
+    diagnosticLedOff();
+    delay(300);
+}
+
 // Send a char with a column-based color cycle
 static inline void sendCharAlt(uint8_t c) {
 
@@ -493,19 +525,21 @@ static inline void sendStringAlt(const char *s) {
 }
 
 
+void setupDiagnosticLed() {
+    pinMode(diagnosticLed, OUTPUT);
+}
 
 // Set the specified pins up as digital out
 
-void ledsetup() {
+void setupLeds() {
 
     PIXEL_DDR |= onBits;   // Set all used pins to output
 
 }
 
-
 void setup() {
-
-    ledsetup();
+    setupDiagnosticLed();
+    setupLeds();
 
 }
 
@@ -795,46 +829,7 @@ void showallyourbase() {
 
 void scroll() {
 
-    const char *m = str;
-
-//  const char *m = 
-//          
-//      "Twas brillig, and the slithy toves "
-//            "Did gyre and gimble in the wabe: "
-//      "All mimsy were the borogoves, "
-//            "And the mome raths outgrabe. "
-//      
-//      "Beware the Jabberwock, my son! "
-//            "The jaws that bite, the claws that catch! "
-//      "Beware the Jubjub bird, and shun "      
-//            "The frumious Bandersnatch! "
-//      
-//      "He took his vorpal sword in hand; "
-//            "Long time the manxome foe he sought- "
-//      "So rested he by the Tumtum tree "
-//            "And stood awhile in thought. "
-//      
-//      "And, as in uffish thought he stood, "
-//            "The Jabberwock, with eyes of flame, "
-//      "Came whiffling through the tulgey wood, "      
-//            "And burbled as it came! "
-//      
-//      "One, two! One, two! And through and through "
-//            "The vorpal blade went snicker-snack! "
-//      "He left it dead, and with its head "
-//            "He went galumphing back. "
-//      
-//      "And hast thou slain the Jabberwock? "
-//            "Come to my arms, my beamish boy! "
-//      "O frabjous day! Callooh! Callay! "
-//            "He chortled in his joy. "
-//      
-//      "Twas brillig, and the slithy toves "
-//            "Did gyre and gimble in the wabe: "
-//      "All mimsy were the borogoves, "
-//            "And the mome raths outgrabe."  
-//      
-//            ;
+    const char *m = displayString;
 
     // Text foreground color cycle effect
     uint8_t sector = 0;
@@ -905,14 +900,16 @@ void scroll() {
 void getCustomData() {
     // send special symbol so ESP knows to respond with custom message data
     virtualSerial.print("~");
-    // loop until its available
-    while (!virtualSerial.available()) {
-        delay(500);
+//     loop until its available
+//    while (!virtualSerial.available()) {
+//        delay(500);
+//    }
+    delay(500);
+    if (virtualSerial.available()) {
+        // do i need to put the next two lines inside a while (virtualSerial.available()){...} loop?
+        int len = virtualSerial.readBytesUntil('\r', displayString, STRINGBUFFER_LEN);
+        displayString[len] = 0x00;        // Null terminate
     }
-
-    // do i need to put the next two lines inside a while (virtualSerial.available()){...} loop?
-    int len = virtualSerial.readBytesUntil('\r', str, STRINGBUFFER_LEN);
-    str[len] = 0x00;        // Null terminate
 }
 
 
@@ -924,13 +921,13 @@ void loop() {
     //showinvaders();
     //showjabber();
 
+    diagnosticBlink();
+    diagnosticLedOn();
     getCustomData();
+    diagnosticLedOff();
 
+    virtualSerial.println("Hi");
     scroll();
-
-
-
-
 
     // TODO: Actually sample the state of the pullup on unused pins and OR it into the mask so we maintain the state.
     // Must do AFTER the cli(). 
@@ -938,4 +935,6 @@ void loop() {
 
     return;
 }
+
+
 
