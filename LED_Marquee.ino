@@ -1,9 +1,12 @@
 // Used to receive data on a virtual RX pin instead of the usual pin 0
 #include <SoftwareSerial.h>
 #include <Arduino.h>
+#include "../../../../../Applications/Arduino.app/Contents/Java/hardware/arduino/avr/cores/arduino/HardwareSerial.h"
 
+#define rxPin 10
+#define txPin 11
 
-SoftwareSerial virtualSerial(10, 11); // RX, TX
+SoftwareSerial virtualSerial(rxPin, txPin); // RX, TX
 
 // Pin 13 has an LED connected on most Arduino boards.
 // give it a name:
@@ -537,7 +540,17 @@ void setupLeds() {
 
 }
 
+void setupSerial() {
+    // define pin modes for tx, rx:
+    pinMode(rxPin, INPUT);
+    pinMode(txPin, OUTPUT);
+    // set the data rate for the SoftwareSerial port
+    virtualSerial.begin(19200);
+    Serial.begin(19200);
+}
+
 void setup() {
+    setupSerial();
     setupDiagnosticLed();
     setupLeds();
 
@@ -874,7 +887,6 @@ void scroll() {
         for (uint8_t step = 0; step < FONT_WIDTH +
                                       INTERCHAR_SPACE; step++) {   // step though each column of the 1st char for smooth scrolling
 
-
             cli();
 
             sendString(m, step, r, g, b);
@@ -896,17 +908,18 @@ void scroll() {
 }
 
 
-// Notifies the ESP Wifi module that we're ready to retrieve custom message data
+// Notifies the IMX that we're ready to retrieve custom message data
 void getCustomData() {
-    // send special symbol so ESP knows to respond with custom message data
+    // send special symbol so IMX knows to respond with custom message data
     virtualSerial.print("~");
 //     loop until its available
 //    while (!virtualSerial.available()) {
 //        delay(500);
 //    }
-    delay(500);
+    delay(100); // wait for stuff to get written to the serial port (do I need to even do this or wait this long?)
     if (virtualSerial.available()) {
-        // do i need to put the next two lines inside a while (virtualSerial.available()){...} loop?
+        // orig comment: do i need to put the next two lines inside a while (virtualSerial.available()){...} loop?
+        memset(displayString, 0x00, STRINGBUFFER_LEN);
         int len = virtualSerial.readBytesUntil('\r', displayString, STRINGBUFFER_LEN);
         displayString[len] = 0x00;        // Null terminate
     }
@@ -921,12 +934,17 @@ void loop() {
     //showinvaders();
     //showjabber();
 
-    diagnosticBlink();
+//    diagnosticBlink();
     diagnosticLedOn();
     getCustomData();
     diagnosticLedOff();
+    delay(500);
 
-    virtualSerial.println("Hi");
+//    virtualSerial.print("vsHi");
+//    virtualSerial.flush();
+    Serial.println(displayString);
+    Serial.flush();
+
     scroll();
 
     // TODO: Actually sample the state of the pullup on unused pins and OR it into the mask so we maintain the state.
