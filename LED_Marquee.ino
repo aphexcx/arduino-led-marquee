@@ -918,7 +918,9 @@ void getCustomData() {
 //    }
     delay(100); // wait for stuff to get written to the serial port (do I need to even do this or wait this long?)
     if (virtualSerial.available()) {
-        // orig comment: do i need to put the next two lines inside a while (virtualSerial.available()){...} loop?
+        // orig comment: do i need to put the next lines inside a while (virtualSerial.available()){...} loop?
+
+        //Hmm do I need to do this each time or only if something valid was read?
         memset(displayString, 0x00, STRINGBUFFER_LEN);
         int len = virtualSerial.readBytesUntil('\r', displayString, STRINGBUFFER_LEN);
         displayString[len] = 0x00;        // Null terminate
