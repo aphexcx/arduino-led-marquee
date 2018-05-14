@@ -1,7 +1,6 @@
 // Used to receive data on a virtual RX pin instead of the usual pin 0
 #include <SoftwareSerial.h>
 #include <Arduino.h>
-#include "../../../../../Applications/Arduino.app/Contents/Java/hardware/arduino/avr/cores/arduino/HardwareSerial.h"
 
 #define rxPin 10
 #define txPin 11
@@ -12,14 +11,16 @@ SoftwareSerial virtualSerial(rxPin, txPin); // RX, TX
 // give it a name:
 uint8_t diagnosticLed = 13;
 
-#define STRINGBUFFER_LEN 280      // The length of the buffer used to read a new string from the serial port
+#define STRINGBUFFER_LEN 512      // The length of the buffer used to read a new string from the serial port
 
 // Leave room for a safety null terminator at the end.
-char displayString[STRINGBUFFER_LEN + 1] = "Beware the Jabberwock, my son! "
-                                           "The jaws that bite, the claws that catch! "
-                                           "Beware the Jubjub bird, and shun "
-                                           "The frumious Bandersnatch! ";
+char bufferA[STRINGBUFFER_LEN + 1] = "Beware the Jabberwock, my son! "
+                                     "The jaws that bite, the claws that catch! "
+                                     "Beware the Jubjub bird, and shun "
+                                     "The frumious Bandersnatch! ";
+char bufferB[STRINGBUFFER_LEN + 1];
 
+char *currentBuffer = bufferA;
 
 // Change this to be at least as long as your pixel string (too long will work fine, just be a little slower)
 #define PIXELS 60*2  // Number of pixels in the string. I am using 4 meters of 96LED/M
@@ -40,9 +41,9 @@ char displayString[STRINGBUFFER_LEN + 1] = "Beware the Jabberwock, my son! "
 static const uint8_t onBits = 0b11111110;   // Bit pattern to write to port to turn on all pins connected to LED strips.
 // If you do not want to use all 8 pins, you can mask off the ones you don't want
 // Note that these will still get 0 written to them when we send pixels
-// TODO: If we have time, we could even add a variable that will and/or into the bits before writing to the port to support any combination of bits/values                                  
+// TODO: If we have time, we could even add a variable that will and/or into the bits before writing to the port to support any combination of bits/values
 
-// These are the timing constraints taken mostly from 
+// These are the timing constraints taken mostly from
 // imperically measuring the output from the Adafruit library strandtest program
 
 // Note that some of these defined values are for refernce only - the actual timing is determinted by the hard code.
@@ -51,7 +52,7 @@ static const uint8_t onBits = 0b11111110;   // Bit pattern to write to port to t
 #define T1L  438    // Width of a 1 bit in ns -  7 cycles
 
 #define T0H  312    // Width of a 0 bit in ns -  5 cycles
-#define T0L  936    // Width of a 0 bit in ns - 15 cycles 
+#define T0L  936    // Width of a 0 bit in ns - 15 cycles
 
 // Phase #1 - Always 1  - 5 cycles
 // Phase #2 - Data part - 8 cycles
@@ -71,8 +72,8 @@ static const uint8_t onBits = 0b11111110;   // Bit pattern to write to port to t
 
 
 // Sends a full 8 bits down all the pins, represening a single color of 1 pixel
-// We walk though the 8 bits in colorbyte one at a time. If the bit is 1 then we send the 8 bits of row out. Otherwise we send 0. 
-// We send onBits at the first phase of the signal generation. We could just send 0xff, but that mught enable pull-ups on pins that we are not using. 
+// We walk though the 8 bits in colorbyte one at a time. If the bit is 1 then we send the 8 bits of row out. Otherwise we send 0.
+// We send onBits at the first phase of the signal generation. We could just send 0xff, but that mught enable pull-ups on pins that we are not using.
 
 /// Unforntunately we have to drop to ASM for this so we can interleave the computaions durring the delays, otherwise things get too slow.
 
@@ -91,21 +92,21 @@ static inline void sendBitx8(const uint8_t row, const uint8_t colorbyte, const u
 
     // Next determine if we are going to be sending 1s or 0s based on the current bit in the color....
 
-    "mov r0, %[bitwalker] \n\t"                   // (1 cycles) 
+    "mov r0, %[bitwalker] \n\t"                   // (1 cycles)
     "and r0, %[colorbyte] \n\t"                   // (1 cycles)  - is the current bit in the color byte set?
     "breq OFF_%= \n\t"                            // (1 cycles) - bit in color is 0, then send full zero row (takes 2 cycles if branch taken, count the extra 1 on the target line)
 
     // If we get here, then we want to send a 1 for every row that has an ON dot...
-    "nop \n\t  "                                  // (1 cycles) 
+    "nop \n\t  "                                  // (1 cycles)
     "out %[port], %[row]   \n\t"                  // (1 cycles) - set the output bits to [row] This is phase for T0H-T1H.
     // ==========
     // (5 cycles) - T0H (Phase #1)
 
 
-    "nop \n\t nop \n\t "                          // (2 cycles) 
-    "nop \n\t nop \n\t "                          // (2 cycles) 
-    "nop \n\t nop \n\t "                          // (2 cycles) 
-    "nop \n\t "                                   // (1 cycles) 
+    "nop \n\t nop \n\t "                          // (2 cycles)
+    "nop \n\t nop \n\t "                          // (2 cycles)
+    "nop \n\t nop \n\t "                          // (2 cycles)
+    "nop \n\t "                                   // (1 cycles)
 
     "out %[port], __zero_reg__ \n\t"              // (1 cycles) - set the output bits to 0x00 based on the bit in colorbyte. This is phase for T0H-T1H
     // ==========
@@ -117,7 +118,7 @@ static inline void sendBitx8(const uint8_t row, const uint8_t colorbyte, const u
 
     "nop \n\t \n\t "                             // (1 cycles) - When added to the 5 cycles in S:, we gte the 7 cycles of T1L
 
-    "jmp L_%= \n\t"                              // (3 cycles) 
+    "jmp L_%= \n\t"                              // (3 cycles)
     // (1 cycles) - The OUT on the next pass of the loop
     // ==========
     // (7 cycles) - T1L
@@ -133,16 +134,16 @@ static inline void sendBitx8(const uint8_t row, const uint8_t colorbyte, const u
 
     "brcs DONE_%= \n\t"                          // (1 cycles) Exit if carry bit is set as a result of us walking all 8 bits. We assume that the process around us will tak long enough to cover the phase 3 delay
 
-    "nop \n\t nop \n\t "                          // (2 cycles) 
-    "nop \n\t nop \n\t "                          // (2 cycles) 
-    "nop \n\t nop \n\t "                          // (2 cycles)             
-    "nop \n\t nop \n\t "                          // (2 cycles)             
-    "nop \n\t "                                   // (1 cycles)             
+    "nop \n\t nop \n\t "                          // (2 cycles)
+    "nop \n\t nop \n\t "                          // (2 cycles)
+    "nop \n\t nop \n\t "                          // (2 cycles)
+    "nop \n\t nop \n\t "                          // (2 cycles)
+    "nop \n\t "                                   // (1 cycles)
 
-    "jmp L_%= \n\t"                               // (3 cycles) 
-    // (1 cycles) - The OUT on the next pass of the loop      
+    "jmp L_%= \n\t"                               // (3 cycles)
+    // (1 cycles) - The OUT on the next pass of the loop
     // ==========
-    //(15 cycles) - T0L 
+    //(15 cycles) - T0L
 
 
     "DONE_%=: \n\t"
@@ -173,7 +174,7 @@ void show() {
 
 
 // Send 3 bytes of color data (R,G,B) for a signle pixel down all the connected stringsat the same time
-// A 1 bit in "row" means send the color, a 0 bit means send black. 
+// A 1 bit in "row" means send the color, a 0 bit means send black.
 
 static inline void sendRowRGB(uint8_t row, uint8_t r, uint8_t g, uint8_t b) {
 
@@ -200,7 +201,7 @@ static inline void clear() {
 // http://sunge.awardspace.com/glcd-sd/node4.html
 
 // Font details:
-// 1) Each char is fixed 5x7 pixels. 
+// 1) Each char is fixed 5x7 pixels.
 // 2) Each byte is one column.
 // 3) Columns are left to right order, leftmost byte is leftmost column of pixels.
 // 4) Each column is 8 bits high.
@@ -318,7 +319,7 @@ const uint8_t Font5x7[] PROGMEM = {
 
 // TODO: Subtract the offset from the char before starting the send sequence to save time if nessisary
 // TODO: Also could pad the begining of the font table to aovid the offset subtraction at the cost of 20*8 bytes of progmem
-// TODO: Could pad all chars out to 8 bytes wide to turn the the multiply by FONT_WIDTH into a shift 
+// TODO: Could pad all chars out to 8 bytes wide to turn the the multiply by FONT_WIDTH into a shift
 
 static inline void sendChar(uint8_t c, uint8_t skip, uint8_t r, uint8_t g, uint8_t b) {
 
@@ -546,7 +547,7 @@ void setupSerial() {
     pinMode(txPin, OUTPUT);
     // set the data rate for the SoftwareSerial port
     virtualSerial.begin(19200);
-    Serial.begin(19200);
+//    Serial.begin(19200);
 }
 
 void setup() {
@@ -577,7 +578,7 @@ const uint8_t PROGMEM gamma[] = {
         177, 180, 182, 184, 186, 189, 191, 193, 196, 198, 200, 203, 205, 208, 210, 213,
         215, 218, 220, 223, 225, 228, 231, 233, 236, 239, 241, 244, 247, 249, 252, 255};
 
-// Map 0-255 visual brightness to 0-255 LED brightness 
+// Map 0-255 visual brightness to 0-255 LED brightness
 #define GAMMA(x) (pgm_read_byte(&gamma[x]))
 
 
@@ -680,7 +681,6 @@ void showstarfield() {
         }
 
 
-
         sei();
 
         // show(); // Not needed - random is alwasy slow enough to trigger a reset
@@ -764,7 +764,7 @@ void showinvaders() {
 
     for (int8_t row = -4; row < 6; row++) {     // Walk down the rows
 
-        //  Walk them 6 pixels per row 
+        //  Walk them 6 pixels per row
 
         // ALternate direction on each row
 
@@ -814,7 +814,7 @@ void showinvaders() {
 
         }
     }
-    // delay(200);            
+    // delay(200);
 
 }
 
@@ -836,13 +836,14 @@ void showallyourbase() {
 }
 
 
-#define JAB_MAX_BRIGHTNESS 0xff
+//#define JAB_MAX_BRIGHTNESS 0xff (255 (100%))
+#define JAB_MAX_BRIGHTNESS 0x7f //(127)
 #define JAB_MIN_BRIGHTNESS 0x00
 #define JAB_STEPS (JAB_MAX_BRIGHTNESS-JAB_MIN_BRIGHTNESS)
 
 void scroll() {
 
-    const char *m = displayString;
+    const char *m = currentBuffer;
 
     // Text foreground color cycle effect
     uint8_t sector = 0;
@@ -893,7 +894,7 @@ void scroll() {
 
             sei();
 
-            delay(25); // speed. higher = faster
+            delay(35); // speed. higher = faster
 
             PORTB |= 0x01;
             delay(1);
@@ -916,14 +917,25 @@ void getCustomData() {
 //    while (!virtualSerial.available()) {
 //        delay(500);
 //    }
-    delay(100); // wait for stuff to get written to the serial port (do I need to even do this or wait this long?)
+//    delay(100); // wait for stuff to get written to the serial port (do I need to even do this or wait this long?)
     if (virtualSerial.available()) {
         // orig comment: do i need to put the next lines inside a while (virtualSerial.available()){...} loop?
-
+        char *incomingBuffer;
+        if (currentBuffer == bufferA) {
+            incomingBuffer = bufferB;
+        } else {
+            incomingBuffer = bufferA;
+        }
         //Hmm do I need to do this each time or only if something valid was read?
-        memset(displayString, 0x00, STRINGBUFFER_LEN);
-        int len = virtualSerial.readBytesUntil('\r', displayString, STRINGBUFFER_LEN);
-        displayString[len] = 0x00;        // Null terminate
+//        memset(bufferA, 0x00, STRINGBUFFER_LEN);
+        int len = virtualSerial.readBytesUntil('\r', incomingBuffer, STRINGBUFFER_LEN);
+//        Serial.println(len);
+        incomingBuffer[len] = 0x00;        // Null terminate
+
+        // If we got something, swap currentBuffer to point to the incoming.
+        if (len > 0) {
+            currentBuffer = incomingBuffer;
+        }
     }
 }
 
@@ -937,21 +949,21 @@ void loop() {
     //showjabber();
 
 //    diagnosticBlink();
-    diagnosticLedOn();
-    getCustomData();
-    diagnosticLedOff();
-    delay(500);
-
-//    virtualSerial.print("vsHi");
-//    virtualSerial.flush();
-    Serial.println(displayString);
-    Serial.flush();
+//    diagnosticLedOn();
+////    getCustomData();
+//    diagnosticLedOff();
+//    delay(500);
+//
+////    virtualSerial.print("vsHi");
+////    virtualSerial.flush();
+//    Serial.println(currentBuffer);
+//    Serial.flush();
 
     scroll();
 
     // TODO: Actually sample the state of the pullup on unused pins and OR it into the mask so we maintain the state.
-    // Must do AFTER the cli(). 
-    // TODO: Add offBits also to maintain the pullup state of unused pins. 
+    // Must do AFTER the cli().
+    // TODO: Add offBits also to maintain the pullup state of unused pins.
 
     return;
 }
