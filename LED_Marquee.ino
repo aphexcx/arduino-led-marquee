@@ -218,7 +218,8 @@ static inline void clear() {
 #define INTERCHAR_SPACE 1
 #define ASCII_OFFSET 0x20    // ASSCI code of 1st char in font array
 
-const uint8_t Font5x7[] PROGMEM = {
+const uint8_t Font5x7[]
+        PROGMEM = {
         0x00, 0x00, 0x00, 0x00, 0x00,//
         0x00, 0x00, 0xfa, 0x00, 0x00,// !
         0x00, 0xe0, 0x00, 0xe0, 0x00,// "
@@ -367,7 +368,8 @@ static inline void sendString(const char *s, uint8_t skip, const uint8_t r, cons
 
 #define ALTFONT_WIDTH 8
 
-const uint8_t altfont[] PROGMEM = {
+const uint8_t altfont[]
+        PROGMEM = {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,//
         0x06, 0x06, 0x30, 0x30, 0x60, 0xc0, 0xc0, 0x00,// !
         0xe0, 0xe0, 0x00, 0xe0, 0xe0, 0x00, 0x00, 0x00,// "
@@ -543,6 +545,7 @@ void setupLeds() {
 void startSerial() {
     // set the data rate for the SoftwareSerial port
     virtualSerial.begin(19200);
+    virtualSerial.flush();
 //    Serial.begin(19200);
 }
 
@@ -557,6 +560,7 @@ void setupSerial() {
 }
 
 void setup() {
+    delay(1000); //Try to introduce a bit of a delay to clear out serial noise on boot
     setupSerial();
     setupDiagnosticLed();
     setupLeds();
@@ -565,7 +569,8 @@ void setup() {
 
 // https://learn.adafruit.com/led-tricks-gamma-correction/the-quick-fix
 
-const uint8_t PROGMEM gamma[] = {
+const uint8_t PROGMEM
+        gamma[] = {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1,
         1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2,
@@ -729,7 +734,6 @@ sendIcon(const uint8_t *fontbase, uint8_t which, int8_t shift, uint8_t width, ui
 
 const uint8_t enemies[]
 PROGMEM = {
-
         0x70, 0xf4, 0xfe, 0xda, 0xd8, 0xf4, 0xf4, 0xd8, 0xda, 0xfe, 0xf4, 0x70, // Enemy 1 - open
         0x72, 0xf2, 0xf4, 0xdc, 0xd8, 0xf4, 0xf4, 0xd8, 0xdc, 0xf4, 0xf2, 0x72, // Enemy 1 - close
         0x1c, 0x30, 0x7c, 0xda, 0x7a, 0x78, 0x7a, 0xda, 0x7c, 0x30, 0x1c, 0x00, // Enemy 2 - open
@@ -801,7 +805,7 @@ void showinvaders() {
             }
 
             for (uint8_t l = 0; l < acount; l++) {
-                sendIcon(enemies, p & 1, row, ENEMIES_WIDTH, 0xFF, 0xFF, 0xFF);
+                sendIcon(enemies, p & 1, row, ENEMIES_WIDTH, 0xE6, 0x00, 0x7E);
                 sendChar(' ', 0, 0x00, 0x00, 0x00); // No over crowding
             }
 
