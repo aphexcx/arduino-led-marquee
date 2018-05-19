@@ -11,13 +11,16 @@ SoftwareSerial virtualSerial(rxPin, txPin); // RX, TX
 // give it a name:
 uint8_t diagnosticLed = 13;
 
-#define STRINGBUFFER_LEN 512      // The length of the buffer used to read a new string from the serial port
+#define STRING_PADDING 12      // Pad this amount so that scrolling starts nicely off the end
+#define STRINGBUFFER_LEN 512 + STRING_PADDING // The length of the buffer used to read a new string from the serial port
+//TODO strcpy or strcat to ensure padding on received string
 
 // Leave room for a safety null terminator at the end.
-char bufferA[STRINGBUFFER_LEN + 1] = "Beware the Jabberwock, my son! "
-                                     "The jaws that bite, the claws that catch! "
-                                     "Beware the Jubjub bird, and shun "
-                                     "The frumious Bandersnatch! ";
+char bufferA[STRINGBUFFER_LEN + 1] = "            "
+                                     "Beware the Jabberwock, my son! ";
+//                                     "The jaws that bite, the claws that catch! "
+//                                     "Beware the Jubjub bird, and shun "
+//                                     "The frumious Bandersnatch! ";
 char bufferB[STRINGBUFFER_LEN + 1];
 
 char *currentBuffer = bufferA;
@@ -25,12 +28,12 @@ char *currentBuffer = bufferA;
 // Change this to be at least as long as your pixel string (too long will work fine, just be a little slower)
 #define PIXELS 60*2  // Number of pixels in the string. I am using 4 meters of 96LED/M
 
-// These values depend on which pins your 8 strings are connected to and what board you are using 
+// These values depend on which pins your 8 strings are connected to and what board you are using
 // More info on how to find these at http://www.arduino.cc/en/Reference/PortManipulation
 
 // PORTD controls Digital Pins 0-7 on the Uno
 
-// You'll need to look up the port/bit combination for other boards. 
+// You'll need to look up the port/bit combination for other boards.
 
 // Note that you could also include the DigitalWriteFast header file to not need to to this lookup.
 
@@ -477,15 +480,11 @@ void diagnosticLedOff() {
 
 void diagnosticBlink() {
     diagnosticLedOn();
-    delay(1000);
+    delay(500);
     diagnosticLedOff();
-    delay(300);
+    delay(500);
     diagnosticLedOn();
-    delay(1000);
-    diagnosticLedOff();
-    delay(300);
-    diagnosticLedOn();
-    delay(1000);
+    delay(500);
     diagnosticLedOff();
     delay(300);
 }
@@ -541,20 +540,26 @@ void setupLeds() {
 
 }
 
+void startSerial() {
+    // set the data rate for the SoftwareSerial port
+    virtualSerial.begin(19200);
+//    Serial.begin(19200);
+}
+
+void stopSerial() {
+    virtualSerial.end();
+}
+
 void setupSerial() {
     // define pin modes for tx, rx:
     pinMode(rxPin, INPUT);
     pinMode(txPin, OUTPUT);
-    // set the data rate for the SoftwareSerial port
-    virtualSerial.begin(19200);
-//    Serial.begin(19200);
 }
 
 void setup() {
     setupSerial();
     setupDiagnosticLed();
     setupLeds();
-
 }
 
 
@@ -720,14 +725,15 @@ sendIcon(const uint8_t *fontbase, uint8_t which, int8_t shift, uint8_t width, ui
 }
 
 
-#define ENIMIES_WIDTH 12
+#define ENEMIES_WIDTH 12
 
-const uint8_t enimies[] PROGMEM = {
+const uint8_t enemies[]
+PROGMEM = {
 
-        0x70, 0xf4, 0xfe, 0xda, 0xd8, 0xf4, 0xf4, 0xd8, 0xda, 0xfe, 0xf4, 0x70, // Enimie 1 - open
-        0x72, 0xf2, 0xf4, 0xdc, 0xd8, 0xf4, 0xf4, 0xd8, 0xdc, 0xf4, 0xf2, 0x72, // Enimie 1 - close
-        0x1c, 0x30, 0x7c, 0xda, 0x7a, 0x78, 0x7a, 0xda, 0x7c, 0x30, 0x1c, 0x00, // Enimie 2 - open
-        0xf0, 0x3a, 0x7c, 0xd8, 0x78, 0x78, 0x78, 0xd8, 0x7c, 0x3a, 0xf0, 0x00, // Enimie 2 - closed
+        0x70, 0xf4, 0xfe, 0xda, 0xd8, 0xf4, 0xf4, 0xd8, 0xda, 0xfe, 0xf4, 0x70, // Enemy 1 - open
+        0x72, 0xf2, 0xf4, 0xdc, 0xd8, 0xf4, 0xf4, 0xd8, 0xdc, 0xf4, 0xf2, 0x72, // Enemy 1 - close
+        0x1c, 0x30, 0x7c, 0xda, 0x7a, 0x78, 0x7a, 0xda, 0x7c, 0x30, 0x1c, 0x00, // Enemy 2 - open
+        0xf0, 0x3a, 0x7c, 0xd8, 0x78, 0x78, 0x78, 0xd8, 0x7c, 0x3a, 0xf0, 0x00, // Enemy 2 - closed
         0x92, 0x54, 0x10, 0x82, 0x44, 0x00, 0x00, 0x44, 0x82, 0x10, 0x54, 0x92, // Explosion
 };
 
@@ -741,7 +747,7 @@ void showinvaderwipe(uint8_t which, const char *pointsStr, uint8_t r, uint8_t g,
 
         cli();
         sendStringAlt("                ");
-        sendIcon(enimies, which, 0, ENIMIES_WIDTH, r, g, b);
+        sendIcon(enemies, which, 0, ENEMIES_WIDTH, r, g, b);
         for (uint8_t i = 0; i <= p; i++) {
             sendChar(*(pointsStr + i), 0, r >> 2, g >> 2, b >> 2);     // Dim text slightly
         }
@@ -751,16 +757,13 @@ void showinvaderwipe(uint8_t which, const char *pointsStr, uint8_t r, uint8_t g,
     }
 
     delay(1500);
-
-
 }
 
 void showinvaders() {
-
     showinvaderwipe(3, " = 20 POINTS", 0x80, 0x80, 0x80);
     showinvaderwipe(1, " = 10 POINTS", 0x00, 0xff, 0x00);
 
-    uint8_t acount = PIXELS / (ENIMIES_WIDTH + FONT_WIDTH);      // How many aliens do we have room for?
+    uint8_t acount = PIXELS / (ENEMIES_WIDTH + FONT_WIDTH);      // How many aliens do we have room for?
 
     for (int8_t row = -4; row < 6; row++) {     // Walk down the rows
 
@@ -781,21 +784,15 @@ void showinvaders() {
             s = 7;
             e = 0;
             d = -1;
-
         }
 
-
         for (char p = s; p != e; p += d) {
-
             // Now slowly move aliens
-
-            // work our way though the alines moving each one to the left
-
+            // work our way though the aliens moving each one to the left
 
             cli();
 
             // Start with margin
-
             uint8_t margin = p;
 
             while (margin--) {
@@ -803,19 +800,16 @@ void showinvaders() {
             }
 
             for (uint8_t l = 0; l < acount; l++) {
-
-                sendIcon(enimies, p & 1, row, ENIMIES_WIDTH, 0xFF, 0xFF, 0xFF);
+                sendIcon(enemies, p & 1, row, ENEMIES_WIDTH, 0xFF, 0xFF, 0xFF);
                 sendChar(' ', 0, 0x00, 0x00, 0x00); // No over crowding
-
             }
 
             sei();
-            delay(70);
 
+            delay(70);
         }
     }
     // delay(200);
-
 }
 
 
@@ -836,8 +830,8 @@ void showallyourbase() {
 }
 
 
-//#define JAB_MAX_BRIGHTNESS 0xff (255 (100%))
-#define JAB_MAX_BRIGHTNESS 0x7f //(127)
+#define JAB_MAX_BRIGHTNESS 0xff //(255 (100%))
+//#define JAB_MAX_BRIGHTNESS 0x7f //(127)
 #define JAB_MIN_BRIGHTNESS 0x00
 #define JAB_STEPS (JAB_MAX_BRIGHTNESS-JAB_MIN_BRIGHTNESS)
 
@@ -910,33 +904,35 @@ void scroll() {
 
 
 // Notifies the IMX that we're ready to retrieve custom message data
-void getCustomData() {
+int getCustomData() {
+    startSerial();
+    delay(200);
     // send special symbol so IMX knows to respond with custom message data
     virtualSerial.print("~");
-//     loop until its available
-//    while (!virtualSerial.available()) {
-//        delay(500);
-//    }
-//    delay(100); // wait for stuff to get written to the serial port (do I need to even do this or wait this long?)
-    if (virtualSerial.available()) {
-        // orig comment: do i need to put the next lines inside a while (virtualSerial.available()){...} loop?
-        char *incomingBuffer;
-        if (currentBuffer == bufferA) {
-            incomingBuffer = bufferB;
-        } else {
-            incomingBuffer = bufferA;
-        }
-        //Hmm do I need to do this each time or only if something valid was read?
-//        memset(bufferA, 0x00, STRINGBUFFER_LEN);
-        int len = virtualSerial.readBytesUntil('\r', incomingBuffer, STRINGBUFFER_LEN);
-//        Serial.println(len);
-        incomingBuffer[len] = 0x00;        // Null terminate
-
-        // If we got something, swap currentBuffer to point to the incoming.
-        if (len > 0) {
-            currentBuffer = incomingBuffer;
-        }
+//    delay(1000); // wait for stuff to get written to the serial port (do I need to even do this or wait this long?)
+    char *incomingBuffer;
+    if (currentBuffer == bufferA) {
+        incomingBuffer = bufferB;
+    } else {
+        incomingBuffer = bufferA;
     }
+    //Hmm do I need to do this each time or only if something valid was read?
+//        memset(bufferA, 0x00, STRINGBUFFER_LEN);
+    int len = virtualSerial.readBytesUntil('\r', incomingBuffer, STRINGBUFFER_LEN);
+
+    incomingBuffer[len] = 0x00; // Null terminate
+
+    // If we got something, swap currentBuffer to point to the incoming.
+    if (len > 0) {
+        currentBuffer = incomingBuffer;
+        diagnosticBlink();
+    }
+
+    virtualSerial.print("c: ");
+    virtualSerial.print(currentBuffer);
+    stopSerial();
+
+    return len;
 }
 
 
@@ -945,14 +941,15 @@ void loop() {
     //showcountdown();
     //showallyourbase();
     //showstarfield();
-    //showinvaders();
     //showjabber();
 
 //    diagnosticBlink();
-//    diagnosticLedOn();
-////    getCustomData();
-//    diagnosticLedOff();
-//    delay(500);
+    diagnosticLedOn();
+    if (getCustomData() > 0) {
+        showinvaders();
+    }
+    delay(500);
+    diagnosticLedOff();
 //
 ////    virtualSerial.print("vsHi");
 ////    virtualSerial.flush();
