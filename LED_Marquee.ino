@@ -760,8 +760,9 @@ void showinvaderwipe(uint8_t which, const char *pointsStr, uint8_t r, uint8_t g,
 }
 
 void showinvaders() {
-    showinvaderwipe(3, " = 20 POINTS", 0x80, 0x80, 0x80);
-    showinvaderwipe(1, " = 10 POINTS", 0x00, 0xff, 0x00);
+    clear();
+//    showinvaderwipe(3, " = 20 POINTS", 0x80, 0x80, 0x80);
+//    showinvaderwipe(1, " = 10 POINTS", 0x00, 0xff, 0x00);
 
     uint8_t acount = PIXELS / (ENEMIES_WIDTH + FONT_WIDTH);      // How many aliens do we have room for?
 
@@ -948,7 +949,6 @@ void loop() {
     if (getCustomData() > 0) {
         showinvaders();
     }
-    delay(500);
     diagnosticLedOff();
 //
 ////    virtualSerial.print("vsHi");
