@@ -559,14 +559,6 @@ void setupSerial() {
     pinMode(txPin, OUTPUT);
 }
 
-void setup() {
-    delay(1000); //Try to introduce a bit of a delay to clear out serial noise on boot
-    setupSerial();
-    setupDiagnosticLed();
-    setupLeds();
-}
-
-
 // https://learn.adafruit.com/led-tricks-gamma-correction/the-quick-fix
 
 const uint8_t PROGMEM
@@ -596,7 +588,7 @@ void showcountdown() {
 
     // Start sequence.....
 
-    const char *countdownstr = "            FIRE ROLLERBALL IN ";
+    const char *countdownstr = "NEW MSG IN  ";
 
     unsigned int count = 600;
 
@@ -616,7 +608,7 @@ void showcountdown() {
         uint8_t brightness = GAMMA(((count % 100) * 256) / 100);
 
         cli();
-        sendString(countdownstr, 1, brightness, brightness, brightness);
+        sendString(countdownstr, 0, brightness, brightness, brightness);
 
         sendRowRGB(0x00, 0, 0, 0xff);
 
@@ -940,6 +932,17 @@ int getCustomData() {
     return len;
 }
 
+void setup() {
+    delay(100); //Try to introduce a bit of a delay to clear out serial noise on boot
+    setupDiagnosticLed();
+    setupLeds();
+
+    showcountdown();
+
+    showstarfield();
+
+    setupSerial();
+}
 
 void loop() {
 
@@ -951,6 +954,7 @@ void loop() {
 //    diagnosticBlink();
     diagnosticLedOn();
     if (getCustomData() > 0) {
+        showcountdown();
         showinvaders();
     }
     diagnosticLedOff();
