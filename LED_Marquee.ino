@@ -12,7 +12,7 @@ SoftwareSerial virtualSerial(rxPin, txPin); // RX, TX
 #define diagnosticLed 13
 
 //Speed of invader sequence, lower is faster
-#define INVADER_DELAY 50
+#define INVADER_DELAY 40
 //Speed of scrolling text marquee, lower is faster
 #define MARQUEE_DELAY 28
 
@@ -656,7 +656,7 @@ void showcountdown() {
         uint8_t brightness = GAMMA(((count % 100) * 256) / 100);
 
         cli();
-        sendString(countdownstr, 1, brightness, brightness, brightness);
+        sendString(countdownstr, 0, brightness, brightness, brightness);
 
         sendRowRGB(0x00, 0, 0, 0xff);   // We need to quickly send a blank byte just to keep from missing our deadlne.
         sendChar('0', 0, brightness, 0, 0);
@@ -773,7 +773,7 @@ void showinvaderwipe(uint8_t which, const char *pointsStr, uint8_t r, uint8_t g,
 
     }
 
-    delay(1500);
+    delay(300);
 }
 
 void showinvaders() {
@@ -783,7 +783,7 @@ void showinvaders() {
 
     uint8_t acount = PIXELS / (ENEMIES_WIDTH + FONT_WIDTH);      // How many aliens do we have room for?
 
-    for (int8_t row = -4; row < 6; row++) {     // Walk down the rows
+    for (int8_t row = -7; row < 7; row++) {     // Walk down the rows
 
         //  Walk them 6 pixels per row
 
