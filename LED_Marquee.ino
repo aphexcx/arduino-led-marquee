@@ -9,15 +9,34 @@ SoftwareSerial virtualSerial(rxPin, txPin); // RX, TX
 
 // Pin 13 has an LED connected on most Arduino boards.
 // give it a name:
-uint8_t diagnosticLed = 13;
+#define diagnosticLed 13
+
+//Speed of invader sequence, lower is faster
+#define INVADER_DELAY 70
+//Speed of scrolling text marquee, lower is faster
+#define MARQUEE_DELAY 30
+
 
 #define STRING_PADDING 12      // Pad this amount so that scrolling starts nicely off the end
-#define STRINGBUFFER_LEN 512 + STRING_PADDING // The length of the buffer used to read a new string from the serial port
+#define STRINGBUFFER_LEN 600 + STRING_PADDING // The length of the buffer used to read a new string from the serial port
 //TODO strcpy or strcat to ensure padding on received string
 
 // Leave room for a safety null terminator at the end.
 char bufferA[STRINGBUFFER_LEN + 1] = "            "
-                                     "Beware the Jabberwock, my son! ";
+                                     "I had a dream last night... A vision. I saw a world full of people. "
+                                     "Everybody was dancing! And screaming loud! They were just there to listen to "
+                                     "the music. Some even had their eyes closed. "
+                                     "Everybody was just smiling. "
+                                     "It was deep. "
+                                     "It was underground. "
+                                     "Celebrating music! "
+                                     "Celebrating life! "
+                                     "Men and women - free - without a worry! "
+                                     "Then, when I woke up, I realized: "
+                                     "I WANNA BE IN THAT MOMENT! "
+                                     "The very essence of my existence is looking for that emotion! "
+                                     "And when the weekend comes...   "
+                                     "I  L I V E  F O R  T H A T  E N E R G Y . ";
 //                                     "The jaws that bite, the claws that catch! "
 //                                     "Beware the Jubjub bird, and shun "
 //                                     "The frumious Bandersnatch! ";
@@ -471,6 +490,9 @@ const uint8_t altfont[]
 // Keep track of where we are in the color cycle between chars
 static uint8_t altbright = 0;
 
+int loopcount = 0;
+boolean isLoopCountEven = true;
+
 void diagnosticLedOn() {
     digitalWrite(diagnosticLed, HIGH);   // turn the LED on (HIGH is the voltage level)
 }
@@ -588,7 +610,7 @@ void showcountdown() {
 
     // Start sequence.....
 
-    const char *countdownstr = "NEW MSG IN  ";
+    const char *countdownstr = "NEW MSG IN   ";
 
     unsigned int count = 600;
 
@@ -803,7 +825,7 @@ void showinvaders() {
 
             sei();
 
-            delay(70);
+            delay(INVADER_DELAY);
         }
     }
     // delay(200);
@@ -852,8 +874,8 @@ void scroll() {
             step++;
         }
 
-        uint8_t rampup = JAB_MIN_BRIGHTNESS + step;
-        uint8_t rampdown = JAB_MIN_BRIGHTNESS + (JAB_STEPS - step);
+        uint8_t rampup = GAMMA(JAB_MIN_BRIGHTNESS + step);
+        uint8_t rampdown = GAMMA(JAB_MIN_BRIGHTNESS + (JAB_STEPS - step));
 
         uint8_t r, g, b;
 
@@ -885,7 +907,7 @@ void scroll() {
 
             sei();
 
-            delay(35); // speed. higher = faster
+            delay(MARQUEE_DELAY); // speed. higher = faster
 
             PORTB |= 0x01;
             delay(1);
@@ -942,6 +964,8 @@ void setup() {
     showstarfield();
 
     setupSerial();
+    loopcount = 0;
+    isLoopCountEven = true;
 }
 
 void loop() {
@@ -955,7 +979,11 @@ void loop() {
     diagnosticLedOn();
     if (getCustomData() > 0) {
         showcountdown();
-        showinvaders();
+        showstarfield();
+    } else {
+        if (isLoopCountEven) {
+            showinvaders();
+        }
     }
     diagnosticLedOff();
 //
@@ -970,6 +998,7 @@ void loop() {
     // Must do AFTER the cli().
     // TODO: Add offBits also to maintain the pullup state of unused pins.
 
+    isLoopCountEven = !isLoopCountEven;
     return;
 }
 
