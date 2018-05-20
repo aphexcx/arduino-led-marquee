@@ -37,6 +37,7 @@ char bufferA[STRINGBUFFER_LEN + 1] = "            "
                                      "The very essence of my existence is looking for that emotion! "
                                      "And when the weekend comes...   "
                                      "I  L I V E  F O R  T H A T  E N E R G Y . ";
+
 //                                     "The jaws that bite, the claws that catch! "
 //                                     "Beware the Jubjub bird, and shun "
 //                                     "The frumious Bandersnatch! ";
@@ -773,12 +774,12 @@ void showinvaderwipe(uint8_t which, const char *pointsStr, uint8_t r, uint8_t g,
 
     }
 
-    delay(300);
+    delay(1000);
 }
 
 void showinvaders() {
     clear();
-    showinvaderwipe(3, " MSG ME!!! MSG ME!!! ", 0x80, 0x80, 0x80);
+    showinvaderwipe(3, " MSG ME!!! MSG ME!!! ", 0xE6, 0x00, 0x7E);
 //    showinvaderwipe(1, " = 10 POINTS", 0x00, 0xff, 0x00);
 
     uint8_t acount = PIXELS / (ENEMIES_WIDTH + FONT_WIDTH);      // How many aliens do we have room for?
