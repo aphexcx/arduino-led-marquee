@@ -26,6 +26,10 @@ SoftwareSerial virtualSerial(rxPin, txPin); // RX, TX
 
 // The char indicating we should show a new message alert (currently BEL, \x07)
 #define BEL '\x07'
+// The char indicating we should show this string in the new message alert style (currently SOH, \x01)
+#define SOH '\x01'
+// The char indicating we should stop showing this string in the new message alert style (currently EOT, \x04)
+#define EOT '\x04'
 
 // Pad this amount so that scrolling starts nicely off the end
 #define STRING_PADDING 20
@@ -60,6 +64,9 @@ char bufferA[STRINGBUFFER_LEN + 1] = "                    "
 char bufferB[STRINGBUFFER_LEN + 1] = "                     "; //note extra +1 char here (out of a abundance of caution)
 
 char *currentBuffer = bufferA;
+
+// The bool indicating we should show this string in the new message alert style
+bool showInAlertStyle = false;
 
 // Change this to be at least as long as your pixel string (too long will work fine, just be a little slower)
 #define PIXELS 60*2  // Number of pixels in the string. I am using 4 meters of 96LED/M
@@ -622,6 +629,75 @@ gamma[] = {
 // Map 0-255 visual brightness to 0-255 LED brightness
 #define GAMMA(x) (pgm_read_byte(&gamma[x]))
 
+void showAsAlert(char *str, char *countString) {
+
+    str = str + STRING_PADDING; // drop initial padding
+    int maxStrLen = 10; // max number of chars to show //TODO or, could scroll the whole thing
+    str[maxStrLen] = 0x00; //chop here
+
+    unsigned int count = 358;
+
+    clear();
+    while (count > 0) {
+
+        count--;
+
+        uint digit1 = count / 100;
+        uint digit2 = (count - (digit1 * 100)) / 10;
+        uint digit3 = (count - (digit1 * 100) - (digit2 * 10));
+
+        uint char1 = digit1 + '0';
+        uint char2 = digit2 + '0';
+        uint char3 = digit3 + '0';
+
+        uint brightness = GAMMA(((count % 100) * 256) / 100);
+
+        cli();
+        sendString(str, 0, brightness, brightness, brightness);
+
+        sendRowRGB(0x00, 0, 0, 0xff);
+
+        //  sendChar( '0' , 0 , 0x80, 0 , 0 );
+
+        char *curCountChar = countString;
+//        while (curCountChar != 0x00) {
+//            sendChar(*curCountChar, 0, 0x80, 0, 0);
+//            curCountChar++;
+//        }
+        sendChar(char1, 0, 0x80, 0, 0);
+        sendChar('.', 0, 0x80, 0, 0);
+        sendChar(char2, 0, 0x80, 0, 0);
+        sendChar(char3, 0, 0x80, 0, 0);
+
+        sei();
+        show();
+    }
+
+//    count = 100;
+//
+//    // One last farewell blink
+//
+//    while (count > 0) {
+//
+//        count--;
+//
+//
+//        uint brightness = GAMMA(((count % 100) * 256) / 100);
+//
+//        cli();
+//        sendString(str, 0, brightness, brightness, brightness);
+//
+//        sendRowRGB(0x00, 0, 0, 0xff);   // We need to quickly send a blank byte just to keep from missing our deadlne.
+//        sendChar('0', 0, brightness, 0, 0);
+//        sendChar('.', 0, brightness, 0, 0);
+//        sendChar('0', 0, brightness, 0, 0);
+//        sendChar('0', 0, brightness, 0, 0);
+//
+//
+//        sei();
+//        show();
+//    }
+}
 
 void showcountdown() {
 
@@ -961,6 +1037,7 @@ bool getCustomData() {
     incomingBuffer[STRING_PADDING + len] = 0x00; // Null terminate
 
     bool showAlert = false;
+    showInAlertStyle = false;
     // If we got something, swap currentBuffer to point to the incoming.
     if (len > 0) {
         currentBuffer = incomingBuffer;
@@ -968,6 +1045,9 @@ bool getCustomData() {
         if (currentBuffer[STRING_PADDING] == BEL) {
             showAlert = true;
             currentBuffer[STRING_PADDING] = ' '; // Overwrite the BEL char with a space
+        } else if (currentBuffer[STRING_PADDING] == SOH) {
+            showInAlertStyle = true;
+            currentBuffer[STRING_PADDING] = ' '; // Overwrite the SOH char with a space
         }
         diagnosticBlink();
     }
@@ -1006,9 +1086,11 @@ void loop() {
         showcountdown();
         showstarfield();
     } else {
-        if (loopcount % ADVERTISE_EVERY == 0) {
-            showMsgMeAd();
-            showInvaders();
+        if (!showInAlertStyle) { //dont advertise when in chooser mode
+            if (loopcount % ADVERTISE_EVERY == 0) {
+                showMsgMeAd();
+                showInvaders();
+            }
         }
     }
     diagnosticLedOff();
@@ -1017,8 +1099,13 @@ void loop() {
 ////    virtualSerial.flush();
 //    Serial.println(currentBuffer);
 //    Serial.flush();
-
-    marquee();
+//    showInAlertStyle = true;
+    if (showInAlertStyle) {
+        showAsAlert(currentBuffer, "9/42");
+    } else {
+        // regular marquee
+        marquee();
+    }
 
     // TODO: Actually sample the state of the pullup on unused pins and OR it into the mask so we maintain the state.
     // Must do AFTER the cli().
