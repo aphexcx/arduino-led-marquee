@@ -2,23 +2,43 @@
 
 #define uint8_t uint
 
-// Used to receive data on a virtual RX pin instead of the usual pin 0
-#include <SoftwareSerial.h>
 #include <Arduino.h>
-
-
-#define rxPin 10
-#define txPin 11
-
-SoftwareSerial virtualSerial(rxPin, txPin); // RX, TX
 
 // Pin 13 has an LED connected on most Arduino boards.
 // give it a name:
 #define diagnosticLed 13
 
+void diagnosticLedOn() {
+    digitalWrite(diagnosticLed, HIGH);   // turn the LED on (HIGH is the voltage level)
+}
+
+void diagnosticLedOff() {
+    digitalWrite(diagnosticLed, LOW);   // turn the LED on (HIGH is the voltage level)
+}
+
+volatile boolean beat = false;
+// http://www.gammon.com.au/interrupts
+ISR (PCINT1_vect) {
+    // handle pin change interrupt for A0 to A5 here
+    if (PINC & bit (0)) {  // if it was high
+        beat = true;
+        diagnosticLedOn();
+    } else {
+        beat = false;
+        diagnosticLedOff();
+    }
+}
+
+// Used to receive data on a virtual RX pin instead of the usual pin 0
+#include <SoftwareSerial.h>
+
+#define rxPin 10
+#define txPin 11
+SoftwareSerial virtualSerial(rxPin, txPin); // RX, TX
+
+
 //How often to advertise "MSG ME!!!", e.g. every 5 marquee scrolls
 #define ADVERTISE_EVERY 8
-
 //Speed of invader sequence, lower is faster
 #define INVADER_DELAY 40
 //Speed of scrolling text marquee, lower is faster
@@ -128,7 +148,6 @@ static const uint onBits = 0b11111110;   // Bit pattern to write to port to turn
 // OnBits is the mask of which bits are connected to strips. We pass it on so that we
 // do not turn on unused pins becuase this would enable the pullup. Also, hopefully passing this
 // will cause the compiler to allocate a Register for it and avoid a reload every pass.
-
 static inline void sendBitx8(const uint row, const uint colorbyte, const uint onBits) {
 
     asm volatile (
@@ -214,16 +233,14 @@ static inline void sendBitx8(const uint row, const uint colorbyte, const uint on
 
 
 // Just wait long enough without sending any bits to cause the pixels to latch and display the last sent frame
-
 void show() {
     delayMicroseconds((RES / 1000UL) +
-                              1);       // Round up since the delay must be _at_least_ this long (too short might not work, too long not a problem)
+                      1);       // Round up since the delay must be _at_least_ this long (too short might not work, too long not a problem)
 }
 
 
 // Send 3 bytes of color data (R,G,B) for a signle pixel down all the connected stringsat the same time
 // A 1 bit in "row" means send the color, a 0 bit means send black.
-
 static inline void sendRowRGB(uint row, uint r, uint g, uint b) {
 
     sendBitx8(row, g, onBits);    // WS2812 takes colors in GRB order
@@ -233,7 +250,6 @@ static inline void sendRowRGB(uint row, uint r, uint g, uint b) {
 }
 
 // Turn off all pixels
-
 static inline void clear() {
 
     cli();
@@ -265,7 +281,7 @@ static inline void clear() {
 #define ASCII_OFFSET 0x20    // ASSCI code of 1st char in font array
 
 const uint Font5x7[]
-PROGMEM = {
+        PROGMEM = {
                 0x00, 0x00, 0x00, 0x00, 0x00,//
                 0x00, 0x00, 0xfa, 0x00, 0x00,// !
                 0x00, 0xe0, 0x00, 0xe0, 0x00,// "
@@ -362,7 +378,7 @@ PROGMEM = {
                 0x00, 0x82, 0x6c, 0x10, 0x00,// }
                 0x10, 0x10, 0x54, 0x38, 0x10,// ~
                 0x10, 0x38, 0x54, 0x10, 0x10,// 
-};
+        };
 
 // Send the pixels to form the specified char, not including interchar space
 // skip is the number of pixels to skip at the begining to enable sub-char smooth scrolling
@@ -394,7 +410,6 @@ static inline void sendChar(uint c, uint skip, uint r, uint g, uint b) {
 
 // Show the passed string. The last letter of the string will be in the rightmost pixels of the display.
 // Skip is how many cols of the 1st char to skip for smooth scrolling
-
 static inline void sendString(const char *s, uint skip, const uint r, const uint g, const uint b) {
 
     unsigned int l = PIXELS / (FONT_WIDTH + INTERCHAR_SPACE);
@@ -414,7 +429,7 @@ static inline void sendString(const char *s, uint skip, const uint r, const uint
 #define ALTFONT_WIDTH 8
 
 const uint altfont[]
-PROGMEM = {
+        PROGMEM = {
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,//
                 0x06, 0x06, 0x30, 0x30, 0x60, 0xc0, 0xc0, 0x00,// !
                 0xe0, 0xe0, 0x00, 0xe0, 0xe0, 0x00, 0x00, 0x00,// "
@@ -510,22 +525,13 @@ PROGMEM = {
                 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,// |
                 0x00, 0xfe, 0xfe, 0x38, 0x00, 0x00, 0x00, 0x00,// }
                 0x00, 0xfe, 0x02, 0xfe, 0x00, 0x00, 0x00, 0x00,// ~
-};
+        };
 
 
 // Keep track of where we are in the color cycle between chars
 static uint altbright = 0;
 
 int loopcount = 0;
-
-void diagnosticLedOn() {
-    digitalWrite(diagnosticLed, HIGH);   // turn the LED on (HIGH is the voltage level)
-}
-
-
-void diagnosticLedOff() {
-    digitalWrite(diagnosticLed, LOW);   // turn the LED on (HIGH is the voltage level)
-}
 
 void diagnosticBlink() {
     if (DEBUG) {
@@ -611,7 +617,7 @@ void setupSerial() {
 // https://learn.adafruit.com/led-tricks-gamma-correction/the-quick-fix
 
 const uint PROGMEM
-gamma[] = {
+        gamma[] = {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1,
         1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2,
@@ -847,13 +853,13 @@ sendIcon(const uint *fontbase, uint which, int8_t shift, uint width, uint r, uin
 #define ENEMIES_WIDTH 12
 
 const uint enemies[]
-PROGMEM = {
+        PROGMEM = {
                 0x70, 0xf4, 0xfe, 0xda, 0xd8, 0xf4, 0xf4, 0xd8, 0xda, 0xfe, 0xf4, 0x70, // Enemy 1 - open
                 0x72, 0xf2, 0xf4, 0xdc, 0xd8, 0xf4, 0xf4, 0xd8, 0xdc, 0xf4, 0xf2, 0x72, // Enemy 1 - close
                 0x1c, 0x30, 0x7c, 0xda, 0x7a, 0x78, 0x7a, 0xda, 0x7c, 0x30, 0x1c, 0x00, // Enemy 2 - open
                 0xf0, 0x3a, 0x7c, 0xd8, 0x78, 0x78, 0x78, 0xd8, 0x7c, 0x3a, 0xf0, 0x00, // Enemy 2 - closed
                 0x92, 0x54, 0x10, 0x82, 0x44, 0x00, 0x00, 0x44, 0x82, 0x10, 0x54, 0x92, // Explosion
-};
+        };
 
 void showCharsOneByOneAndWait(const char *pointsStr, uint r, uint g, uint b, int delayMs) {
     clear();
@@ -903,22 +909,19 @@ void showInvaders() {
 
         // ALternate direction on each row
 
-        uint s, e, d;
+        uint start, end, step;
 
         if (row & 1) {
-
-            s = 1;
-            e = 8;
-            d = 1;
-
+            start = 1;
+            end = 8;
+            step = 1;
         } else {
-
-            s = 7;
-            e = 0;
-            d = -1;
+            start = 7;
+            end = 0;
+            step = -1;
         }
 
-        for (char p = s; p != e; p += d) {
+        for (char p = start; p != end; p += step) {
             // Now slowly move aliens
             // work our way though the aliens moving each one to the left
 
@@ -968,6 +971,43 @@ void showallyourbasestyle(char *str) {
 #define JAB_MIN_BRIGHTNESS 0x00
 #define JAB_STEPS (JAB_MAX_BRIGHTNESS-JAB_MIN_BRIGHTNESS)
 
+
+////lines below are for the microphone sampling from Adafruit autogain mic
+//
+//const int sampleWindow = MARQUEE_DELAY; // Sample window width in mS (50 mS = 20Hz)
+//unsigned int sample;
+//const double VOLTAGE = 5.0;
+//
+//double sampleSound() {
+//    //first run the sound sampling
+//    unsigned long startMillis = millis(); // Start of sample window
+//    unsigned int peakToPeak = 0;   // peak-to-peak level
+//
+//    unsigned int signalMax = 0;
+//    unsigned int signalMin = 1024;
+//
+//    // collect data for 50 mS
+//    while (millis() - startMillis < sampleWindow) {
+//        //open while loop
+//        sample = analogRead(0);
+//        if (sample < 1024)  // toss out spurious readings
+//        {
+//            //open 1st if loop in while
+//            if (sample > signalMax) {
+//                //open 2nd if
+//                signalMax = sample;  // save just the max levels
+//            }//close 2nd if
+//            else if (sample < signalMin) {
+//                //open 3rd if
+//                signalMin = sample;  // save just the min levels
+//            }//close 3rd if
+//        }//close 1st if
+//    }//close while loop
+//    peakToPeak = signalMax - signalMin;  // max - min = peak-peak amplitude
+//    double volts = (peakToPeak * VOLTAGE) / 1024;  // convert to volts
+//    return volts;
+//}
+
 void marquee() {
 
     const char *m = currentBuffer;
@@ -1015,13 +1055,44 @@ void marquee() {
         for (uint step = 0; step < FONT_WIDTH +
                                    INTERCHAR_SPACE; step++) {   // step though each column of the 1st char for smooth scrolling
 
+            if (beat) { //Flash on beats
+                r = JAB_MAX_BRIGHTNESS;
+                g = JAB_MAX_BRIGHTNESS;
+                b = JAB_MAX_BRIGHTNESS;
+            }
+
             cli();
 
             sendString(m, step, r, g, b);
 
             sei();
 
-            delay(MARQUEE_DELAY); // speed. higher = faster
+//            Serial.begin(19200);
+//            Serial.flush();
+//
+////            delay(MARQUEE_DELAY); // speed. higher = slower
+//
+//            double volts = sampleSound();
+//            int sound = (volts * 10);
+//
+//            int soundLevel = map(sound, 1, 10, 0, 9);
+//
+//            //if loud sound:
+//            if (soundLevel > 1) {
+//                sector++;
+//                if (sector == 3) {
+//                    sector = 0;
+//                }
+//            }
+//            if (beat) {
+//                sector++;
+//                if (sector == 3) {
+//                    sector = 0;
+//                }
+//            }
+
+            delay(MARQUEE_DELAY); // speed. higher = slower
+
 
             PORTB |= 0x01;
             delay(1);
@@ -1091,6 +1162,13 @@ void setup() {
     showstarfield();
 
     setupSerial();
+
+    // A0 pin change interrupt
+    digitalWrite(A0, HIGH);  // enable pull-up
+    PCMSK1 |= bit (PCINT8);  // want pin A0
+    PCIFR |= bit (PCIF1);   // clear any outstanding interrupts
+    PCICR |= bit (PCIE1);   // enable pin change interrupts for A0 to A5
+
     loopcount = 0;
 }
 
