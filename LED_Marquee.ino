@@ -1036,23 +1036,23 @@ void marquee() {
         uint rampup = GAMMA(JAB_MIN_BRIGHTNESS + step);
         uint rampdown = GAMMA(JAB_MIN_BRIGHTNESS + (JAB_STEPS - step));
 
-        uint r, g, b;
+        uint r0, g0, b0, r, g, b;
 
         switch (sector) {
             case 0:
-                r = rampup;
-                g = rampdown;
-                b = JAB_MIN_BRIGHTNESS;
+                r0 = rampup;
+                g0 = rampdown;
+                b0 = JAB_MIN_BRIGHTNESS;
                 break;
             case 1:
-                r = rampdown;
-                g = JAB_MIN_BRIGHTNESS;
-                b = rampup;
+                r0 = rampdown;
+                g0 = JAB_MIN_BRIGHTNESS;
+                b0 = rampup;
                 break;
             case 2:
-                r = JAB_MIN_BRIGHTNESS;
-                g = rampup;
-                b = rampdown;
+                r0 = JAB_MIN_BRIGHTNESS;
+                g0 = rampup;
+                b0 = rampdown;
                 break;
 
         };
@@ -1061,9 +1061,13 @@ void marquee() {
                                    INTERCHAR_SPACE; step++) {   // step though each column of the 1st char for smooth scrolling
 
             if (beat > 0.0f) { //Flash on beats
-                r = (uint)(beat * (float)JAB_MAX_BRIGHTNESS + (1.0f - beat) * (float)r);
-                g = (uint)(beat * (float)JAB_MAX_BRIGHTNESS + (1.0f - beat) * (float)g);
-                b = (uint)(beat * (float)JAB_MAX_BRIGHTNESS + (1.0f - beat) * (float)b);
+                r = (uint)(beat * (float)JAB_MAX_BRIGHTNESS + (1.0f - beat) * (float)r0);
+                g = (uint)(beat * (float)JAB_MAX_BRIGHTNESS + (1.0f - beat) * (float)g0);
+                b = (uint)(beat * (float)JAB_MAX_BRIGHTNESS + (1.0f - beat) * (float)b0);
+            } else {
+                r = r0;
+                g = g0;
+                b = b0;
             }
 
             cli();
