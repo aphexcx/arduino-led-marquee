@@ -16,15 +16,20 @@ void diagnosticLedOff() {
     digitalWrite(diagnosticLed, LOW);   // turn the LED on (HIGH is the voltage level)
 }
 
-volatile boolean beat = false;
+volatile float beat = 0.0f;
+volatile unsigned long timeOfLastBeat = 0u;
+#define FADE_MILLIS = 200u; // number of ms beat flash takes to fade out
+
 // http://www.gammon.com.au/interrupts
 ISR (PCINT1_vect) {
     // handle pin change interrupt for A0 to A5 here
     if (PINC & bit (0)) {  // if it was high
-        beat = true;
+        beat = 1.0f;
+        timeOfLastBeat = millis();
         diagnosticLedOn();
     } else {
-        beat = false;
+        unsigned long delta = millis() - timeOfLastBeat;
+        beat = constrain((float)delta / (float)FADE_MILLIS, 0.0f, 1.0f);
         diagnosticLedOff();
     }
 }
@@ -1055,10 +1060,10 @@ void marquee() {
         for (uint step = 0; step < FONT_WIDTH +
                                    INTERCHAR_SPACE; step++) {   // step though each column of the 1st char for smooth scrolling
 
-            if (beat) { //Flash on beats
-                r = JAB_MAX_BRIGHTNESS;
-                g = JAB_MAX_BRIGHTNESS;
-                b = JAB_MAX_BRIGHTNESS;
+            if (beat > 0.0f) { //Flash on beats
+                r = (uint)(beat * (float)JAB_MAX_BRIGHTNESS + (1.0f - beat) * (float)r);
+                g = (uint)(beat * (float)JAB_MAX_BRIGHTNESS + (1.0f - beat) * (float)g);
+                b = (uint)(beat * (float)JAB_MAX_BRIGHTNESS + (1.0f - beat) * (float)b);
             }
 
             cli();
