@@ -16,20 +16,16 @@ void diagnosticLedOff() {
     digitalWrite(diagnosticLed, LOW);   // turn the LED on (HIGH is the voltage level)
 }
 
-volatile float beat = 0.0f;
-volatile unsigned long timeOfLastBeat = 0u;
-#define FADE_MILLIS = 200u; // number of ms beat flash takes to fade out
+volatile unsigned long timeOfLastBeat = 0;
+const unsigned int FADE_MILLIS = 250; // number of ms beat flash takes to fade out
 
 // http://www.gammon.com.au/interrupts
 ISR (PCINT1_vect) {
     // handle pin change interrupt for A0 to A5 here
     if (PINC & bit (0)) {  // if it was high
-        beat = 1.0f;
         timeOfLastBeat = millis();
         diagnosticLedOn();
     } else {
-        unsigned long delta = millis() - timeOfLastBeat;
-        beat = constrain((float)delta / (float)FADE_MILLIS, 0.0f, 1.0f);
         diagnosticLedOff();
     }
 }
@@ -1021,6 +1017,9 @@ void marquee() {
     uint sector = 0;
     uint step = 0;
 
+    float beatPct = 0.0f;
+    unsigned long delta;
+
     while (*m) {
 
         if (step == JAB_STEPS) {
@@ -1037,6 +1036,14 @@ void marquee() {
         uint rampdown = GAMMA(JAB_MIN_BRIGHTNESS + (JAB_STEPS - step));
 
         uint r0, g0, b0, r, g, b;
+
+        // Could bump the color sector if the beat just happened
+//        if (delta < 2) {
+//            sector++;
+//            if (sector == 3) {
+//                sector = 0;
+//            }
+//        }
 
         switch (sector) {
             case 0:
@@ -1060,14 +1067,26 @@ void marquee() {
         for (uint step = 0; step < FONT_WIDTH +
                                    INTERCHAR_SPACE; step++) {   // step though each column of the 1st char for smooth scrolling
 
-            if (beat > 0.0f) { //Flash on beats
-                r = (uint)(beat * (float)JAB_MAX_BRIGHTNESS + (1.0f - beat) * (float)r0);
-                g = (uint)(beat * (float)JAB_MAX_BRIGHTNESS + (1.0f - beat) * (float)g0);
-                b = (uint)(beat * (float)JAB_MAX_BRIGHTNESS + (1.0f - beat) * (float)b0);
-            } else {
+            delta = millis() - timeOfLastBeat;
+            // beat proportion
+            beatPct = constrain((float) delta / (float) FADE_MILLIS, 0.0f, 1.0f);
+
+            if (beatPct >= 1.0f) {
                 r = r0;
                 g = g0;
                 b = b0;
+            } else if (beatPct > 0.0f) {
+                // Fade between white and rgb depending on how long ago the beat was
+                r = (uint)((1.0f - beatPct) * (float) JAB_MAX_BRIGHTNESS + beatPct * (float) r0);
+                g = (uint)((1.0f - beatPct) * (float) JAB_MAX_BRIGHTNESS + beatPct * (float) g0);
+                b = (uint)((1.0f - beatPct) * (float) JAB_MAX_BRIGHTNESS + beatPct * (float) b0);
+            } else {
+                // beatPct == 0.0, meaning it just happened.
+                // Flash on beats
+                // Full white to save doing the computation cycles
+                r = JAB_MAX_BRIGHTNESS;
+                g = JAB_MAX_BRIGHTNESS;
+                b = JAB_MAX_BRIGHTNESS;
             }
 
             cli();
