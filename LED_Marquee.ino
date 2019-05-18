@@ -71,6 +71,9 @@ const char ASOT[] PROGMEM = "                    "
 #define SOH '\x01'
 // The char indicating we should stop showing this string in the new message alert style (currently EOT, \x04)
 #define EOT '\x04'
+// chars indicating whether to enable/disable beat detector mic (connected to A0 pin change interrupt)
+#define STX '\x02'
+#define ETX '\x03'
 
 // Pad this amount so that scrolling starts nicely off the end
 #define STRING_PADDING 20
@@ -1140,7 +1143,7 @@ void marquee() {
 
 
 // Notifies the IMX that we're ready to retrieve custom message data
-bool getCustomData() {
+bool readSerialData() {
     startSerial();
 //    delay(200);
     // send special symbol so IMX knows to respond with custom message data
@@ -1169,6 +1172,12 @@ bool getCustomData() {
             currentBuffer[STRING_PADDING] = ' '; // Overwrite the BEL char with a space
         } else if (currentBuffer[STRING_PADDING] == SOH) {
             showInAlertStyle = true;
+            currentBuffer[STRING_PADDING] = ' '; // Overwrite the SOH char with a space
+        } else if (currentBuffer[STRING_PADDING] == STX) {
+            PCICR |= bit (PCIE1);   // enable pin change interrupts for A0 to A5
+            currentBuffer[STRING_PADDING] = ' '; // Overwrite the SOH char with a space
+        } else if (currentBuffer[STRING_PADDING] == ETX) {
+            PCICR &= ~bit (PCIE1);   // disable pin change interrupts for A0 to A5
             currentBuffer[STRING_PADDING] = ' '; // Overwrite the SOH char with a space
         }
         diagnosticBlink();
@@ -1202,6 +1211,7 @@ void setup() {
     PCMSK1 |= bit (PCINT8);  // want pin A0
     PCIFR |= bit (PCIF1);   // clear any outstanding interrupts
     PCICR |= bit (PCIE1);   // enable pin change interrupts for A0 to A5
+    // TODO disable based on IMX command
 
     loopcount = 0;
 }
@@ -1216,7 +1226,7 @@ void loop() {
     diagnosticLedOn();
 
     // Returns true if we should show the new msg alert
-    if (getCustomData()) {
+    if (readSerialData()) {
         showcountdown();
         showstarfield();
     } else {
