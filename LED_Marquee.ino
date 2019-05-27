@@ -1239,6 +1239,8 @@ void loop() {
         showcountdown();
         showstarfield();
     } else {
+        //TODO can move the contents of this else block above the readSerialData call to make new messages
+        // more responsive
         if (!showInAlertStyle) { //dont advertise when in chooser mode
             showstarfieldcustom(100);
             if (loopcount % ADVERTISE_EVERY == 0) {
