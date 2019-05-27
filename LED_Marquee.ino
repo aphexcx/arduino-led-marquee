@@ -827,8 +827,7 @@ void showstarfield() {
     showstarfieldcustom(300);
 }
 
-static inline void
-sendIcon(const uint *fontbase, uint which, int8_t shift, uint width, uint r, uint g, uint b) {
+static inline void sendIcon(const uint *fontbase, uint which, int8_t shift, uint width, uint r, uint g, uint b) {
 
     const uint *charbase = fontbase + (which * width);
 
@@ -858,18 +857,8 @@ sendIcon(const uint *fontbase, uint which, int8_t shift, uint width, uint r, uin
 }
 
 
-#define ENEMIES_WIDTH 12
-
-const uint enemies[]
-        PROGMEM = {
-                0x70, 0xf4, 0xfe, 0xda, 0xd8, 0xf4, 0xf4, 0xd8, 0xda, 0xfe, 0xf4, 0x70, // Enemy 1 - open
-                0x72, 0xf2, 0xf4, 0xdc, 0xd8, 0xf4, 0xf4, 0xd8, 0xdc, 0xf4, 0xf2, 0x72, // Enemy 1 - close
-                0x1c, 0x30, 0x7c, 0xda, 0x7a, 0x78, 0x7a, 0xda, 0x7c, 0x30, 0x1c, 0x00, // Enemy 2 - open
-                0xf0, 0x3a, 0x7c, 0xd8, 0x78, 0x78, 0x78, 0xd8, 0x7c, 0x3a, 0xf0, 0x00, // Enemy 2 - closed
-                0x92, 0x54, 0x10, 0x82, 0x44, 0x00, 0x00, 0x44, 0x82, 0x10, 0x54, 0x92, // Explosion
-        };
-
 void showCharsOneByOneAndWait(const char *pointsStr, uint r, uint g, uint b, int delayMs) {
+
     clear();
 
     for (uint p = 0; p < strlen(pointsStr); p++) {
@@ -891,12 +880,21 @@ void showCharsOneByOne(const char *pointsStr, uint r, uint g, uint b) {
     showCharsOneByOneAndWait(pointsStr, r, g, b, 500);
 }
 
-void showMsgMeAd() {
-    clear();
-    showInstagramAd();
-    showCharsOneByOne(" MSG ME!!! MSG ME!!! ", GAMMA(0xE6), GAMMA(0x00), GAMMA(0x7E));
+void showallyourbasestyle(char *str) {
+//    showCharsOneByOne(" INSTAGRAM INSTAGRAM ", 0xE6, 0x00, 0x7E);
+//    showCharsOneByOne(" @APHEXCX  @APHEXCX ", 0xE6, 0x00, 0x7E);
+//    const char *allyourbase = "CAT: ALL YOUR BASE ARE BELONG TO US !!!";
 
-//    showCharsOneByOne(1, " = 10 POINTS", 0x00, 0xff, 0x00);
+    clear();
+    for (unsigned int slide = 10000; slide; slide -= 10) {
+        altbright = (slide & 0xff);
+        cli();
+//        sendChar(' ', 0, 0, 0, 0);
+        sendStringAlt(str);
+        sei();
+        show();
+    }
+
 }
 
 void showInstagramAd() {
@@ -906,6 +904,36 @@ void showInstagramAd() {
 //    showallyourbasestyle("INSTAGRAM INSTAGRAM ");
 //    showallyourbasestyle("@APHEXCX  @APHEXCX ");
 }
+
+void showTalkToUsAd() {
+//    showCharsOneByOne("INSTAGRAM:INSTAGRAM:", GAMMA(0xfe), GAMMA(0xd4), GAMMA(0x3b));
+//    showCharsOneByOneAndWait(" @APHEXCX  @APHEXCX ", GAMMA(0xef), GAMMA(0x0c), GAMMA(0x1d), 1000);
+
+    showCharsOneByOne("WANT TO...WANT TO...", GAMMA(0x04), GAMMA(0xff), GAMMA(0x19));
+    showCharsOneByOneAndWait("ADD A MSG?ADD A MSG?", GAMMA(0x04), GAMMA(0xff), GAMMA(0x19), 1200);
+    showCharsOneByOneAndWait("ASK US!!<3ASK US!!<3", GAMMA(0xff), GAMMA(0x05), GAMMA(0x5d), 1200);
+}
+
+void showMsgMeAd() {
+    clear();
+    showInstagramAd();
+    showTalkToUsAd();
+//    showCharsOneByOne(" MSG ME!!! MSG ME!!! ", GAMMA(0xE6), GAMMA(0x00), GAMMA(0x7E));
+
+//    showCharsOneByOne(1, " = 10 POINTS", 0x00, 0xff, 0x00);
+}
+
+#define ENEMIES_WIDTH 12
+
+//TODO hmm, the last one is an explosion and I've never seen that displayed before
+const uint enemies[]
+        PROGMEM = {
+                0x70, 0xf4, 0xfe, 0xda, 0xd8, 0xf4, 0xf4, 0xd8, 0xda, 0xfe, 0xf4, 0x70, // Enemy 1 - open
+                0x72, 0xf2, 0xf4, 0xdc, 0xd8, 0xf4, 0xf4, 0xd8, 0xdc, 0xf4, 0xf2, 0x72, // Enemy 1 - close
+                0x1c, 0x30, 0x7c, 0xda, 0x7a, 0x78, 0x7a, 0xda, 0x7c, 0x30, 0x1c, 0x00, // Enemy 2 - open
+                0xf0, 0x3a, 0x7c, 0xd8, 0x78, 0x78, 0x78, 0xd8, 0x7c, 0x3a, 0xf0, 0x00, // Enemy 2 - closed
+                0x92, 0x54, 0x10, 0x82, 0x44, 0x00, 0x00, 0x44, 0x82, 0x10, 0x54, 0x92, // Explosion
+        };
 
 void showInvaders() {
 
@@ -956,24 +984,6 @@ void showInvaders() {
 }
 
 
-void showallyourbasestyle(char *str) {
-//    showCharsOneByOne(" INSTAGRAM INSTAGRAM ", 0xE6, 0x00, 0x7E);
-//    showCharsOneByOne(" @APHEXCX  @APHEXCX ", 0xE6, 0x00, 0x7E);
-//    const char *allyourbase = "CAT: ALL YOUR BASE ARE BELONG TO US !!!";
-
-    clear();
-    for (unsigned int slide = 10000; slide; slide -= 10) {
-        altbright = (slide & 0xff);
-        cli();
-//        sendChar(' ', 0, 0, 0, 0);
-        sendStringAlt(str);
-        sei();
-        show();
-    }
-
-}
-
-
 #define JAB_MAX_BRIGHTNESS 0xff //(255 (100%))
 //#define JAB_MAX_BRIGHTNESS 0x7f //(127)
 #define JAB_MIN_BRIGHTNESS 0x00
@@ -1016,41 +1026,40 @@ void showallyourbasestyle(char *str) {
 //    return volts;
 //}
 
+// Keep color step between marquee calls, but still bump the sector by 1 every call so each new message starts with a
+// noticeably different color
+uint sector = 1;
+uint colorStep = 0;
+
 void marquee() {
 
     const char *m = currentBuffer;
 
     // Text foreground color cycle effect
-    uint sector = 2;
-    uint step = 0;
+    sector++;
+    if (sector == 3) {
+        sector = 0;
+    }
 
     float beatPct = 0.0f;
     unsigned long delta;
 
     while (*m) {
 
-        if (step == JAB_STEPS) {
-            step = 0;
+        if (colorStep == JAB_STEPS) {
+            colorStep = 0;
             sector++;
             if (sector == 3) {
                 sector = 0;
             }
         } else {
-            step++;
+            colorStep++;
         }
 
-        uint rampup = GAMMA(JAB_MIN_BRIGHTNESS + step);
-        uint rampdown = GAMMA(JAB_MIN_BRIGHTNESS + (JAB_STEPS - step));
+        uint rampup = GAMMA(JAB_MIN_BRIGHTNESS + colorStep);
+        uint rampdown = GAMMA(JAB_MIN_BRIGHTNESS + (JAB_STEPS - colorStep));
 
         uint r0, g0, b0, r, g, b;
-
-        // Could bump the color sector if the beat just happened
-//        if (delta < 2) {
-//            sector++;
-//            if (sector == 3) {
-//                sector = 0;
-//            }
-//        }
 
         switch (sector) {
             case 0:
