@@ -1,4 +1,4 @@
-#define DEBUG false
+#define DEBUG true
 
 #define uint8_t uint
 
@@ -59,7 +59,7 @@ const char ASOT[] PROGMEM = "                    "
 //How often to advertise "MSG ME!!!", e.g. every 5 marquee scrolls
 #define ADVERTISE_EVERY 8
 //Speed of invader sequence, lower is faster
-#define INVADER_DELAY 40
+#define INVADER_DELAY 60
 //Speed of scrolling text marquee, lower is faster
 #define MARQUEE_DELAY 25
 //Speed of chars spelled out one by one effect, lower is faster
@@ -74,6 +74,7 @@ const char ASOT[] PROGMEM = "                    "
 // chars indicating whether to enable/disable beat detector mic (connected to A0 pin change interrupt)
 #define STX '\x02'
 #define ETX '\x03'
+#define ENQ '\x05'
 
 // Pad this amount so that scrolling starts nicely off the end
 #define STRING_PADDING 20
@@ -97,9 +98,13 @@ char *currentBuffer = bufferA;
 
 // The bool indicating we should show this string in the new message alert style
 bool showInAlertStyle = false;
+// The bool indicating we should show this string in input style
+bool showInInputStyle = false;
 
 // Change this to be at least as long as your pixel string (too long will work fine, just be a little slower)
-#define PIXELS 60*2  // Number of pixels in the string. I am using 4 meters of 96LED/M
+#define NUM_PANELS 2  // Number of panels. There are 2.
+#define PIXELS_PER_STRING 60  // Number of pixels in the string. I am using 60LED/M
+#define PIXELS NUM_PANELS*PIXELS_PER_STRING  // Length of pixels total. I am using 2 meters of 60LED/M
 
 // These values depend on which pins your 8 strings are connected to and what board you are using
 // More info on how to find these at http://www.arduino.cc/en/Reference/PortManipulation
@@ -287,6 +292,8 @@ static inline void clear() {
 #define FONT_WIDTH 5
 #define INTERCHAR_SPACE 1
 #define ASCII_OFFSET 0x20    // ASSCI code of 1st char in font array
+// Max chars a single panel can display at once
+#define MAX_CHARS_PER_PANEL PIXELS_PER_STRING / (FONT_WIDTH + INTERCHAR_SPACE)
 
 const uint Font5x7[]
         PROGMEM = {
@@ -544,13 +551,13 @@ int loopcount = 0;
 void diagnosticBlink() {
     if (DEBUG) {
         diagnosticLedOn();
-        delay(500);
+//        delay(500);
+//        diagnosticLedOff();
+//        delay(500);
+//        diagnosticLedOn();
+//        delay(500);
         diagnosticLedOff();
-        delay(500);
-        diagnosticLedOn();
-        delay(500);
-        diagnosticLedOff();
-        delay(300);
+//        delay(300);
     }
 }
 
@@ -647,9 +654,65 @@ const uint PROGMEM
 // Map 0-255 visual brightness to 0-255 LED brightness
 #define GAMMA(x) (pgm_read_byte(&gamma[x]))
 
+// TODO idxToBlink that isn't always last char
+void showAsInputStyle(char *str, int idxToBlink) {
+
+    str = str + STRING_PADDING + 1; // drop initial padding
+
+    int length = strlen(str);
+    int shiftBy = constrain(length - MAX_CHARS_PER_PANEL, 0, length);
+    // Shift string from the start if it is longer than the max chars we can show,
+    // so that last MAX_CHARS_PER_PANEL chars are always visible (plus _)
+    str = str + shiftBy;
+
+    unsigned int count = 20;
+
+    clear();
+
+    idxToBlink = strlen(str) - 1;
+
+//    cli();
+//    // Send string, except for last char (which is '_')
+//    for (uint i = 0; i < length; i++) {
+//        int r = 0xff;
+//        int g = 0xff;
+//        int b = 0xff;
+////        if (i == idxToBlink ) {
+////            sendChar(str[idxToBlink], 0, r, brightness, brightness);
+////        } else {
+//            sendChar(str[i], 0, GAMMA(r), GAMMA(g), GAMMA(b));
+////        }
+//    }
+
+    while (count > 0) {
+
+        count--;
+
+        uint brightness = ((count % 100) * 256) / 100;
+
+        cli();
+        // Send string, except for last char (which is '_')
+        for (uint i = 0; i < length; i++) {
+            int r = 0xff;
+            int g = 0xff;
+            int b = 0xff;
+            if (i == idxToBlink) {
+                sendChar(str[idxToBlink], 0, 0xff, brightness, brightness);
+            } else {
+                sendChar(str[i], 0, GAMMA(r), GAMMA(g), GAMMA(b));
+            }
+        }
+
+        sendRowRGB(0x00, 0, 0, 0xff);
+
+        sei();
+        show();
+    }
+}
+
 void showAsAlert(char *str, char *countString) {
 
-    str = str + STRING_PADDING; // drop initial padding
+    str = str + STRING_PADDING + 1; // drop initial padding
     int maxStrLen = 10; // max number of chars to show //TODO or, could scroll the whole thing
     str[maxStrLen] = 0x00; //chop here
 
@@ -876,6 +939,11 @@ void showCharsOneByOneAndWait(const char *pointsStr, uint r, uint g, uint b, int
     delay(delayMs);
 }
 
+//TODO take char, pad (& center) to MAX_CHARS_PER_PANEL, and multiply by NUM_PANELS
+void showCharsOneByOneOnBothPanels(const char *pointsStr, uint r, uint g, uint b) {
+    showCharsOneByOneAndWait(pointsStr, r, g, b, 500);
+}
+
 void showCharsOneByOne(const char *pointsStr, uint r, uint g, uint b) {
     showCharsOneByOneAndWait(pointsStr, r, g, b, 500);
 }
@@ -923,16 +991,26 @@ void showMsgMeAd() {
 //    showCharsOneByOne(1, " = 10 POINTS", 0x00, 0xff, 0x00);
 }
 
-#define ENEMIES_WIDTH 12
+#define ENEMIES_WIDTH 15
 
 //TODO hmm, the last one is an explosion and I've never seen that displayed before
 const uint enemies[]
         PROGMEM = {
-                0x70, 0xf4, 0xfe, 0xda, 0xd8, 0xf4, 0xf4, 0xd8, 0xda, 0xfe, 0xf4, 0x70, // Enemy 1 - open
-                0x72, 0xf2, 0xf4, 0xdc, 0xd8, 0xf4, 0xf4, 0xd8, 0xdc, 0xf4, 0xf2, 0x72, // Enemy 1 - close
-                0x1c, 0x30, 0x7c, 0xda, 0x7a, 0x78, 0x7a, 0xda, 0x7c, 0x30, 0x1c, 0x00, // Enemy 2 - open
-                0xf0, 0x3a, 0x7c, 0xd8, 0x78, 0x78, 0x78, 0xd8, 0x7c, 0x3a, 0xf0, 0x00, // Enemy 2 - closed
-                0x92, 0x54, 0x10, 0x82, 0x44, 0x00, 0x00, 0x44, 0x82, 0x10, 0x54, 0x92, // Explosion
+                // v1: upside down anjuna
+//              0x00, 0x0C, 0x1e, 0x3b, 0x19, 0x0b, 0x05, 0x09, 0x11, 0x22, 0x44, 0x48, 0x50, 0x60, 0x40, 0x00,
+                // v2: inner downward triangle touches bar
+//                0x08, 0x18, 0x3C, 0x6E, 0x4C, 0x68, 0x50, 0x48, 0x44, 0x22, 0x11, 0x09, 0x05, 0x03, 0x01,
+                // v3: space between bar and downward triangle, necessitating a larger downward triangle
+                0x08, 0x1C, 0x3E, 0x6C, 0x48, 0x60, 0x50, 0x48, 0x44, 0x22, 0x11, 0x09, 0x05, 0x03, 0x01,
+                0x08, 0x1C, 0x3E, 0x6C, 0x48, 0x60, 0x50, 0x48, 0x44, 0x22, 0x11, 0x09, 0x05, 0x03, 0x01,
+                // v3 with filled in bar
+//                0x08, 0x1C, 0x3E, 0x6C, 0x48, 0x60, 0x70, 0x78, 0x7C, 0x3E, 0x1F, 0x0F, 0x07, 0x03, 0x01
+                //
+//                0x70, 0xf4, 0xfe, 0xda, 0xd8, 0xf4, 0xf4, 0xd8, 0xda, 0xfe, 0xf4, 0x70, // Enemy 1 - open
+//                0x72, 0xf2, 0xf4, 0xdc, 0xd8, 0xf4, 0xf4, 0xd8, 0xdc, 0xf4, 0xf2, 0x72, // Enemy 1 - close
+//                0x1c, 0x30, 0x7c, 0xda, 0x7a, 0x78, 0x7a, 0xda, 0x7c, 0x30, 0x1c, 0x00, // Enemy 2 - open
+//                0xf0, 0x3a, 0x7c, 0xd8, 0x78, 0x78, 0x78, 0xd8, 0x7c, 0x3a, 0xf0, 0x00, // Enemy 2 - closed
+//                0x92, 0x54, 0x10, 0x82, 0x44, 0x00, 0x00, 0x44, 0x82, 0x10, 0x54, 0x92, // Explosion
         };
 
 void showInvaders() {
@@ -972,7 +1050,12 @@ void showInvaders() {
 
             for (uint l = 0; l < acount; l++) {
                 sendIcon(enemies, p & 1, row, ENEMIES_WIDTH, GAMMA(0x4f), GAMMA(0x62), GAMMA(0xd2));
-                sendChar(' ', 0, 0x00, 0x00, 0x00); // No over crowding
+//                sendChar(' ', 0, 0x00, 0x00, 0x00); // No over crowding
+                sendRowRGB(0, 0x00, 0x00, 0x00);
+                sendRowRGB(0, 0x00, 0x00, 0x00);
+                sendRowRGB(0, 0x00, 0x00, 0x00);
+                sendRowRGB(0, 0x00, 0x00, 0x00);
+                sendRowRGB(0, 0x00, 0x00, 0x00);
             }
 
             sei();
@@ -1172,6 +1255,7 @@ bool readSerialData() {
 
     bool shouldShowNewMsgAlert = false;
     showInAlertStyle = false;
+    showInInputStyle = false;
     // If we got something, swap currentBuffer to point to the incoming.
     if (len > 0) {
         currentBuffer = incomingBuffer;
@@ -1184,10 +1268,13 @@ bool readSerialData() {
             currentBuffer[STRING_PADDING] = ' '; // Overwrite the SOH char with a space
         } else if (currentBuffer[STRING_PADDING] == STX) {
             PCICR |= bit (PCIE1);   // enable pin change interrupts for A0 to A5
-            currentBuffer[STRING_PADDING] = ' '; // Overwrite the SOH char with a space
+            currentBuffer[STRING_PADDING] = ' '; // Overwrite the STX char with a space
         } else if (currentBuffer[STRING_PADDING] == ETX) {
             PCICR &= ~bit (PCIE1);   // disable pin change interrupts for A0 to A5
-            currentBuffer[STRING_PADDING] = ' '; // Overwrite the SOH char with a space
+            currentBuffer[STRING_PADDING] = ' '; // Overwrite the ETX char with a space
+        } else if (currentBuffer[STRING_PADDING] == ENQ) {
+            showInInputStyle = true;
+            currentBuffer[STRING_PADDING] = ' '; // Overwrite the ENQ char with a space
         }
         diagnosticBlink();
     }
@@ -1241,7 +1328,7 @@ void loop() {
     } else {
         //TODO can move the contents of this else block above the readSerialData call to make new messages
         // more responsive
-        if (!showInAlertStyle) { //dont advertise when in chooser mode
+        if (!showInAlertStyle && !showInInputStyle) { //dont advertise when in chooser mode
             showstarfieldcustom(100);
             if (loopcount % ADVERTISE_EVERY == 0) {
                 showMsgMeAd();
@@ -1258,6 +1345,8 @@ void loop() {
 //    showInAlertStyle = true;
     if (showInAlertStyle) {
         showAsAlert(currentBuffer, "9/42");
+    } else if (showInInputStyle) {
+        showAsInputStyle(currentBuffer, strlen(currentBuffer) - STRING_PADDING - 1 - 1);
     } else {
         // regular marquee
         marquee();
