@@ -69,11 +69,13 @@ const char ASOT[] PROGMEM = "                    "
 #define BEL '\x07'
 // The char indicating we should show this string in the new message alert style (currently SOH, \x01)
 #define SOH '\x01'
-// The char indicating we should stop showing this string in the new message alert style (currently EOT, \x04)
-#define EOT '\x04'
+
 // chars indicating whether to enable/disable beat detector mic (connected to A0 pin change interrupt)
 #define STX '\x02'
 #define ETX '\x03'
+// The char indicating we should show this string in flashing input style
+#define EOT '\x04'
+// The char indicating we should show this string in input style
 #define ENQ '\x05'
 
 // Pad this amount so that scrolling starts nicely off the end
@@ -99,7 +101,7 @@ char *currentBuffer = bufferA;
 // The bool indicating we should show this string in the new message alert style
 bool showInAlertStyle = false;
 // The bool indicating we should show this string in input style
-bool showInInputStyle = false;
+int showInInputStyle = NULL;
 
 // Change this to be at least as long as your pixel string (too long will work fine, just be a little slower)
 #define NUM_PANELS 2  // Number of panels. There are 2.
@@ -655,7 +657,7 @@ const uint PROGMEM
 #define GAMMA(x) (pgm_read_byte(&gamma[x]))
 
 // TODO idxToBlink that isn't always last char
-void showAsInputStyle(char *str, int idxToBlink) {
+void showAsInputStyle(char *str, int idxToBlink, int mode) {
 
     str = str + STRING_PADDING + 1; // drop initial padding
 
@@ -696,8 +698,9 @@ void showAsInputStyle(char *str, int idxToBlink) {
             int r = 0xff;
             int g = 0xff;
             int b = 0xff;
-            if (i == idxToBlink) {
-                sendChar(str[idxToBlink], 0, 0xff, brightness, brightness);
+            // Blink idxToBlink char, or all chars if we're in input warning mode
+            if (i == idxToBlink || mode == EOT) {
+                sendChar(str[i], 0, 0xff, brightness, brightness);
             } else {
                 sendChar(str[i], 0, GAMMA(r), GAMMA(g), GAMMA(b));
             }
@@ -1273,7 +1276,10 @@ bool readSerialData() {
             PCICR &= ~bit (PCIE1);   // disable pin change interrupts for A0 to A5
             currentBuffer[STRING_PADDING] = ' '; // Overwrite the ETX char with a space
         } else if (currentBuffer[STRING_PADDING] == ENQ) {
-            showInInputStyle = true;
+            showInInputStyle = ENQ;
+            currentBuffer[STRING_PADDING] = ' '; // Overwrite the ENQ char with a space
+        } else if (currentBuffer[STRING_PADDING] == EOT) {
+            showInInputStyle = EOT;
             currentBuffer[STRING_PADDING] = ' '; // Overwrite the ENQ char with a space
         }
         diagnosticBlink();
@@ -1345,8 +1351,8 @@ void loop() {
 //    showInAlertStyle = true;
     if (showInAlertStyle) {
         showAsAlert(currentBuffer, "9/42");
-    } else if (showInInputStyle) {
-        showAsInputStyle(currentBuffer, strlen(currentBuffer) - STRING_PADDING - 1 - 1);
+    } else if (showInInputStyle != NULL) {
+        showAsInputStyle(currentBuffer, strlen(currentBuffer) - STRING_PADDING - 1 - 1, showInInputStyle);
     } else {
         // regular marquee
         marquee();
