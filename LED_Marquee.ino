@@ -62,6 +62,8 @@ const char ASOT[] PROGMEM = "                    "
 #define INVADER_DELAY 60
 //Speed of scrolling text marquee, lower is faster
 #define MARQUEE_DELAY 25
+//Affects how long the all your base style text stays on screen. Higher is faster
+#define ALLYOURBASE_DELAY 12
 //Speed of chars spelled out one by one effect, lower is faster
 #define CHARS_ONEBYONE_DELAY 50
 
@@ -592,6 +594,11 @@ static inline void sendStringAlt(const char *s) {
 
     unsigned int l = PIXELS / (ALTFONT_WIDTH + INTERCHAR_SPACE);
 
+    sendRowRGB(0, 0x00, 0x00, 0x00);
+    sendRowRGB(0, 0x00, 0x00, 0x00);
+    sendRowRGB(0, 0x00, 0x00, 0x00);
+
+
     while (l--) {
 
         char c;
@@ -935,18 +942,17 @@ void showCharsOneByOne(const char *pointsStr, uint r, uint g, uint b) {
 }
 
 void showallyourbasestyle(char *str) {
-//    showCharsOneByOne(" INSTAGRAM INSTAGRAM ", 0xE6, 0x00, 0x7E);
-//    showCharsOneByOne(" @APHEXCX  @APHEXCX ", 0xE6, 0x00, 0x7E);
 //    const char *allyourbase = "CAT: ALL YOUR BASE ARE BELONG TO US !!!";
 
     clear();
-    for (unsigned int slide = 10000; slide; slide -= 10) {
+    for (unsigned int slide = 4000; slide; slide -= 10) {
         altbright = (slide & 0xff);
         cli();
 //        sendChar(' ', 0, 0, 0, 0);
         sendStringAlt(str);
         sei();
         show();
+        delay(ALLYOURBASE_DELAY);
     }
 
 }
@@ -960,17 +966,21 @@ void showInstagramAd() {
 }
 
 void showTalkToUsAd() {
-//    showCharsOneByOne("INSTAGRAM:INSTAGRAM:", GAMMA(0xfe), GAMMA(0xd4), GAMMA(0x3b));
-//    showCharsOneByOneAndWait(" @APHEXCX  @APHEXCX ", GAMMA(0xef), GAMMA(0x0c), GAMMA(0x1d), 1000);
+
+    showCharsOneByOne("THANK YOU THANK YOU ", GAMMA(0xfe), GAMMA(0xd4), GAMMA(0x3b));
+    showCharsOneByOne("FOR RIDINGFOR RIDING", GAMMA(0xfe), GAMMA(0xd4), GAMMA(0x3b));
+//    showCharsOneByOneAndWait("  BAAAHS    BAAAHS  ", GAMMA(0xea), GAMMA(0x17), GAMMA(0x8c), 1000);
+    showallyourbasestyle("BAAAHS BAAAHS");
 
     showCharsOneByOne("WANT TO...WANT TO...", GAMMA(0x04), GAMMA(0xff), GAMMA(0x19));
     showCharsOneByOneAndWait("ADD A MSG?ADD A MSG?", GAMMA(0x04), GAMMA(0xff), GAMMA(0x19), 1200);
-    showCharsOneByOneAndWait("ASK US!!<3ASK US!!<3", GAMMA(0xff), GAMMA(0x05), GAMMA(0x5d), 1200);
+//    showCharsOneByOneAndWait("ASK US!!<3ASK US!!<3", GAMMA(0xff), GAMMA(0x05), GAMMA(0x5d), 1200);
+    showCharsOneByOneAndWait("CUM ON IN!CUM ON IN!", GAMMA(0xff), GAMMA(0x05), GAMMA(0x5d), 1200);
 }
 
 void showMsgMeAd() {
     clear();
-    showInstagramAd();
+//    showInstagramAd();
     showTalkToUsAd();
 //    showCharsOneByOne(" MSG ME!!! MSG ME!!! ", GAMMA(0xE6), GAMMA(0x00), GAMMA(0x7E));
 
