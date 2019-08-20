@@ -717,10 +717,17 @@ void showAsInputStyle(char *str, int idxToBlink, int mode) {
     }
 }
 
-void showAsChooser(char *str, char *countString) {
+void showAsChooser(char *blinkyStr, char *countyStr) {
 
 //    int maxStrLen = 10; // max number of chars to show //TODO or, could scroll the whole thing
-//    str[maxStrLen] = 0x00; //chop here
+//    blinkyStr[maxStrLen] = 0x00; //chop here
+
+
+    int blinkyLen = strlen(blinkyStr);
+    int shiftBy = constrain(blinkyLen - MAX_CHARS_PER_PANEL - strlen(countyStr), 0, blinkyLen);
+    // Shift string from the start if it is longer than the max chars we can show,
+    // so that last MAX_CHARS_PER_PANEL chars are always visible (plus _)
+//    blinkyStr = blinkyStr + shiftBy;
 
     unsigned int count = 58;
 
@@ -733,15 +740,28 @@ void showAsChooser(char *str, char *countString) {
 
         cli();
 
-        // Blinky part
-        sendString(str, 0, brightness, brightness, brightness);
+        // County part
+        sendString(countyStr, 0, 0x80, 0, 0);
 
         sendRowRGB(0x00, 0, 0, 0xff);
 
-        // County part
-        sendString(countString, 0, 0x80, 0, 0);
-
+        // Blinky part
+//        while (*blinkyStr) {
+//        for (int s = 0; s <= shiftBy; s++) {
+//            if (s == blinkyLen) {
+//                break;
+//            }
+//            for (uint step = 0; step < FONT_WIDTH +
+//                                       INTERCHAR_SPACE; step++) {
+//                // step though each column of the 1st char for smooth scrolling
+//                sendString(blinkyStr, step, brightness, brightness, brightness);
+        sendString(blinkyStr, 0, brightness, brightness, brightness);
+//            }
+//            blinkyStr = blinkyStr + s;
+//        }
         sei();
+//        delay(MARQUEE_DELAY); // speed. higher = slower
+
         show();
     }
 }
