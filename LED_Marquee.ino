@@ -69,6 +69,8 @@ const char ASOT[] PROGMEM = "                    "
 #define BEL '\x07'
 // The char indicating we should show this string in the new message alert style (currently SOH, \x01)
 #define SOH '\x01'
+// The char indicating the end of extra data passed in after a control char
+#define DLE 10
 
 // chars indicating whether to enable/disable beat detector mic (connected to A0 pin change interrupt)
 #define STX '\x02'
@@ -98,8 +100,10 @@ char bufferB[STRINGBUFFER_LEN + 1] = "                     "; //note extra +1 ch
 
 char *currentBuffer = bufferA;
 
-// The bool indicating we should show this string in the new message alert style
-bool showInAlertStyle = false;
+char *extraDataBuffer = strdup(currentBuffer + STRING_PADDING);
+
+// The bool indicating we should show this string in the chooser style
+bool showInChooserStyle = false;
 // The bool indicating we should show this string in input style
 int showInInputStyle = NULL;
 
@@ -713,11 +717,10 @@ void showAsInputStyle(char *str, int idxToBlink, int mode) {
     }
 }
 
-void showAsAlert(char *str, char *countString) {
+void showAsChooser(char *str, char *countString) {
 
-    str = str + STRING_PADDING + 1; // drop initial padding
-    int maxStrLen = 10; // max number of chars to show //TODO or, could scroll the whole thing
-    str[maxStrLen] = 0x00; //chop here
+//    int maxStrLen = 10; // max number of chars to show //TODO or, could scroll the whole thing
+//    str[maxStrLen] = 0x00; //chop here
 
     unsigned int count = 58;
 
@@ -726,61 +729,21 @@ void showAsAlert(char *str, char *countString) {
 
         count--;
 
-        uint digit1 = count / 100;
-        uint digit2 = (count - (digit1 * 100)) / 10;
-        uint digit3 = (count - (digit1 * 100) - (digit2 * 10));
-
-        uint char1 = digit1 + '0';
-        uint char2 = digit2 + '0';
-        uint char3 = digit3 + '0';
-
         uint brightness = GAMMA(((count % 100) * 256) / 100);
 
         cli();
+
+        // Blinky part
         sendString(str, 0, brightness, brightness, brightness);
 
         sendRowRGB(0x00, 0, 0, 0xff);
 
-        //  sendChar( '0' , 0 , 0x80, 0 , 0 );
-
-        char *curCountChar = countString;
-//        while (curCountChar != 0x00) {
-//            sendChar(*curCountChar, 0, 0x80, 0, 0);
-//            curCountChar++;
-//        }
-        sendChar(char1, 0, 0x80, 0, 0);
-        sendChar('.', 0, 0x80, 0, 0);
-        sendChar(char2, 0, 0x80, 0, 0);
-        sendChar(char3, 0, 0x80, 0, 0);
+        // County part
+        sendString(countString, 0, 0x80, 0, 0);
 
         sei();
         show();
     }
-
-//    count = 100;
-//
-//    // One last farewell blink
-//
-//    while (count > 0) {
-//
-//        count--;
-//
-//
-//        uint brightness = GAMMA(((count % 100) * 256) / 100);
-//
-//        cli();
-//        sendString(str, 0, brightness, brightness, brightness);
-//
-//        sendRowRGB(0x00, 0, 0, 0xff);   // We need to quickly send a blank byte just to keep from missing our deadlne.
-//        sendChar('0', 0, brightness, 0, 0);
-//        sendChar('.', 0, brightness, 0, 0);
-//        sendChar('0', 0, brightness, 0, 0);
-//        sendChar('0', 0, brightness, 0, 0);
-//
-//
-//        sei();
-//        show();
-//    }
 }
 
 void showcountdown() {
@@ -1257,7 +1220,7 @@ bool readSerialData() {
     incomingBuffer[STRING_PADDING + len] = 0x00; // Null terminate
 
     bool shouldShowNewMsgAlert = false;
-    showInAlertStyle = false;
+    showInChooserStyle = false;
     showInInputStyle = false;
     // If we got something, swap currentBuffer to point to the incoming.
     if (len > 0) {
@@ -1267,8 +1230,14 @@ bool readSerialData() {
             shouldShowNewMsgAlert = true;
             currentBuffer[STRING_PADDING] = ' '; // Overwrite the BEL char with a space
         } else if (currentBuffer[STRING_PADDING] == SOH) {
-            showInAlertStyle = true;
-            currentBuffer[STRING_PADDING] = ' '; // Overwrite the SOH char with a space
+            currentBuffer = currentBuffer + STRING_PADDING; // Skip padding
+            currentBuffer = currentBuffer + 1; // Skip SOH char
+            extraDataBuffer = currentBuffer;
+            char *dleLocation = strchrnul(currentBuffer, DLE);
+            *dleLocation = '\0';
+            // advance currentBuffer ptr to skip past the extra data
+            currentBuffer = dleLocation + 1;
+            showInChooserStyle = true;
         } else if (currentBuffer[STRING_PADDING] == STX) {
             PCICR |= bit (PCIE1);   // enable pin change interrupts for A0 to A5
             currentBuffer[STRING_PADDING] = ' '; // Overwrite the STX char with a space
@@ -1334,7 +1303,7 @@ void loop() {
     } else {
         //TODO can move the contents of this else block above the readSerialData call to make new messages
         // more responsive
-        if (!showInAlertStyle && !showInInputStyle) { //dont advertise when in chooser mode
+        if (!showInChooserStyle && !showInInputStyle) { //dont advertise when in chooser mode
             showstarfieldcustom(100);
             if (loopcount % ADVERTISE_EVERY == 0) {
                 showMsgMeAd();
@@ -1348,9 +1317,8 @@ void loop() {
 ////    virtualSerial.flush();
 //    Serial.println(currentBuffer);
 //    Serial.flush();
-//    showInAlertStyle = true;
-    if (showInAlertStyle) {
-        showAsAlert(currentBuffer, "9/42");
+    if (showInChooserStyle) {
+        showAsChooser(currentBuffer, extraDataBuffer);
     } else if (showInInputStyle != NULL) {
         showAsInputStyle(currentBuffer, strlen(currentBuffer) - STRING_PADDING - 1 - 1, showInInputStyle);
     } else {
