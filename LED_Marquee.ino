@@ -552,7 +552,7 @@ const uint altfont[]
 
 
 // Keep track of where we are in the color cycle between chars
-static uint altbright = 0;
+uint *cyclingColor = (uint * )(calloc(1, sizeof(uint)));
 
 int loopcount = 0;
 
@@ -570,7 +570,7 @@ void diagnosticBlink() {
 }
 
 // Send a char with a column-based color cycle
-static inline void sendCharAlt(uint c) {
+static inline void sendCharColorCycle(uint c, uint *r, uint *g, uint *b) {
 
     const uint *charbase = altfont + ((c - ' ') * ALTFONT_WIDTH);
 
@@ -578,13 +578,13 @@ static inline void sendCharAlt(uint c) {
 
     while (col--) {
 
-        sendRowRGB(pgm_read_byte_near(charbase++), altbright, 0, 0x80);
+        sendRowRGB(pgm_read_byte_near(charbase++), *r, *g, *b);
 
-        altbright += 10;
+        *cyclingColor += 10;
     }
 
     sendRowRGB(0, 0, 0, 0);
-    altbright += 10;
+    *cyclingColor += 10;
 
 }
 
@@ -597,11 +597,9 @@ static inline void sendStringAlt(const char *s, int columnsPrefix) {
     while (columnsPrefix--) {
         sendRowRGB(0, 0x00, 0x00, 0x00);
     }
-//    sendRowRGB(0, 0x00, 0x00, 0x00);
-//    sendRowRGB(0, 0x00, 0x00, 0x00);
-//    sendRowRGB(0, 0x00, 0x00, 0x00);
-//    sendRowRGB(0, 0x00, 0x00, 0x00);
 
+    uint g = 0;
+    uint b = 0x80;
 
     while (l--) {
 
@@ -611,8 +609,7 @@ static inline void sendStringAlt(const char *s, int columnsPrefix) {
 
         if (!c) break;
 
-        sendCharAlt(c);
-
+        sendCharColorCycle(c, cyclingColor, &g, &b);
     }
 }
 
@@ -950,7 +947,7 @@ void showallyourbasestyleOnBothPanels(char *str, int columnsPrefix) {
 
     clear();
     for (unsigned int slide = 1250; slide; slide -= 10) {
-        altbright = (slide & 0xff);
+        *cyclingColor = (slide & 0xff);
         cli();
 //        sendChar(' ', 0, 0, 0, 0);
         sendStringAlt(str, columnsPrefix);
