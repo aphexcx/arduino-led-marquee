@@ -1,4 +1,4 @@
-#define DEBUG true
+#define DEBUG false
 
 #define uint8_t uint
 
@@ -589,14 +589,18 @@ static inline void sendCharAlt(uint c) {
 }
 
 // Show the passed string with the arcade font and a nice vertical color cycle effect
-
-static inline void sendStringAlt(const char *s) {
+// columnsPrefix: the # of empty columns to add before the string, useful for spacing
+static inline void sendStringAlt(const char *s, int columnsPrefix) {
 
     unsigned int l = PIXELS / (ALTFONT_WIDTH + INTERCHAR_SPACE);
 
-    sendRowRGB(0, 0x00, 0x00, 0x00);
-    sendRowRGB(0, 0x00, 0x00, 0x00);
-    sendRowRGB(0, 0x00, 0x00, 0x00);
+    while (columnsPrefix--) {
+        sendRowRGB(0, 0x00, 0x00, 0x00);
+    }
+//    sendRowRGB(0, 0x00, 0x00, 0x00);
+//    sendRowRGB(0, 0x00, 0x00, 0x00);
+//    sendRowRGB(0, 0x00, 0x00, 0x00);
+//    sendRowRGB(0, 0x00, 0x00, 0x00);
 
 
     while (l--) {
@@ -941,15 +945,16 @@ void showCharsOneByOne(const char *pointsStr, uint r, uint g, uint b) {
     showCharsOneByOneAndWait(pointsStr, r, g, b, 500);
 }
 
-void showallyourbasestyle(char *str) {
+void showallyourbasestyleOnBothPanels(char *str, int columnsPrefix) {
 //    const char *allyourbase = "CAT: ALL YOUR BASE ARE BELONG TO US !!!";
 
     clear();
-    for (unsigned int slide = 4000; slide; slide -= 10) {
+    for (unsigned int slide = 1250; slide; slide -= 10) {
         altbright = (slide & 0xff);
         cli();
 //        sendChar(' ', 0, 0, 0, 0);
-        sendStringAlt(str);
+        sendStringAlt(str, columnsPrefix);
+        sendStringAlt(str, columnsPrefix + 5);
         sei();
         show();
         delay(ALLYOURBASE_DELAY);
@@ -965,29 +970,35 @@ void showInstagramAd() {
 //    showallyourbasestyle("@APHEXCX  @APHEXCX ");
 }
 
+void showMainAd() {
+    showallyourbasestyleOnBothPanels(" DREAM", 0);
+    showallyourbasestyleOnBothPanels(" STATE", 0);
+    showallyourbasestyleOnBothPanels("2019!!", 4);
+}
+
 void showTalkToUsAd() {
 
-    showCharsOneByOne("THANK YOU THANK YOU ", GAMMA(0xfe), GAMMA(0xd4), GAMMA(0x3b));
-    showCharsOneByOne("FOR RIDINGFOR RIDING", GAMMA(0xfe), GAMMA(0xd4), GAMMA(0x3b));
+//    showCharsOneByOne("THANK YOU THANK YOU ", GAMMA(0xfe), GAMMA(0xd4), GAMMA(0x3b));
+//    showCharsOneByOne("FOR RIDINGFOR RIDING", GAMMA(0xfe), GAMMA(0xd4), GAMMA(0x3b));
 //    showCharsOneByOneAndWait("  BAAAHS    BAAAHS  ", GAMMA(0xea), GAMMA(0x17), GAMMA(0x8c), 1000);
-    showallyourbasestyle("BAAAHS BAAAHS");
 
     showCharsOneByOne("WANT TO...WANT TO...", GAMMA(0x04), GAMMA(0xff), GAMMA(0x19));
     showCharsOneByOneAndWait("ADD A MSG?ADD A MSG?", GAMMA(0x04), GAMMA(0xff), GAMMA(0x19), 1200);
-//    showCharsOneByOneAndWait("ASK US!!<3ASK US!!<3", GAMMA(0xff), GAMMA(0x05), GAMMA(0x5d), 1200);
-    showCharsOneByOneAndWait("CUM ON IN!CUM ON IN!", GAMMA(0xff), GAMMA(0x05), GAMMA(0x5d), 1200);
+    showCharsOneByOneAndWait("ASK US!!<3ASK US!!<3", GAMMA(0xff), GAMMA(0x05), GAMMA(0x5d), 1200);
+//    showCharsOneByOneAndWait("CUM ON IN!CUM ON IN!", GAMMA(0xff), GAMMA(0x05), GAMMA(0x5d), 1200);
 }
 
 void showMsgMeAd() {
     clear();
-//    showInstagramAd();
+    showMainAd();
+    showInstagramAd();
     showTalkToUsAd();
 //    showCharsOneByOne(" MSG ME!!! MSG ME!!! ", GAMMA(0xE6), GAMMA(0x00), GAMMA(0x7E));
 
 //    showCharsOneByOne(1, " = 10 POINTS", 0x00, 0xff, 0x00);
 }
 
-#define ENEMIES_WIDTH 11
+#define ENEMIES_WIDTH 12
 
 //TODO hmm, the last one is an explosion and I've never seen that displayed before
 const uint enemies[]
@@ -1004,15 +1015,15 @@ const uint enemies[]
                 // baaahs v1: upside down
 //                0x06, 0x0d, 0x1D, 0x33, 0x47, 0x42, 0x47, 0x33, 0x1D, 0x0d, 0x06,
                 // baaahs v2:
-                0x30, 0x58, 0x5C, 0x66, 0x71, 0x21, 0x71, 0x66, 0x5C, 0x58, 0x30,
-                0x30, 0x58, 0x5C, 0x66, 0x71, 0x21, 0x71, 0x66, 0x5C, 0x58, 0x30
+//                0x30, 0x58, 0x5C, 0x66, 0x71, 0x21, 0x71, 0x66, 0x5C, 0x58, 0x30,
+//                0x30, 0x58, 0x5C, 0x66, 0x71, 0x21, 0x71, 0x66, 0x5C, 0x58, 0x30
 
                 //
-//                0x70, 0xf4, 0xfe, 0xda, 0xd8, 0xf4, 0xf4, 0xd8, 0xda, 0xfe, 0xf4, 0x70, // Enemy 1 - open
-//                0x72, 0xf2, 0xf4, 0xdc, 0xd8, 0xf4, 0xf4, 0xd8, 0xdc, 0xf4, 0xf2, 0x72, // Enemy 1 - close
-//                0x1c, 0x30, 0x7c, 0xda, 0x7a, 0x78, 0x7a, 0xda, 0x7c, 0x30, 0x1c, 0x00, // Enemy 2 - open
-//                0xf0, 0x3a, 0x7c, 0xd8, 0x78, 0x78, 0x78, 0xd8, 0x7c, 0x3a, 0xf0, 0x00, // Enemy 2 - closed
-//                0x92, 0x54, 0x10, 0x82, 0x44, 0x00, 0x00, 0x44, 0x82, 0x10, 0x54, 0x92, // Explosion
+                0x70, 0xf4, 0xfe, 0xda, 0xd8, 0xf4, 0xf4, 0xd8, 0xda, 0xfe, 0xf4, 0x70, // Enemy 1 - open
+                0x72, 0xf2, 0xf4, 0xdc, 0xd8, 0xf4, 0xf4, 0xd8, 0xdc, 0xf4, 0xf2, 0x72, // Enemy 1 - close
+                0x1c, 0x30, 0x7c, 0xda, 0x7a, 0x78, 0x7a, 0xda, 0x7c, 0x30, 0x1c, 0x00, // Enemy 2 - open
+                0xf0, 0x3a, 0x7c, 0xd8, 0x78, 0x78, 0x78, 0xd8, 0x7c, 0x3a, 0xf0, 0x00, // Enemy 2 - closed
+                0x92, 0x54, 0x10, 0x82, 0x44, 0x00, 0x00, 0x44, 0x82, 0x10, 0x54, 0x92, // Explosion
         };
 
 void showInvaders() {
@@ -1324,7 +1335,7 @@ void setup() {
 }
 
 void loop() {
-
+//return
     //showcountdown();
     //showstarfield();
     //showjabber();
