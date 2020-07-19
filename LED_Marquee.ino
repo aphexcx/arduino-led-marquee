@@ -297,23 +297,23 @@ static inline void clear() {
 // defines ascii characters 0x20-0x7F (32-127)
 // PROGMEM after variable name as per https://www.arduino.cc/en/Reference/PROGMEM
 
-#define FONT_WIDTH 5
+#define FONTSTD_WIDTH 5
 #define INTERCHAR_SPACE 1
 #define ASCII_OFFSET 0x20    // ASSCI code of 1st char in font array
 // Max chars a single panel can display at once
-#define MAX_CHARS_PER_PANEL PIXELS_PER_STRING / (FONT_WIDTH + INTERCHAR_SPACE)
+#define MAX_CHARS_PER_PANEL PIXELS_PER_STRING / (FONTSTD_WIDTH + INTERCHAR_SPACE)
 
-const uint Font5x7[]
-        PROGMEM = {
-                0x00, 0x00, 0x00, 0x00, 0x00,//
-                0x00, 0x00, 0xfa, 0x00, 0x00,// !
-                0x00, 0xe0, 0x00, 0xe0, 0x00,// "
-                0x28, 0xfe, 0x28, 0xfe, 0x28,// #
-                0x24, 0x54, 0xfe, 0x54, 0x48,// $
-                0xc4, 0xc8, 0x10, 0x26, 0x46,// %
-                0x6c, 0x92, 0xaa, 0x44, 0x0a,// &
-                0x00, 0xa0, 0xc0, 0x00, 0x00,// '
-                0x00, 0x38, 0x44, 0x82, 0x00,// (
+const uint FontStd5x7[]
+PROGMEM = {
+        0x00, 0x00, 0x00, 0x00, 0x00,//
+        0x00, 0x00, 0xfa, 0x00, 0x00,// !
+        0x00, 0xe0, 0x00, 0xe0, 0x00,// "
+        0x28, 0xfe, 0x28, 0xfe, 0x28,// #
+        0x24, 0x54, 0xfe, 0x54, 0x48,// $
+        0xc4, 0xc8, 0x10, 0x26, 0x46,// %
+        0x6c, 0x92, 0xaa, 0x44, 0x0a,// &
+        0x00, 0xa0, 0xc0, 0x00, 0x00,// '
+        0x00, 0x38, 0x44, 0x82, 0x00,// (
                 0x00, 0x82, 0x44, 0x38, 0x00,// )
                 0x10, 0x54, 0x38, 0x54, 0x10,// *
                 0x10, 0x10, 0x7c, 0x10, 0x10,// +
@@ -408,12 +408,12 @@ const uint Font5x7[]
 
 // TODO: Subtract the offset from the char before starting the send sequence to save time if necessary
 // TODO: Also could pad the beginning of the font table to aovid the offset subtraction at the cost of 20*8 bytes of progmem
-// TODO: Could pad all chars out to 8 bytes wide to turn the the multiply by FONT_WIDTH into a shift
+// TODO: Could pad all chars out to 8 bytes wide to turn the the multiply by FONTSTD_WIDTH into a shift
 
 static inline void sendChar(uint c, uint skip, uint r, uint g, uint b) {
 
-    const uint *charbase = Font5x7 + ((c - ' ') * FONT_WIDTH);
-    uint col = FONT_WIDTH;
+    const uint *charbase = FontStd5x7 + ((c - ' ') * FONTSTD_WIDTH);
+    uint col = FONTSTD_WIDTH;
 
     while (skip--) {
         charbase++;
@@ -435,7 +435,7 @@ static inline void sendChar(uint c, uint skip, uint r, uint g, uint b) {
 // Skip is how many cols of the 1st char to skip for smooth scrolling
 static inline void sendString(const char *s, uint skip, const uint r, const uint g, const uint b) {
 
-    unsigned int l = PIXELS / (FONT_WIDTH + INTERCHAR_SPACE);
+    unsigned int l = PIXELS / (FONTSTD_WIDTH + INTERCHAR_SPACE);
 
     sendChar(*s, skip, r, g, b);   // First char is special case becuase it can be stepped for smooth scrolling
 
@@ -449,19 +449,19 @@ static inline void sendString(const char *s, uint skip, const uint r, const uint
 // A nice arcade font from...
 // http://jared.geek.nz/2014/jan/custom-fonts-for-microcontrollers
 
-#define ALTFONT_WIDTH 8
+#define FONTCHONK_WIDTH 8
 
-const uint altfont[]
-        PROGMEM = {
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,//
-                0x06, 0x06, 0x30, 0x30, 0x60, 0xc0, 0xc0, 0x00,// !
-                0xe0, 0xe0, 0x00, 0xe0, 0xe0, 0x00, 0x00, 0x00,// "
-                0x28, 0xfe, 0xfe, 0x28, 0xfe, 0xfe, 0x28, 0x00,// #
-                0xf6, 0xf6, 0xd6, 0xd6, 0xd6, 0xde, 0xde, 0x00,// $
-                0xc6, 0xce, 0x1c, 0x38, 0x70, 0xe6, 0xc6, 0x00,// %
-                0xfe, 0xfe, 0xd6, 0xc6, 0x16, 0x1e, 0x1e, 0x00,// &
-                0xe0, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,// '
-                0xfe, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,// (
+const uint FontChonk[]
+PROGMEM = {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,//
+        0x06, 0x06, 0x30, 0x30, 0x60, 0xc0, 0xc0, 0x00,// !
+        0xe0, 0xe0, 0x00, 0xe0, 0xe0, 0x00, 0x00, 0x00,// "
+        0x28, 0xfe, 0xfe, 0x28, 0xfe, 0xfe, 0x28, 0x00,// #
+        0xf6, 0xf6, 0xd6, 0xd6, 0xd6, 0xde, 0xde, 0x00,// $
+        0xc6, 0xce, 0x1c, 0x38, 0x70, 0xe6, 0xc6, 0x00,// %
+        0xfe, 0xfe, 0xd6, 0xc6, 0x16, 0x1e, 0x1e, 0x00,// &
+        0xe0, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,// '
+        0xfe, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,// (
                 0x00, 0xfe, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00,// )
                 0x6c, 0x10, 0xfe, 0xfe, 0xfe, 0x10, 0x6c, 0x00,// *
                 0x10, 0x10, 0x7c, 0x10, 0x10, 0x00, 0x00, 0x00,// +
@@ -570,11 +570,11 @@ void diagnosticBlink() {
 }
 
 // Send a char with a column-based color cycle
-static inline void sendCharColorCycle(uint c, uint *r, uint *g, uint *b) {
+static inline void sendCharColorCycle(const uint *font, const int fontWidth, uint c, uint *r, uint *g, uint *b) {
 
-    const uint *charbase = altfont + ((c - ' ') * ALTFONT_WIDTH);
+    const uint *charbase = font + ((c - ' ') * fontWidth);
 
-    uint col = ALTFONT_WIDTH;
+    uint col = fontWidth;
 
     while (col--) {
 
@@ -590,16 +590,15 @@ static inline void sendCharColorCycle(uint c, uint *r, uint *g, uint *b) {
 
 // Show the passed string with the arcade font and a nice vertical color cycle effect
 // columnsPrefix: the # of empty columns to add before the string, useful for spacing
-static inline void sendStringAlt(const char *s, int columnsPrefix) {
+static inline void
+sendStringColorCycle(const uint *font, const int fontWidth, const char *s, int columnsPrefix, uint *r, uint *g,
+                     uint *b) {
 
-    unsigned int l = PIXELS / (ALTFONT_WIDTH + INTERCHAR_SPACE);
+    unsigned int l = PIXELS / (fontWidth + INTERCHAR_SPACE);
 
     while (columnsPrefix--) {
         sendRowRGB(0, 0x00, 0x00, 0x00);
     }
-
-    uint g = 0;
-    uint b = 0x80;
 
     while (l--) {
 
@@ -609,7 +608,7 @@ static inline void sendStringAlt(const char *s, int columnsPrefix) {
 
         if (!c) break;
 
-        sendCharColorCycle(c, cyclingColor, &g, &b);
+        sendCharColorCycle(font, fontWidth, c, r, g, b);
     }
 }
 
@@ -759,7 +758,7 @@ void showAsChooser(char *blinkyStr, char *countyStr) {
 //            if (s == blinkyLen) {
 //                break;
 //            }
-//            for (uint step = 0; step < FONT_WIDTH +
+//            for (uint step = 0; step < FONTSTD_WIDTH +
 //                                       INTERCHAR_SPACE; step++) {
 //                // step though each column of the 1st char for smooth scrolling
 //                sendString(blinkyStr, step, brightness, brightness, brightness);
@@ -921,7 +920,7 @@ void showCharsOneByOneAndWait(const char *pointsStr, uint r, uint g, uint b, int
     for (uint p = 0; p < strlen(pointsStr); p++) {
 
         cli();
-//        sendStringAlt("                ");
+//        sendStringColorCycle("                ");
 //        sendIcon(enemies, which, 0, ENEMIES_WIDTH, r, g, b);
         for (uint i = 0; i <= p; i++) {
             sendChar(*(pointsStr + i), 0, r >> 2, g >> 2, b >> 2);     // Dim text slightly
@@ -942,16 +941,14 @@ void showCharsOneByOne(const char *pointsStr, uint r, uint g, uint b) {
     showCharsOneByOneAndWait(pointsStr, r, g, b, 500);
 }
 
-void showallyourbasestyleOnBothPanels(char *str, int columnsPrefix) {
-//    const char *allyourbase = "CAT: ALL YOUR BASE ARE BELONG TO US !!!";
-
+void showStringColorCycleOnBothPanels(const uint *font, const int fontWidth, char *str, int columnsPrefix,
+                                      uint *r, uint *g, uint *b, uint slide) {
     clear();
-    for (unsigned int slide = 1250; slide; slide -= 10) {
+    for (slide; slide; slide -= 10) {
         *cyclingColor = (slide & 0xff);
         cli();
-//        sendChar(' ', 0, 0, 0, 0);
-        sendStringAlt(str, columnsPrefix);
-        sendStringAlt(str, columnsPrefix + 5);
+        sendStringColorCycle(font, fontWidth, str, columnsPrefix, r, g, b);
+        sendStringColorCycle(font, fontWidth, str, columnsPrefix + 5, r, g, b);
         sei();
         show();
         delay(ALLYOURBASE_DELAY);
@@ -959,9 +956,23 @@ void showallyourbasestyleOnBothPanels(char *str, int columnsPrefix) {
 
 }
 
+void showallyourbasestyleOnBothPanels(char *str, int columnsPrefix) {
+//    const char *allyourbase = "CAT: ALL YOUR BASE ARE BELONG TO US !!!";
+    uint g = 0;
+    uint b = 0x80;
+    showStringColorCycleOnBothPanels(FontChonk, FONTCHONK_WIDTH, str, columnsPrefix, cyclingColor, &g, &b, 1250);
+}
+
 void showInstagramAd() {
     showCharsOneByOne("INSTAGRAM:INSTAGRAM:", GAMMA(0xfe), GAMMA(0xd4), GAMMA(0x3b));
     showCharsOneByOneAndWait(" @APHEXCX  @APHEXCX ", GAMMA(0xef), GAMMA(0x0c), GAMMA(0x1d), 1000);
+    uint r = GAMMA(0xef);
+    uint g = GAMMA(0x0c);
+    uint b = GAMMA(0x2d);
+//    // Idk why I can't get the slide value to show up for longer, even 30000 is really short, so just call it twice
+    showStringColorCycleOnBothPanels(FontStd5x7, FONTSTD_WIDTH, " @APHEXCX ", 0, cyclingColor, &g, &b, 1250);
+    //TODO cycle color without slide
+//    showStringColorCycleOnBothPanels(FontStd5x7, FONTSTD_WIDTH, " @APHEXCX ", 0, cyclingColor, &g, &b, 1250);
 
 //    showallyourbasestyle("INSTAGRAM INSTAGRAM ");
 //    showallyourbasestyle("@APHEXCX  @APHEXCX ");
@@ -1025,7 +1036,7 @@ const uint enemies[]
 
 void showInvaders() {
 
-    uint acount = PIXELS / (ENEMIES_WIDTH + FONT_WIDTH);      // How many aliens do we have room for?
+    uint acount = PIXELS / (ENEMIES_WIDTH + FONTSTD_WIDTH);      // How many aliens do we have room for?
 
     for (int8_t row = -7; row < 7; row++) {     // Walk down the rows
 
@@ -1173,7 +1184,7 @@ void marquee() {
 
         };
 
-        for (uint step = 0; step < FONT_WIDTH +
+        for (uint step = 0; step < FONTSTD_WIDTH +
                                    INTERCHAR_SPACE; step++) {   // step though each column of the 1st char for smooth scrolling
 
             delta = millis() - timeOfLastBeat;
