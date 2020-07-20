@@ -31,7 +31,7 @@ ISR (PCINT1_vect) {
 }
 
 // Used to receive data on a virtual RX pin instead of the usual pin 0
-#include <SoftwareSerial.h>
+#include "SoftwareSerial/SoftwareSerial.h"
 
 #define rxPin 10
 #define txPin 11
@@ -59,7 +59,7 @@ const char ASOT[] PROGMEM = "                    "
 //How often to advertise "MSG ME!!!", e.g. every 5 marquee scrolls
 #define ADVERTISE_EVERY 8
 //Speed of invader sequence, lower is faster
-#define INVADER_DELAY 60
+#define INVADER_DELAY 50
 //Speed of scrolling text marquee, lower is faster
 #define MARQUEE_DELAY 25
 //Affects how long the all your base style text stays on screen. Higher is faster
@@ -777,7 +777,10 @@ void showcountdown() {
 
     // Start sequence.....
 
-    const char *countdownstr = "NEW MSG IN   ";
+//    const char *countdownstr = "NEW MSG IN   ";
+//    const char *countdownstr = "NOW PLAYING";
+    const char *countdownstr1 = "NOW";
+    const char *countdownstr2 = "PLAYING";
 
     unsigned int count = 600;
 
@@ -797,9 +800,9 @@ void showcountdown() {
         uint brightness = GAMMA(((count % 100) * 256) / 100);
 
         cli();
-        sendString(countdownstr, 0, brightness, brightness, brightness);
-
+        sendString(countdownstr1, 0, brightness, brightness, brightness);
         sendRowRGB(0x00, 0, 0, 0xff);
+        sendString(countdownstr2, 0, brightness, brightness, brightness);
 
         //  sendChar( '0' , 0 , 0x80, 0 , 0 );
 
@@ -824,7 +827,9 @@ void showcountdown() {
         uint brightness = GAMMA(((count % 100) * 256) / 100);
 
         cli();
-        sendString(countdownstr, 0, brightness, brightness, brightness);
+        sendString(countdownstr1, 0, brightness, brightness, brightness);
+        sendRowRGB(0x00, 0, 0, 0xff);
+        sendString(countdownstr2, 0, brightness, brightness, brightness);
 
         sendRowRGB(0x00, 0, 0, 0xff);   // We need to quickly send a blank byte just to keep from missing our deadlne.
         sendChar('0', 0, brightness, 0, 0);
@@ -966,11 +971,15 @@ void showallyourbasestyleOnBothPanels(char *str, int columnsPrefix) {
 void showInstagramAd() {
     showCharsOneByOne("INSTAGRAM:INSTAGRAM:", GAMMA(0xfe), GAMMA(0xd4), GAMMA(0x3b));
     showCharsOneByOneAndWait(" @APHEXCX  @APHEXCX ", GAMMA(0xef), GAMMA(0x0c), GAMMA(0x1d), 1000);
+    showCharsOneByOne("TWITTER:  TWITTER:  ", GAMMA(0x1d), GAMMA(0xa1), GAMMA(0xf2));
+    showCharsOneByOneAndWait("  @APHEX    @APHEX ", GAMMA(0x1d), GAMMA(0xa1), GAMMA(0xf2), 1000);
+    showCharsOneByOne("SOUNDCLOUDSOUNDCLOUD", GAMMA(0xff), GAMMA(0x77), GAMMA(0x00));
+    showCharsOneByOneAndWait(" @APHEXCX  @APHEXCX ", GAMMA(0xff), GAMMA(0x77), GAMMA(0x00), 1000);
     uint r = GAMMA(0xef);
     uint g = GAMMA(0x0c);
     uint b = GAMMA(0x2d);
 //    // Idk why I can't get the slide value to show up for longer, even 30000 is really short, so just call it twice
-    showStringColorCycleOnBothPanels(FontStd5x7, FONTSTD_WIDTH, " @APHEXCX ", 0, cyclingColor, &g, &b, 1250);
+//    showStringColorCycleOnBothPanels(FontStd5x7, FONTSTD_WIDTH, " @APHEXCX ", 0, cyclingColor, &g, &b, 1250);
     //TODO cycle color without slide
 //    showStringColorCycleOnBothPanels(FontStd5x7, FONTSTD_WIDTH, " @APHEXCX ", 0, cyclingColor, &g, &b, 1250);
 
@@ -979,9 +988,11 @@ void showInstagramAd() {
 }
 
 void showMainAd() {
-    showallyourbasestyleOnBothPanels(" DREAM", 0);
-    showallyourbasestyleOnBothPanels(" STATE", 0);
-    showallyourbasestyleOnBothPanels("2019!!", 4);
+    showallyourbasestyleOnBothPanels("QUARAN", 4);
+    showallyourbasestyleOnBothPanels("QUARAN", 4);
+    showallyourbasestyleOnBothPanels("TRANCE", 4);
+    showallyourbasestyleOnBothPanels("TRANCE", 4);
+//    showallyourbasestyleOnBothPanels("2019!!", 4);
 }
 
 void showTalkToUsAd() {
@@ -990,9 +1001,9 @@ void showTalkToUsAd() {
 //    showCharsOneByOne("FOR RIDINGFOR RIDING", GAMMA(0xfe), GAMMA(0xd4), GAMMA(0x3b));
 //    showCharsOneByOneAndWait("  BAAAHS    BAAAHS  ", GAMMA(0xea), GAMMA(0x17), GAMMA(0x8c), 1000);
 
-    showCharsOneByOne("WANT TO...WANT TO...", GAMMA(0x04), GAMMA(0xff), GAMMA(0x19));
-    showCharsOneByOneAndWait("ADD A MSG?ADD A MSG?", GAMMA(0x04), GAMMA(0xff), GAMMA(0x19), 1200);
-    showCharsOneByOneAndWait("ASK US!!<3ASK US!!<3", GAMMA(0xff), GAMMA(0x05), GAMMA(0x5d), 1200);
+//    showCharsOneByOne("WANT TO...WANT TO...", GAMMA(0x04), GAMMA(0xff), GAMMA(0x19));
+//    showCharsOneByOneAndWait("ADD A MSG?ADD A MSG?", GAMMA(0x04), GAMMA(0xff), GAMMA(0x19), 1200);
+//    showCharsOneByOneAndWait("ASK US!!<3ASK US!!<3", GAMMA(0xff), GAMMA(0x05), GAMMA(0x5d), 1200);
 //    showCharsOneByOneAndWait("CUM ON IN!CUM ON IN!", GAMMA(0xff), GAMMA(0x05), GAMMA(0x5d), 1200);
 }
 
