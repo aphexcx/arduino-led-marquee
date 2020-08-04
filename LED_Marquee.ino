@@ -32,12 +32,14 @@ ISR (PCINT1_vect) {
     }
 }
 
+#include "ArduinoJson-v6.16.0.h"
+
 // Used to receive data on a virtual RX pin instead of the usual pin 0
 #include "SoftwareSerial/SoftwareSerial.h"
 
 #define rxPin 10
 #define txPin 11
-SoftwareSerial virtualSerial(rxPin, txPin); // RX, TX
+SoftwareSerial softSerial(rxPin, txPin); // RX, TX
 
 const char ASOT[] PROGMEM = "                    ";
 /*"I had a dream last night... A vision! I saw a world full of people. "
@@ -612,12 +614,12 @@ int loopcount = 0;
 void diagnosticBlink() {
     if (DEBUG) {
         diagnosticLedOn();
-//        delay(500);
-//        diagnosticLedOff();
-//        delay(500);
-//        diagnosticLedOn();
-//        delay(500);
+        delay(5);
         diagnosticLedOff();
+        delay(5);
+        diagnosticLedOn();
+//        delay(5);
+//        diagnosticLedOff();
 //        delay(300);
     }
 }
@@ -680,13 +682,13 @@ void setupLeds() {
 
 void startSerial() {
     // set the data rate for the SoftwareSerial port
-    virtualSerial.begin(19200);
-    virtualSerial.flush();
+    softSerial.begin(19200);
+    softSerial.flush();
 //    Serial.begin(19200);
 }
 
 void stopSerial() {
-    virtualSerial.end();
+    softSerial.end();
 }
 
 void setupSerial() {
@@ -1239,9 +1241,8 @@ void marquee() {
 // Notifies the IMX that we're ready to retrieve custom message data
 bool readSerialData() {
     startSerial();
-//    delay(200);
     // send special symbol so IMX knows to respond with custom message data
-    virtualSerial.print("~");
+    softSerial.print("~");
 
     char *incomingBuffer;
     if (currentBuffer == bufferA) {
@@ -1251,15 +1252,14 @@ bool readSerialData() {
     }
     //Hmm do I need to do this each time or only if something valid was read?
 //        memset(bufferA, 0x00, STRINGBUFFER_LEN);
-    int len = virtualSerial.readBytesUntil('\r', incomingBuffer + STRING_PADDING, STRINGBUFFER_LEN - STRING_PADDING);
+    int bytesRead = 0;
+    bytesRead = softSerial.readBytesUntil('\r', incomingBuffer + STRING_PADDING, STRINGBUFFER_LEN - STRING_PADDING);
+    incomingBuffer[STRING_PADDING + bytesRead] = 0x00; // Null terminate
 
-    incomingBuffer[STRING_PADDING + len] = 0x00; // Null terminate
-
-//    shouldShowNewMsgAlert = false;
     showInChooserStyle = false;
     showInInputStyle = false;
     // If we got something, swap currentBuffer to point to the incoming.
-    if (len > 0) {
+    if (bytesRead > 0) {
         currentBuffer = incomingBuffer;
         // If the first non-padding char is a BEL, show the new msg alert
         switch (currentBuffer[STRING_PADDING]) {
@@ -1327,7 +1327,7 @@ bool readSerialData() {
 //    virtualSerial.print(currentBuffer);
     stopSerial();
 
-    return len > 0;
+    return bytesRead > 0;
 }
 
 void setup() {
@@ -1370,7 +1370,6 @@ void loop() {
 
 //    diagnosticBlink();
     diagnosticLedOn();
-
     readSerialData();
     diagnosticLedOff();
 
