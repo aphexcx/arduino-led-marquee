@@ -4,6 +4,8 @@
 
 #include <Arduino.h>
 
+#include "Color.h"
+
 // Pin 13 has an LED connected on most Arduino boards.
 // give it a name:
 #define diagnosticLed 13
@@ -37,27 +39,27 @@ ISR (PCINT1_vect) {
 #define txPin 11
 SoftwareSerial virtualSerial(rxPin, txPin); // RX, TX
 
-const char ASOT[] PROGMEM = "                    "
-                            "I had a dream last night... A vision! I saw a world full of people. "
-                            "Everybody was dancing! And screaming loud! They were just there to listen to "
-                            "the music. Some even had their eyes closed. "
-                            "Everybody was just smiling. "
-                            "It was deep. "
-                            "It was underground. "
-                            "Tranceparent. "
-                            "It was magical. "
-                            "It was a happy place... "
-                            "celebrating music! "
-                            "Celebrating life! "
-                            "Men and women - free - without a worry! "
-                            "Then, when I woke up, I realized: "
-                            "I WANNA BE IN THAT MOMENT! "
-                            "The very essence of my existence is looking for that emotion! "
-                            "And when the weekend comes...   "
-                            "I  L I V E  F O R  T H A T  E N E R G Y . "; //598 chars
-
+const char ASOT[] PROGMEM = "                    ";
+/*"I had a dream last night... A vision! I saw a world full of people. "
+"Everybody was dancing! And screaming loud! They were just there to listen to "
+"the music. Some even had their eyes closed. "
+"Everybody was just smiling. "
+"It was deep. "
+"It was underground. "
+"Tranceparent. "
+"It was magical. "
+"It was a happy place... "
+"celebrating music! "
+"Celebrating life! "
+"Men and women - free - without a worry! "
+"Then, when I woke up, I realized: "
+"I WANNA BE IN THAT MOMENT! "
+"The very essence of my existence is looking for that emotion! "
+"And when the weekend comes...   "
+"I  L I V E  F O R  T H A T  E N E R G Y . "; //598 chars
+*/
 //How often to advertise "MSG ME!!!", e.g. every 5 marquee scrolls
-#define ADVERTISE_EVERY 8
+#define ADVERTISE_EVERY 5
 //Speed of invader sequence, lower is faster
 #define INVADER_DELAY 50
 //Speed of scrolling text marquee, lower is faster
@@ -67,20 +69,39 @@ const char ASOT[] PROGMEM = "                    "
 //Speed of chars spelled out one by one effect, lower is faster
 #define CHARS_ONEBYONE_DELAY 50
 
-// The char indicating we should show a new message alert (currently BEL, \x07)
-#define BEL '\x07'
-// The char indicating we should show this string in the new message alert style (currently SOH, \x01)
-#define SOH '\x01'
+// The char indicating we should show the text as a new message alert (currently BEL, \x07)
+#define BEL 7
+
+// Start of header. 1 char follows, defining what style to show the text in
+// Current options:
+// 'C' for chonky font with a color slide
+// 'O' for one-by-one characters
+// 'F' flashing announcement with countdown
+// 'D' default (marquee scroll with a slow color cycle)
+#define SOH 1
+
+// Color code. 3 bytes follow: r, g, b int values, then STX for start of text.
+#define ACK 6
+
+// Start of text. String starts here
+#define STX 2
+
+// Unused
+#define ETX '\x03'
+
+// The char indicating we should show this string in flashing input style
+#define EOT 4
+// The char indicating we should show this string in input style
+#define ENQ 5
+
+// Device control 1 (used for chooser mode)
+#define DC1 17
 // The char indicating the end of extra data passed in after a control char
 #define DLE 10
 
-// chars indicating whether to enable/disable beat detector mic (connected to A0 pin change interrupt)
-#define STX '\x02'
-#define ETX '\x03'
-// The char indicating we should show this string in flashing input style
-#define EOT '\x04'
-// The char indicating we should show this string in input style
-#define ENQ '\x05'
+// Device control 4; used for enabling/disabling the beat detector mic (connected to A0 pin change interrupt)
+#define DC4 20
+#define VT 11
 
 // Pad this amount so that scrolling starts nicely off the end
 #define STRING_PADDING 20
@@ -104,15 +125,34 @@ char *currentBuffer = bufferA;
 
 char *extraDataBuffer = strdup(currentBuffer + STRING_PADDING);
 
+bool shouldShowNewMsgAlert = false;
 // The bool indicating we should show this string in the chooser style
 bool showInChooserStyle = false;
 // The bool indicating we should show this string in input style
 int showInInputStyle = NULL;
 
+// This is what style the current text will be shown in
+char textStyle = 'D';
+Color textColor = {0, 0, 0};
+unsigned short textDelay = 500;
+
+#define INTERCHAR_SPACE 1
+
 // Change this to be at least as long as your pixel string (too long will work fine, just be a little slower)
 #define NUM_PANELS 2  // Number of panels. There are 2.
-#define PIXELS_PER_STRING 60  // Number of pixels in the string. I am using 60LED/M
-#define PIXELS NUM_PANELS*PIXELS_PER_STRING  // Length of pixels total. I am using 2 meters of 60LED/M
+#define COLUMNS_PER_PANEL 60  // Number of columns per panel, in my case, the # of pixels in each LED string. I am using 60LED/M
+#define PIXELS NUM_PANELS*COLUMNS_PER_PANEL  // Length of pixels total. I am using 2 meters of 60LED/M
+
+/* Return how many columns to pad this string by on each side to get it to be in the middle of the panel.
+ * E.g.
+ * (60-6)/2 = 27
+ * (60-1)/2 = 29
+ */
+uint getColumnsToPadForString(const char *str, int fontWidth) {
+    uint stringColumns = strlen(str) * (fontWidth + INTERCHAR_SPACE) -
+                         1; //Minus 1 because we don't need an interchar space at the end
+    return (COLUMNS_PER_PANEL - stringColumns) / 2;
+}
 
 // These values depend on which pins your 8 strings are connected to and what board you are using
 // More info on how to find these at http://www.arduino.cc/en/Reference/PortManipulation
@@ -262,7 +302,7 @@ void show() {
 
 // Send 3 bytes of color data (R,G,B) for a signle pixel down all the connected stringsat the same time
 // A 1 bit in "row" means send the color, a 0 bit means send black.
-static inline void sendRowRGB(uint row, uint r, uint g, uint b) {
+static inline void sendColumnRGB(uint row, uint r, uint g, uint b) {
 
     sendBitx8(row, g, onBits);    // WS2812 takes colors in GRB order
     sendBitx8(row, r, onBits);    // WS2812 takes colors in GRB order
@@ -276,7 +316,7 @@ static inline void clear() {
     cli();
     for (unsigned int i = 0; i < PIXELS; i++) {
 
-        sendRowRGB(0, 0, 0, 0);
+        sendColumnRGB(0, 0, 0, 0);
     }
     sei();
 
@@ -298,22 +338,21 @@ static inline void clear() {
 // PROGMEM after variable name as per https://www.arduino.cc/en/Reference/PROGMEM
 
 #define FONTSTD_WIDTH 5
-#define INTERCHAR_SPACE 1
 #define ASCII_OFFSET 0x20    // ASSCI code of 1st char in font array
 // Max chars a single panel can display at once
-#define MAX_CHARS_PER_PANEL PIXELS_PER_STRING / (FONTSTD_WIDTH + INTERCHAR_SPACE)
+#define MAX_CHARS_PER_PANEL COLUMNS_PER_PANEL / (FONTSTD_WIDTH + INTERCHAR_SPACE)
 
 const uint FontStd5x7[]
-PROGMEM = {
-        0x00, 0x00, 0x00, 0x00, 0x00,//
-        0x00, 0x00, 0xfa, 0x00, 0x00,// !
-        0x00, 0xe0, 0x00, 0xe0, 0x00,// "
-        0x28, 0xfe, 0x28, 0xfe, 0x28,// #
-        0x24, 0x54, 0xfe, 0x54, 0x48,// $
-        0xc4, 0xc8, 0x10, 0x26, 0x46,// %
-        0x6c, 0x92, 0xaa, 0x44, 0x0a,// &
-        0x00, 0xa0, 0xc0, 0x00, 0x00,// '
-        0x00, 0x38, 0x44, 0x82, 0x00,// (
+        PROGMEM = {
+                0x00, 0x00, 0x00, 0x00, 0x00,//
+                0x00, 0x00, 0xfa, 0x00, 0x00,// !
+                0x00, 0xe0, 0x00, 0xe0, 0x00,// "
+                0x28, 0xfe, 0x28, 0xfe, 0x28,// #
+                0x24, 0x54, 0xfe, 0x54, 0x48,// $
+                0xc4, 0xc8, 0x10, 0x26, 0x46,// %
+                0x6c, 0x92, 0xaa, 0x44, 0x0a,// &
+                0x00, 0xa0, 0xc0, 0x00, 0x00,// '
+                0x00, 0x38, 0x44, 0x82, 0x00,// (
                 0x00, 0x82, 0x44, 0x38, 0x00,// )
                 0x10, 0x54, 0x38, 0x54, 0x10,// *
                 0x10, 0x10, 0x7c, 0x10, 0x10,// +
@@ -412,24 +451,25 @@ PROGMEM = {
 
 static inline void sendChar(uint c, uint skip, uint r, uint g, uint b) {
 
-    const uint *charbase = FontStd5x7 + ((c - ' ') * FONTSTD_WIDTH);
-    uint col = FONTSTD_WIDTH;
+    // For the VT char, we only send a single column
+    if (c != VT) {
+        const uint *charbase = FontStd5x7 + ((c - ' ') * FONTSTD_WIDTH);
+        uint col = FONTSTD_WIDTH;
 
-    while (skip--) {
-        charbase++;
-        col--;
+        while (skip--) {
+            charbase++;
+            col--;
+        }
+
+        while (col--) {
+            sendColumnRGB(pgm_read_byte_near(charbase++), r, g, b);
+        }
+
+        // TODO: FLexible interchar spacing
     }
-
-    while (col--) {
-        sendRowRGB(pgm_read_byte_near(charbase++), r, g, b);
-    }
-
-    // TODO: FLexible interchar spacing
-
-    sendRowRGB(0, r, g, b);    // Interchar space
+    sendColumnRGB(0, r, g, b);    // Interchar space
 
 }
-
 
 // Show the passed string. The last letter of the string will be in the rightmost pixels of the display.
 // Skip is how many cols of the 1st char to skip for smooth scrolling
@@ -446,22 +486,35 @@ static inline void sendString(const char *s, uint skip, const uint r, const uint
     }
 }
 
+void sendPaddingForString(const char *str, int fontWidth) {
+    int padding = getColumnsToPadForString(str, fontWidth);
+    while (padding--) {
+        sendColumnRGB(0, 0, 0, 0);
+    }
+}
+
+static inline void sendStringJustified(char *s, int fontWidth, uint skip, const uint r, const uint g, const uint b) {
+    sendPaddingForString(s, fontWidth);
+    sendString(s, skip, r, g, b);
+    sendPaddingForString(s, fontWidth);
+}
+
 // A nice arcade font from...
 // http://jared.geek.nz/2014/jan/custom-fonts-for-microcontrollers
 
 #define FONTCHONK_WIDTH 8
 
 const uint FontChonk[]
-PROGMEM = {
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,//
-        0x06, 0x06, 0x30, 0x30, 0x60, 0xc0, 0xc0, 0x00,// !
-        0xe0, 0xe0, 0x00, 0xe0, 0xe0, 0x00, 0x00, 0x00,// "
-        0x28, 0xfe, 0xfe, 0x28, 0xfe, 0xfe, 0x28, 0x00,// #
-        0xf6, 0xf6, 0xd6, 0xd6, 0xd6, 0xde, 0xde, 0x00,// $
-        0xc6, 0xce, 0x1c, 0x38, 0x70, 0xe6, 0xc6, 0x00,// %
-        0xfe, 0xfe, 0xd6, 0xc6, 0x16, 0x1e, 0x1e, 0x00,// &
-        0xe0, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,// '
-        0xfe, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,// (
+        PROGMEM = {
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,//
+                0x06, 0x06, 0x30, 0x30, 0x60, 0xc0, 0xc0, 0x00,// !
+                0xe0, 0xe0, 0x00, 0xe0, 0xe0, 0x00, 0x00, 0x00,// "
+                0x28, 0xfe, 0xfe, 0x28, 0xfe, 0xfe, 0x28, 0x00,// #
+                0xf6, 0xf6, 0xd6, 0xd6, 0xd6, 0xde, 0xde, 0x00,// $
+                0xc6, 0xce, 0x1c, 0x38, 0x70, 0xe6, 0xc6, 0x00,// %
+                0xfe, 0xfe, 0xd6, 0xc6, 0x16, 0x1e, 0x1e, 0x00,// &
+                0xe0, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,// '
+                0xfe, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,// (
                 0x00, 0xfe, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00,// )
                 0x6c, 0x10, 0xfe, 0xfe, 0xfe, 0x10, 0x6c, 0x00,// *
                 0x10, 0x10, 0x7c, 0x10, 0x10, 0x00, 0x00, 0x00,// +
@@ -578,12 +631,12 @@ static inline void sendCharColorCycle(const uint *font, const int fontWidth, uin
 
     while (col--) {
 
-        sendRowRGB(pgm_read_byte_near(charbase++), *r, *g, *b);
+        sendColumnRGB(pgm_read_byte_near(charbase++), *r, *g, *b);
 
         *cyclingColor += 10;
     }
 
-    sendRowRGB(0, 0, 0, 0);
+    sendColumnRGB(0, 0, 0, 0);
     *cyclingColor += 10;
 
 }
@@ -597,7 +650,7 @@ sendStringColorCycle(const uint *font, const int fontWidth, const char *s, int c
     unsigned int l = PIXELS / (fontWidth + INTERCHAR_SPACE);
 
     while (columnsPrefix--) {
-        sendRowRGB(0, 0x00, 0x00, 0x00);
+        sendColumnRGB(0, 0x00, 0x00, 0x00);
     }
 
     while (l--) {
@@ -717,7 +770,7 @@ void showAsInputStyle(char *str, int idxToBlink, int mode) {
             }
         }
 
-        sendRowRGB(0x00, 0, 0, 0xff);
+        sendColumnRGB(0x00, 0, 0, 0xff);
 
         sei();
         show();
@@ -750,7 +803,7 @@ void showAsChooser(char *blinkyStr, char *countyStr) {
         // County part
         sendString(countyStr, 0, 0x80, 0, 0);
 
-        sendRowRGB(0x00, 0, 0, 0xff);
+        sendColumnRGB(0x00, 0, 0, 0xff);
 
         // Blinky part
 //        while (*blinkyStr) {
@@ -773,16 +826,14 @@ void showAsChooser(char *blinkyStr, char *countyStr) {
     }
 }
 
-void showcountdown() {
+void showcountdown(char *countdownstr, unsigned int count = 600) {
 
     // Start sequence.....
 
 //    const char *countdownstr = "NEW MSG IN   ";
 //    const char *countdownstr = "NOW PLAYING";
-    const char *countdownstr1 = "NOW";
-    const char *countdownstr2 = "PLAYING";
-
-    unsigned int count = 600;
+//    const char *countdownstr1 = "NOW";
+//    const char *countdownstr2 = "PLAYING";
 
     clear();
     while (count > 0) {
@@ -800,9 +851,9 @@ void showcountdown() {
         uint brightness = GAMMA(((count % 100) * 256) / 100);
 
         cli();
-        sendString(countdownstr1, 0, brightness, brightness, brightness);
-        sendRowRGB(0x00, 0, 0, 0xff);
-        sendString(countdownstr2, 0, brightness, brightness, brightness);
+        sendStringJustified(countdownstr, FONTSTD_WIDTH, 0, brightness, brightness, brightness);
+
+        sendColumnRGB(0x00, 0, 0, 0xff);
 
         //  sendChar( '0' , 0 , 0x80, 0 , 0 );
 
@@ -818,20 +869,19 @@ void showcountdown() {
     count = 100;
 
     // One last farewell blink
-
     while (count > 0) {
 
         count--;
 
-
         uint brightness = GAMMA(((count % 100) * 256) / 100);
 
         cli();
-        sendString(countdownstr1, 0, brightness, brightness, brightness);
-        sendRowRGB(0x00, 0, 0, 0xff);
-        sendString(countdownstr2, 0, brightness, brightness, brightness);
+        sendStringJustified(countdownstr, FONTSTD_WIDTH, 0, brightness, brightness, brightness);
+//        sendColumnRGB(0x00, 0, 0, 0xff);
+//        sendString(countdownstr2, 0, brightness, brightness, brightness);
 
-        sendRowRGB(0x00, 0, 0, 0xff);   // We need to quickly send a blank byte just to keep from missing our deadlne.
+        sendColumnRGB(0x00, 0, 0,
+                      0xff);   // We need to quickly send a blank byte just to keep from missing our deadlne.
         sendChar('0', 0, brightness, 0, 0);
         sendChar('.', 0, brightness, 0, 0);
         sendChar('0', 0, brightness, 0, 0);
@@ -841,9 +891,8 @@ void showcountdown() {
         sei();
         show();
     }
-
-
 }
+
 
 void showstarfieldcustom(int stars) {
 
@@ -864,15 +913,15 @@ void showstarfieldcustom(int stars) {
         unsigned int l = x;
 
         while (l--) {
-            sendRowRGB(0, 0x00, 0x00, 0x00);
+            sendColumnRGB(0, 0x00, 0x00, 0x00);
         }
 
-        sendRowRGB(bitmask, 0x40, 0x40, 0xff);  // Starlight blue
+        sendColumnRGB(bitmask, 0x40, 0x40, 0xff);  // Starlight blue
 
         l = PIXELS - x;
 
         while (l--) {
-            sendRowRGB(0, 0x00, 0x00, 0x00);
+            sendColumnRGB(0, 0x00, 0x00, 0x00);
         }
 
 
@@ -893,58 +942,45 @@ static inline void sendIcon(const uint *fontbase, uint which, int8_t shift, uint
     const uint *charbase = fontbase + (which * width);
 
     if (shift < 0) {
-
         uint shiftabs = -1 * shift;
-
         while (width--) {
-
             uint row = pgm_read_byte_near(charbase++);
-
-            sendRowRGB(row << shiftabs, r, g, b);
-
+            sendColumnRGB(row << shiftabs, r, g, b);
         }
-
     } else {
-
-
         while (width--) {
-
-            sendRowRGB((pgm_read_byte_near(charbase++) >> shift) & onBits, r, g, b);
-
+            sendColumnRGB((pgm_read_byte_near(charbase++) >> shift) & onBits, r, g, b);
         }
-
     }
 
 }
 
-
-void showCharsOneByOneAndWait(const char *pointsStr, uint r, uint g, uint b, int delayMs) {
-
+void showCharsOneByOneOnBothPanels(const char *str, Color textColor, int delayMs = 500) {
+    Color tc = textColor;
     clear();
-
-    for (uint p = 0; p < strlen(pointsStr); p++) {
-
+    for (uint p = 0; p < strlen(str); p++) {
         cli();
+        sendPaddingForString(str, FONTSTD_WIDTH);
 //        sendStringColorCycle("                ");
 //        sendIcon(enemies, which, 0, ENEMIES_WIDTH, r, g, b);
         for (uint i = 0; i <= p; i++) {
-            sendChar(*(pointsStr + i), 0, r >> 2, g >> 2, b >> 2);     // Dim text slightly
+            sendChar(*(str + i), 0, GAMMA(tc.r), GAMMA(tc.g), GAMMA(tc.b));
         }
+        sendPaddingForString(str, FONTSTD_WIDTH);
         sei();
         delay(CHARS_ONEBYONE_DELAY);
-
     }
     delay(delayMs);
 }
 
 //TODO take char, pad (& center) to MAX_CHARS_PER_PANEL, and multiply by NUM_PANELS
-void showCharsOneByOneOnBothPanels(const char *pointsStr, uint r, uint g, uint b) {
-    showCharsOneByOneAndWait(pointsStr, r, g, b, 500);
-}
+//void showCharsOneByOneOnBothPanels(const char *pointsStr, Color textColor, int delayMs = 500) {
+//    showCharsOneByOneAndWait(pointsStr, textColor.r, textColor.g, textColor.b, delayMs);
+//}
 
-void showCharsOneByOne(const char *pointsStr, uint r, uint g, uint b) {
-    showCharsOneByOneAndWait(pointsStr, r, g, b, 500);
-}
+//void showCharsOneByOne(const char *pointsStr, uint r, uint g, uint b) {
+//    showCharsOneByOneAndWait(pointsStr, r, g, b, 500);
+//}
 
 void showStringColorCycleOnBothPanels(const uint *font, const int fontWidth, char *str, int columnsPrefix,
                                       uint *r, uint *g, uint *b, uint slide) {
@@ -969,12 +1005,12 @@ void showallyourbasestyleOnBothPanels(char *str, int columnsPrefix) {
 }
 
 void showInstagramAd() {
-    showCharsOneByOne("INSTAGRAM:INSTAGRAM:", GAMMA(0xfe), GAMMA(0xd4), GAMMA(0x3b));
-    showCharsOneByOneAndWait(" @APHEXCX  @APHEXCX ", GAMMA(0xef), GAMMA(0x0c), GAMMA(0x1d), 1000);
-    showCharsOneByOne("TWITTER:  TWITTER:  ", GAMMA(0x1d), GAMMA(0xa1), GAMMA(0xf2));
-    showCharsOneByOneAndWait("  @APHEX    @APHEX ", GAMMA(0x1d), GAMMA(0xa1), GAMMA(0xf2), 1000);
-    showCharsOneByOne("SOUNDCLOUDSOUNDCLOUD", GAMMA(0xff), GAMMA(0x77), GAMMA(0x00));
-    showCharsOneByOneAndWait(" @APHEXCX  @APHEXCX ", GAMMA(0xff), GAMMA(0x77), GAMMA(0x00), 1000);
+    showCharsOneByOneOnBothPanels("INSTAGRAM:", Color{0xfe, 0xd4, 0x3b});
+    showCharsOneByOneOnBothPanels("@APHEXCX", Color{0xef, 0x0c, 0x1d}, 1000);
+//    showCharsOneByOne("TWITTER:  TWITTER:  ", GAMMA(0x1d), GAMMA(0xa1), GAMMA(0xf2));
+//    showCharsOneByOneAndWait("  @APHEX    @APHEX ", GAMMA(0x1d), GAMMA(0xa1), GAMMA(0xf2), 1000);
+//    showCharsOneByOne("SOUNDCLOUDSOUNDCLOUD", GAMMA(0xff), GAMMA(0x77), GAMMA(0x00));
+//    showCharsOneByOneAndWait("DADPARTYSFDADPARTYSF", GAMMA(0xff), GAMMA(0x77), GAMMA(0x00), 1000);
     uint r = GAMMA(0xef);
     uint g = GAMMA(0x0c);
     uint b = GAMMA(0x2d);
@@ -988,10 +1024,12 @@ void showInstagramAd() {
 }
 
 void showMainAd() {
-    showallyourbasestyleOnBothPanels("QUARAN", 4);
-    showallyourbasestyleOnBothPanels("QUARAN", 4);
-    showallyourbasestyleOnBothPanels("TRANCE", 4);
-    showallyourbasestyleOnBothPanels("TRANCE", 4);
+    showallyourbasestyleOnBothPanels("DAD SF", 4);
+    showallyourbasestyleOnBothPanels("DAD SF", 4);
+    showallyourbasestyleOnBothPanels("X X X ", 6);
+    showallyourbasestyleOnBothPanels("BAAAHS", 4);
+    showallyourbasestyleOnBothPanels("BAAAHS", 4);
+//    showallyourbasestyleOnBothPanels("TRANCE", 4);
 //    showallyourbasestyleOnBothPanels("2019!!", 4);
 }
 
@@ -1050,9 +1088,7 @@ void showInvaders() {
     uint acount = PIXELS / (ENEMIES_WIDTH + FONTSTD_WIDTH);      // How many aliens do we have room for?
 
     for (int8_t row = -7; row < 7; row++) {     // Walk down the rows
-
         //  Walk them 6 pixels per row
-
         // ALternate direction on each row
 
         uint start, end, step;
@@ -1070,24 +1106,23 @@ void showInvaders() {
         for (char p = start; p != end; p += step) {
             // Now slowly move aliens
             // work our way though the aliens moving each one to the left
-
             cli();
 
             // Start with margin
             uint margin = p;
 
             while (margin--) {
-                sendRowRGB(0, 0x00, 0x00, 0x00);
+                sendColumnRGB(0, 0x00, 0x00, 0x00);
             }
 
             for (uint l = 0; l < acount; l++) {
                 sendIcon(enemies, p & 1, row, ENEMIES_WIDTH, GAMMA(0x4f), GAMMA(0x62), GAMMA(0xd2));
 //                sendChar(' ', 0, 0x00, 0x00, 0x00); // No over crowding
-                sendRowRGB(0, 0x00, 0x00, 0x00);
-                sendRowRGB(0, 0x00, 0x00, 0x00);
-                sendRowRGB(0, 0x00, 0x00, 0x00);
-                sendRowRGB(0, 0x00, 0x00, 0x00);
-                sendRowRGB(0, 0x00, 0x00, 0x00);
+                sendColumnRGB(0, 0x00, 0x00, 0x00);
+                sendColumnRGB(0, 0x00, 0x00, 0x00);
+                sendColumnRGB(0, 0x00, 0x00, 0x00);
+                sendColumnRGB(0, 0x00, 0x00, 0x00);
+                sendColumnRGB(0, 0x00, 0x00, 0x00);
             }
 
             sei();
@@ -1098,48 +1133,10 @@ void showInvaders() {
     // delay(200);
 }
 
-
 #define JAB_MAX_BRIGHTNESS 0xff //(255 (100%))
 //#define JAB_MAX_BRIGHTNESS 0x7f //(127)
 #define JAB_MIN_BRIGHTNESS 0x00
 #define JAB_STEPS (JAB_MAX_BRIGHTNESS-JAB_MIN_BRIGHTNESS)
-
-
-////lines below are for the microphone sampling from Adafruit autogain mic
-//
-//const int sampleWindow = MARQUEE_DELAY; // Sample window width in mS (50 mS = 20Hz)
-//unsigned int sample;
-//const double VOLTAGE = 5.0;
-//
-//double sampleSound() {
-//    //first run the sound sampling
-//    unsigned long startMillis = millis(); // Start of sample window
-//    unsigned int peakToPeak = 0;   // peak-to-peak level
-//
-//    unsigned int signalMax = 0;
-//    unsigned int signalMin = 1024;
-//
-//    // collect data for 50 mS
-//    while (millis() - startMillis < sampleWindow) {
-//        //open while loop
-//        sample = analogRead(0);
-//        if (sample < 1024)  // toss out spurious readings
-//        {
-//            //open 1st if loop in while
-//            if (sample > signalMax) {
-//                //open 2nd if
-//                signalMax = sample;  // save just the max levels
-//            }//close 2nd if
-//            else if (sample < signalMin) {
-//                //open 3rd if
-//                signalMin = sample;  // save just the min levels
-//            }//close 3rd if
-//        }//close 1st if
-//    }//close while loop
-//    peakToPeak = signalMax - signalMin;  // max - min = peak-peak amplitude
-//    double volts = (peakToPeak * VOLTAGE) / 1024;  // convert to volts
-//    return volts;
-//}
 
 // Keep color step between marquee calls, but still bump the sector by 1 every call so each new message starts with a
 // noticeably different color
@@ -1192,7 +1189,6 @@ void marquee() {
                 g0 = rampup;
                 b0 = rampdown;
                 break;
-
         };
 
         for (uint step = 0; step < FONTSTD_WIDTH +
@@ -1226,32 +1222,7 @@ void marquee() {
 
             sei();
 
-//            Serial.begin(19200);
-//            Serial.flush();
-//
-////            delay(MARQUEE_DELAY); // speed. higher = slower
-//
-//            double volts = sampleSound();
-//            int sound = (volts * 10);
-//
-//            int soundLevel = map(sound, 1, 10, 0, 9);
-//
-//            //if loud sound:
-//            if (soundLevel > 1) {
-//                sector++;
-//                if (sector == 3) {
-//                    sector = 0;
-//                }
-//            }
-//            if (beat) {
-//                sector++;
-//                if (sector == 3) {
-//                    sector = 0;
-//                }
-//            }
-
             delay(MARQUEE_DELAY); // speed. higher = slower
-
 
             PORTB |= 0x01;
             delay(1);
@@ -1264,7 +1235,6 @@ void marquee() {
     }
 
 }
-
 
 // Notifies the IMX that we're ready to retrieve custom message data
 bool readSerialData() {
@@ -1285,37 +1255,70 @@ bool readSerialData() {
 
     incomingBuffer[STRING_PADDING + len] = 0x00; // Null terminate
 
-    bool shouldShowNewMsgAlert = false;
+//    shouldShowNewMsgAlert = false;
     showInChooserStyle = false;
     showInInputStyle = false;
     // If we got something, swap currentBuffer to point to the incoming.
     if (len > 0) {
         currentBuffer = incomingBuffer;
         // If the first non-padding char is a BEL, show the new msg alert
-        if (currentBuffer[STRING_PADDING] == BEL) {
-            shouldShowNewMsgAlert = true;
-            currentBuffer[STRING_PADDING] = ' '; // Overwrite the BEL char with a space
-        } else if (currentBuffer[STRING_PADDING] == SOH) {
-            currentBuffer = currentBuffer + STRING_PADDING; // Skip padding
-            currentBuffer = currentBuffer + 1; // Skip SOH char
-            extraDataBuffer = currentBuffer;
-            char *dleLocation = strchrnul(currentBuffer, DLE);
-            *dleLocation = '\0';
-            // advance currentBuffer ptr to skip past the extra data
-            currentBuffer = dleLocation + 1;
-            showInChooserStyle = true;
-        } else if (currentBuffer[STRING_PADDING] == STX) {
-            PCICR |= bit (PCIE1);   // enable pin change interrupts for A0 to A5
-            currentBuffer[STRING_PADDING] = ' '; // Overwrite the STX char with a space
-        } else if (currentBuffer[STRING_PADDING] == ETX) {
-            PCICR &= ~bit (PCIE1);   // disable pin change interrupts for A0 to A5
-            currentBuffer[STRING_PADDING] = ' '; // Overwrite the ETX char with a space
-        } else if (currentBuffer[STRING_PADDING] == ENQ) {
-            showInInputStyle = ENQ;
-            currentBuffer[STRING_PADDING] = ' '; // Overwrite the ENQ char with a space
-        } else if (currentBuffer[STRING_PADDING] == EOT) {
-            showInInputStyle = EOT;
-            currentBuffer[STRING_PADDING] = ' '; // Overwrite the ENQ char with a space
+        switch (currentBuffer[STRING_PADDING]) {
+            case BEL: {
+                textStyle = 'F';
+                currentBuffer = currentBuffer + STRING_PADDING + 1; // Skip padding and BEL
+                break;
+            }
+            case SOH: {
+                int idx = STRING_PADDING + 1;
+                textStyle = currentBuffer[idx++];
+                if (currentBuffer[idx++] == ACK) {
+                    textColor = {currentBuffer[idx++], currentBuffer[idx++], currentBuffer[idx++]};
+                }
+//                if (currentBuffer[idx++] == DLE) {
+//                    idx++;
+//                    idx++;
+////                    textDelay = currentBuffer[idx++];
+////                    textDelay <<= 8;
+////                    textDelay |= currentBuffer[idx++];
+////                    textDelay = ((unsigned short)currentBuffer[idx++] << 8u) | (unsigned char)currentBuffer[idx++];
+//                }
+                if (currentBuffer[idx++] == STX) {
+                    currentBuffer = currentBuffer + idx;
+                }
+                break;
+            }
+            case DC1: {
+                currentBuffer = currentBuffer + STRING_PADDING; // Skip padding
+                currentBuffer = currentBuffer + 1; // Skip DC1 char
+                extraDataBuffer = currentBuffer;
+                char *dleLocation = strchrnul(currentBuffer, DLE);
+                *dleLocation = '\0';
+                // advance currentBuffer ptr to skip past the extra data
+                currentBuffer = dleLocation + 1;
+                showInChooserStyle = true;
+                break;
+            }
+            case DC4: // Mic enable/disable
+                currentBuffer[STRING_PADDING] = ' '; // Overwrite the DC4 char with a space
+                if (currentBuffer[STRING_PADDING + 1] == 1) {
+                    PCICR |= bit (PCIE1); // enable pin change interrupts for A0 to A5
+                } else {
+                    PCICR &= ~bit (PCIE1); // disable pin change interrupts for A0 to A5
+                }
+                currentBuffer[STRING_PADDING + 1] = ' '; // Overwrite the second byte with a space
+                break;
+            case ENQ:
+                showInInputStyle = ENQ;
+                currentBuffer[STRING_PADDING] = ' '; // Overwrite the ENQ char with a space
+                break;
+            case EOT:
+                showInInputStyle = EOT;
+                currentBuffer[STRING_PADDING] = ' '; // Overwrite the ENQ char with a space
+                break;
+            default: {
+                textStyle = 'D';
+                break;
+            }
         }
         diagnosticBlink();
     }
@@ -1324,7 +1327,7 @@ bool readSerialData() {
 //    virtualSerial.print(currentBuffer);
     stopSerial();
 
-    return shouldShowNewMsgAlert;
+    return len > 0;
 }
 
 void setup() {
@@ -1338,7 +1341,13 @@ void setup() {
     setupDiagnosticLed();
     setupLeds();
 
-    showcountdown();
+    showcountdown("I", 80);
+    showcountdown("LIVE", 80);
+    showcountdown("FOR", 80);
+    showcountdown("THAT", 80);
+    showcountdown("!ENERGY!", 80);
+//    showcountdown("!!ENERGY!!", 80);
+//    showcountdown("!ENERGY!", 80);
     showstarfield();
 
     setupSerial();
@@ -1362,6 +1371,39 @@ void loop() {
 //    diagnosticBlink();
     diagnosticLedOn();
 
+    readSerialData();
+    diagnosticLedOff();
+
+    switch (textStyle) {
+        case 'F': {
+            showcountdown(currentBuffer); //TODO extract color //TODO center
+            showstarfield();
+            break;
+        }
+        case 'O': {
+            showCharsOneByOneOnBothPanels(currentBuffer, textColor, textDelay);
+            break;
+        }
+        case 'C': {
+            showallyourbasestyleOnBothPanels(currentBuffer, 4);  //TODO extract color //TODO center
+            break;
+        }
+        case 'D':
+        default: {
+            showstarfieldcustom(100);
+            marquee();
+//            if (showInChooserStyle) {
+//                showAsChooser(currentBuffer, extraDataBuffer);
+//            } else if (showInInputStyle != NULL) {
+//                showAsInputStyle(currentBuffer, strlen(currentBuffer) - STRING_PADDING - 1 - 1, showInInputStyle);
+//            } else {
+//                // regular marquee
+//                marquee();
+//            }
+            break;
+        }
+    }
+/*
     // Returns true if we should show the new msg alert
     if (readSerialData()) {
         showcountdown();
@@ -1377,27 +1419,20 @@ void loop() {
             }
         }
     }
-    diagnosticLedOff();
+    */
 //
 ////    virtualSerial.print("vsHi");
 ////    virtualSerial.flush();
 //    Serial.println(currentBuffer);
 //    Serial.flush();
-    if (showInChooserStyle) {
-        showAsChooser(currentBuffer, extraDataBuffer);
-    } else if (showInInputStyle != NULL) {
-        showAsInputStyle(currentBuffer, strlen(currentBuffer) - STRING_PADDING - 1 - 1, showInInputStyle);
-    } else {
-        // regular marquee
-        marquee();
-    }
+
 
     // TODO: Actually sample the state of the pullup on unused pins and OR it into the mask so we maintain the state.
     // Must do AFTER the cli().
     // TODO: Add offBits also to maintain the pullup state of unused pins.
 
     loopcount++;
-    return;
+//    return;
 }
 
 
