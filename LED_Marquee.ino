@@ -150,6 +150,7 @@ const char MSGTYPE_FLASHY = 'F';
 const char MSGTYPE_UTILITY = 'U';
 const char MSGTYPE_KEYBOARD = 'K';
 const char MSGTYPE_CHOOSER = 'H';
+const char MSGTYPE_ICON = 'I';
 const char MSGTYPE_DEFAULT = 'D';
 
 char msgType = MSGTYPE_DEFAULT;
@@ -1178,6 +1179,10 @@ void loop() {
         }
         case MSGTYPE_CHONKY_SLIDE: {
             showallyourbasestyleOnBothPanels(currentBuffer, 4);  //TODO extract color //TODO center
+            break;
+        }
+        case MSGTYPE_ICON: {
+            showInvaders();
             break;
         }
         case MSGTYPE_UTILITY: {
