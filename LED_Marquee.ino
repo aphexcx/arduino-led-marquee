@@ -6,7 +6,16 @@
 
 #include "Color.h"
 
+#include "Gamma.h"
+
 #include "Fonts.h"
+
+#include "PixelBitBanging.h"
+
+#include "ArduinoJson-v6.16.0.h"
+
+// Used to receive data on a virtual RX pin instead of the usual pin 0
+#include "SoftwareSerial/SoftwareSerial.h"
 
 // Pin 13 has an LED connected on most Arduino boards.
 // give it a name:
@@ -18,6 +27,19 @@ void diagnosticLedOn() {
 
 void diagnosticLedOff() {
     digitalWrite(diagnosticLed, LOW);   // turn the LED on (HIGH is the voltage level)
+}
+
+void diagnosticBlink() {
+    if (DEBUG) {
+        diagnosticLedOn();
+        delay(5);
+        diagnosticLedOff();
+        delay(5);
+        diagnosticLedOn();
+//        delay(5);
+//        diagnosticLedOff();
+//        delay(300);
+    }
 }
 
 volatile unsigned long timeOfLastBeat = 0;
@@ -33,11 +55,6 @@ ISR (PCINT1_vect) {
         diagnosticLedOff();
     }
 }
-
-#include "ArduinoJson-v6.16.0.h"
-
-// Used to receive data on a virtual RX pin instead of the usual pin 0
-#include "SoftwareSerial/SoftwareSerial.h"
 
 #define rxPin 10
 #define txPin 11
@@ -73,40 +90,6 @@ const char ASOT[] PROGMEM = "                    ";
 //Speed of chars spelled out one by one effect, lower is faster
 #define CHARS_ONEBYONE_DELAY 50
 
-// The char indicating we should show the text as a new message alert (currently BEL, \x07)
-#define BEL 7
-
-// Start of header. 1 char follows, defining what style to show the text in
-// Current options:
-// 'C' for chonky font with a color slide
-// 'O' for one-by-one characters
-// 'F' flashing announcement with countdown
-// 'D' default (marquee scroll with a slow color cycle)
-#define SOH 1
-
-// Color code. 3 bytes follow: r, g, b int values, then STX for start of text.
-#define ACK 6
-
-// Start of text. String starts here
-#define STX 2
-
-// Unused
-#define ETX '\x03'
-
-// The char indicating we should show this string in flashing input style
-#define EOT 4
-// The char indicating we should show this string in input style
-#define ENQ 5
-
-// Device control 1 (used for chooser mode)
-#define DC1 17
-// The char indicating the end of extra data passed in after a control char
-#define DLE 10
-
-// Device control 4; used for enabling/disabling the beat detector mic (connected to A0 pin change interrupt)
-#define DC4 20
-#define VT 11
-
 // Change this to be at least as long as your pixel string (too long will work fine, just be a little slower)
 #define NUM_PANELS 2  // Number of panels. There are 2.
 #define COLUMNS_PER_PANEL 60  // Number of columns per panel, in my case, the # of pixels in each LED string. I am using 60LED/M
@@ -119,29 +102,11 @@ const char ASOT[] PROGMEM = "                    ";
 #define STRINGBUFFER_LEN MAX_BUFFER_LEN + 1
 #define PADDED_STRINGBUFFER_LEN STD_STRING_PADDING + STRINGBUFFER_LEN
 
-#define JSON_OVERHEAD 200
-#define JSON_SIZE STRINGBUFFER_LEN + JSON_OVERHEAD
-
 // Pad this amount so that scrolling starts nicely off the end, for FontStd
 #define STRING_PADDING(font_width) NUM_PANELS * COLUMNS_PER_PANEL / (font_width + INTERCHAR_SPACE)
 
-// Leave room for a safety null terminator at the end.
-//char bufferA[STRINGBUFFER_LEN + 1] = " ";
-
-//                                     "The jaws that bite, the claws that catch! "
-//                                     "Beware the Jubjub bird, and shun "
-//                                     "The frumious Bandersnatch! ";
-//char bufferB[STRINGBUFFER_LEN + 1] = "                     "; //note extra +1 char here (out of a abundance of caution)
-
-//char *currentBuffer = bufferA;
-char currentBuffer[STRINGBUFFER_LEN] = {'\0'};
-//char jsonBuffer[JSON_SIZE] = {'\0'};
-
-char* extraDataBuffer = strdup(currentBuffer + STRING_PADDING(FONTSTD_WIDTH));
-
-// Modes to show keyboard mode in
-char keyboardInputMode = NULL;
-#define KEYBOARD_MODE_WARNING 'W'
+const int json_capacity = STRINGBUFFER_LEN + JSON_OBJECT_SIZE(8);
+StaticJsonDocument<json_capacity> json;
 
 // This is what style the current text will be shown in
 const char MSGTYPE_CHONKY_SLIDE = 'C';
@@ -153,11 +118,11 @@ const char MSGTYPE_CHOOSER = 'H';
 const char MSGTYPE_ICON = 'I';
 const char MSGTYPE_DEFAULT = 'D';
 
-char msgType = MSGTYPE_DEFAULT;
+// Modes to show keyboard mode in
+const char KEYBOARD_MODE_WARNING = 'W';
 
-Color textColor = {0, 0, 0};
-unsigned short textDelay = 500;
-
+//vertical tab or \v; single column
+const char VT = '\u000B';
 
 /* Return how many columns to pad this string by on each side to get it to be in the middle of the panel.
  * E.g.
@@ -165,156 +130,23 @@ unsigned short textDelay = 500;
  * (60-1)/2 = 29
  */
 uint getColumnsToPadForString(const char* str, int fontWidth) {
-    uint stringColumns = strlen(str) * (fontWidth + INTERCHAR_SPACE) -
-                         1; //Minus 1 because we don't need an interchar space at the end
+    uint stringColumns = 0;
+    strlen(str) * (fontWidth + INTERCHAR_SPACE) - 1;
+    //Minus 1 because we don't need an interchar space at the end
+
+    while (*str++) {
+        if (*str != VT) {
+            stringColumns += (fontWidth + INTERCHAR_SPACE);
+        }
+    }
     return (COLUMNS_PER_PANEL - stringColumns) / 2;
 }
-
-// These values depend on which pins your 8 strings are connected to and what board you are using
-// More info on how to find these at http://www.arduino.cc/en/Reference/PortManipulation
-
-// PORTD controls Digital Pins 0-7 on the Uno
-
-// You'll need to look up the port/bit combination for other boards.
-
-// Note that you could also include the DigitalWriteFast header file to not need to to this lookup.
-
-#define PIXEL_PORT  PORTD  // Port of the pin the pixels are connected to
-#define PIXEL_DDR   DDRD   // Port of the pin the pixels are connected to
-
-
-static const uint onBits = 0b11111110;   // Bit pattern to write to port to turn on all pins connected to LED strips.
-// If you do not want to use all 8 pins, you can mask off the ones you don't want
-// Note that these will still get 0 written to them when we send pixels
-// TODO: If we have time, we could even add a variable that will and/or into the bits before writing to the port to support any combination of bits/values
-
-// These are the timing constraints taken mostly from
-// imperically measuring the output from the Adafruit library strandtest program
-
-// Note that some of these defined values are for refernce only - the actual timing is determinted by the hard code.
-
-#define T1H  814    // Width of a 1 bit in ns - 13 cycles
-#define T1L  438    // Width of a 1 bit in ns -  7 cycles
-
-#define T0H  312    // Width of a 0 bit in ns -  5 cycles
-#define T0L  936    // Width of a 0 bit in ns - 15 cycles
-
-// Phase #1 - Always 1  - 5 cycles
-// Phase #2 - Data part - 8 cycles
-// Phase #3 - Always 0  - 7 cycles
-
-#define RES 500000   // Width of the low gap between bits to cause a frame to latch
-
-// Here are some convience defines for using nanoseconds specs to generate actual CPU delays
-
-#define NS_PER_SEC (1000000000L)          // Note that this has to be SIGNED since we want to be able to check for negative values of derivatives
-
-#define CYCLES_PER_SEC (F_CPU)
-
-#define NS_PER_CYCLE ( NS_PER_SEC / CYCLES_PER_SEC )
-
-#define NS_TO_CYCLES(n) ( (n) / NS_PER_CYCLE )
-
-
-// Sends a full 8 bits down all the pins, representing a single color of 1 pixel
-// We walk though the 8 bits in colorbyte one at a time. If the bit is 1 then we send the 8 bits of row out. Otherwise we send 0.
-// We send onBits at the first phase of the signal generation. We could just send 0xff, but that mught enable pull-ups on pins that we are not using.
-
-/// Unforntunately we have to drop to ASM for this so we can interleave the computaions durring the delays, otherwise things get too slow.
-
-// OnBits is the mask of which bits are connected to strips. We pass it on so that we
-// do not turn on unused pins becuase this would enable the pullup. Also, hopefully passing this
-// will cause the compiler to allocate a Register for it and avoid a reload every pass.
-static inline void sendBitx8(const uint row, const uint colorbyte, const uint onBits) {
-
-    asm volatile (
-
-
-    "L_%=: \n\r"
-
-    "out %[port], %[onBits] \n\t"                 // (1 cycles) - send either T0H or the first part of T1H. Onbits is a mask of which bits have strings attached.
-
-    // Next determine if we are going to be sending 1s or 0s based on the current bit in the color....
-
-    "mov r0, %[bitwalker] \n\t"                   // (1 cycles)
-    "and r0, %[colorbyte] \n\t"                   // (1 cycles)  - is the current bit in the color byte set?
-    "breq OFF_%= \n\t"                            // (1 cycles) - bit in color is 0, then send full zero row (takes 2 cycles if branch taken, count the extra 1 on the target line)
-
-    // If we get here, then we want to send a 1 for every row that has an ON dot...
-    "nop \n\t  "                                  // (1 cycles)
-    "out %[port], %[row]   \n\t"                  // (1 cycles) - set the output bits to [row] This is phase for T0H-T1H.
-    // ==========
-    // (5 cycles) - T0H (Phase #1)
-
-
-    "nop \n\t nop \n\t "                          // (2 cycles)
-    "nop \n\t nop \n\t "                          // (2 cycles)
-    "nop \n\t nop \n\t "                          // (2 cycles)
-    "nop \n\t "                                   // (1 cycles)
-
-    "out %[port], __zero_reg__ \n\t"              // (1 cycles) - set the output bits to 0x00 based on the bit in colorbyte. This is phase for T0H-T1H
-    // ==========
-    // (8 cycles) - Phase #2
-
-    "ror %[bitwalker] \n\t"                      // (1 cycles) - get ready for next pass. On last pass, the bit will end up in C flag
-
-    "brcs DONE_%= \n\t"                          // (1 cycles) Exit if carry bit is set as a result of us walking all 8 bits. We assume that the process around us will tak long enough to cover the phase 3 delay
-
-    "nop \n\t \n\t "                             // (1 cycles) - When added to the 5 cycles in S:, we gte the 7 cycles of T1L
-
-    "jmp L_%= \n\t"                              // (3 cycles)
-    // (1 cycles) - The OUT on the next pass of the loop
-    // ==========
-    // (7 cycles) - T1L
-
-
-    "OFF_%=: \n\r"                                // (1 cycles)    Note that we land here becuase of breq, which takes takes 2 cycles
-
-    "out %[port], __zero_reg__ \n\t"              // (1 cycles) - set the output bits to 0x00 based on the bit in colorbyte. This is phase for T0H-T1H
-    // ==========
-    // (5 cycles) - T0H
-
-    "ror %[bitwalker] \n\t"                      // (1 cycles) - get ready for next pass. On last pass, the bit will end up in C flag
-
-    "brcs DONE_%= \n\t"                          // (1 cycles) Exit if carry bit is set as a result of us walking all 8 bits. We assume that the process around us will tak long enough to cover the phase 3 delay
-
-    "nop \n\t nop \n\t "                          // (2 cycles)
-    "nop \n\t nop \n\t "                          // (2 cycles)
-    "nop \n\t nop \n\t "                          // (2 cycles)
-    "nop \n\t nop \n\t "                          // (2 cycles)
-    "nop \n\t "                                   // (1 cycles)
-
-    "jmp L_%= \n\t"                               // (3 cycles)
-    // (1 cycles) - The OUT on the next pass of the loop
-    // ==========
-    //(15 cycles) - T0L
-
-
-    "DONE_%=: \n\t"
-
-    // Don't need an explicit delay here since the overhead that follows will always be long enough
-
-    ::
-    [port]    "I"(_SFR_IO_ADDR(PIXEL_PORT)),
-    [row]   "d"(row),
-    [onBits]   "d"(onBits),
-    [colorbyte]   "d"(colorbyte),     // Phase 2 of the signal where the actual data bits show up.
-    [bitwalker] "r"(
-            0x80)                      // Alocate a register to hold a bit that we will walk down though the color byte
-
-    );
-
-    // Note that the inter-bit gap can be as long as you want as long as it doesn't exceed the reset timeout (which is A long time)
-
-}
-
 
 // Just wait long enough without sending any bits to cause the pixels to latch and display the last sent frame
 void show() {
     delayMicroseconds((RES / 1000UL) +
                       1);       // Round up since the delay must be _at_least_ this long (too short might not work, too long not a problem)
 }
-
 
 // Send 3 bytes of color data (R,G,B) for a signle pixel down all the connected stringsat the same time
 // A 1 bit in "row" means send the color, a 0 bit means send black.
@@ -411,7 +243,8 @@ void sendPaddingForString(const char* str, int fontWidth) {
     }
 }
 
-static inline void sendStringJustified(char* s, int fontWidth, uint skip, const uint r, const uint g, const uint b) {
+static inline void
+sendStringJustified(const char* s, int fontWidth, uint skip, const uint r, const uint g, const uint b) {
     sendPaddingForString(s, fontWidth);
     sendString(s, skip, r, g, b);
     sendPaddingForString(s, fontWidth);
@@ -419,21 +252,6 @@ static inline void sendStringJustified(char* s, int fontWidth, uint skip, const 
 
 // Keep track of where we are in the color cycle between chars
 uint* cyclingColor = (uint * )(calloc(1, sizeof(uint)));
-
-int loopcount = 0;
-
-void diagnosticBlink() {
-    if (DEBUG) {
-        diagnosticLedOn();
-        delay(5);
-        diagnosticLedOff();
-        delay(5);
-        diagnosticLedOn();
-//        delay(5);
-//        diagnosticLedOff();
-//        delay(300);
-    }
-}
 
 // Send a char with a column-based color cycle
 static inline void sendCharColorCycle(const uint* font, const int fontWidth, uint c, uint* r, uint* g, uint* b) {
@@ -508,33 +326,8 @@ void setupSerial() {
     pinMode(txPin, OUTPUT);
 }
 
-// https://learn.adafruit.com/led-tricks-gamma-correction/the-quick-fix
-
-const uint PROGMEM
-        gamma[] = {
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1,
-        1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2,
-        2, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 5, 5, 5,
-        5, 6, 6, 6, 6, 7, 7, 7, 7, 8, 8, 8, 9, 9, 9, 10,
-        10, 10, 11, 11, 11, 12, 12, 13, 13, 13, 14, 14, 15, 15, 16, 16,
-        17, 17, 18, 18, 19, 19, 20, 20, 21, 21, 22, 22, 23, 24, 24, 25,
-        25, 26, 27, 27, 28, 29, 29, 30, 31, 32, 32, 33, 34, 35, 35, 36,
-        37, 38, 39, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 50,
-        51, 52, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 66, 67, 68,
-        69, 70, 72, 73, 74, 75, 77, 78, 79, 81, 82, 83, 85, 86, 87, 89,
-        90, 92, 93, 95, 96, 98, 99, 101, 102, 104, 105, 107, 109, 110, 112, 114,
-        115, 117, 119, 120, 122, 124, 126, 127, 129, 131, 133, 135, 137, 138, 140, 142,
-        144, 146, 148, 150, 152, 154, 156, 158, 160, 162, 164, 167, 169, 171, 173, 175,
-        177, 180, 182, 184, 186, 189, 191, 193, 196, 198, 200, 203, 205, 208, 210, 213,
-        215, 218, 220, 223, 225, 228, 231, 233, 236, 239, 241, 244, 247, 249, 252, 255
-};
-
-// Map 0-255 visual brightness to 0-255 LED brightness
-#define GAMMA(x) (pgm_read_byte(&gamma[x]))
-
 // TODO idxToBlink that isn't always last char
-void showAsInputStyle(char* str, int idxToBlink, int mode) {
+void showAsInputStyle(const char* str, int idxToBlink, const char mode) {
 
 //    str = str + STRING_PADDING(FONTSTD_WIDTH) + 1; // drop initial padding
 
@@ -590,7 +383,7 @@ void showAsInputStyle(char* str, int idxToBlink, int mode) {
     }
 }
 
-void showAsChooser(char* blinkyStr, char* countyStr) {
+void showAsChooser(const char* blinkyStr, const char* countyStr) {
 
 //    int maxStrLen = 10; // max number of chars to show //TODO or, could scroll the whole thing
 //    blinkyStr[maxStrLen] = 0x00; //chop here
@@ -639,7 +432,7 @@ void showAsChooser(char* blinkyStr, char* countyStr) {
     }
 }
 
-void showcountdown(char* countdownstr, unsigned int count = 600) {
+void showcountdown(const char* countdownstr, unsigned int count = 600) {
 
     // Start sequence.....
 
@@ -786,16 +579,7 @@ void showCharsOneByOneOnBothPanels(const char* str, Color textColor, int delayMs
     delay(delayMs);
 }
 
-//TODO take char, pad (& center) to MAX_CHARS_PER_PANEL, and multiply by NUM_PANELS
-//void showCharsOneByOneOnBothPanels(const char *pointsStr, Color textColor, int delayMs = 500) {
-//    showCharsOneByOneAndWait(pointsStr, textColor.r, textColor.g, textColor.b, delayMs);
-//}
-
-//void showCharsOneByOne(const char *pointsStr, uint r, uint g, uint b) {
-//    showCharsOneByOneAndWait(pointsStr, r, g, b, 500);
-//}
-
-void showStringColorCycleOnBothPanels(const uint* font, const int fontWidth, char* str, int columnsPrefix,
+void showStringColorCycleOnBothPanels(const uint* font, const int fontWidth, const char* str, int columnsPrefix,
                                       uint* r, uint* g, uint* b, uint slide) {
     clear();
     for (slide; slide; slide -= 10) {
@@ -810,7 +594,7 @@ void showStringColorCycleOnBothPanels(const uint* font, const int fontWidth, cha
 
 }
 
-void showallyourbasestyleOnBothPanels(char* str, int columnsPrefix) {
+void showallyourbasestyleOnBothPanels(const char* str, int columnsPrefix) {
 //    const char *allyourbase = "CAT: ALL YOUR BASE ARE BELONG TO US !!!";
     uint g = 0;
     uint b = 0x80;
@@ -956,11 +740,10 @@ void showInvaders() {
 uint sector = 1;
 uint colorStep = 0;
 
-void marquee() {
+void marquee(const char* marqueePtr) {
     //TODO change the harcoded padding to be generated by the length of STRING_PADDING
     const char paddingString[STRING_PADDING(FONTSTD_WIDTH) + 1] = "                    ";
     const char* paddingPtr = paddingString;
-    const char* marqueePtr = currentBuffer;
 
     // Text foreground color cycle effect
     sector++;
@@ -1057,65 +840,35 @@ void marquee() {
 
 // Notifies the IMX that we're ready to retrieve custom message data
 bool readSerialData() {
-    StaticJsonDocument<JSON_SIZE> doc;
-
     startSerial();
     // send special symbol so IMX knows to respond with custom message data
-    softSerial.print(msgType);
+    softSerial.print('~');
+
+//    // Flushing Serial input buffer
+//    while (softSerial.available())
+//        softSerial.read();
 
     // Read the JSON document from the serial port
-    DeserializationError err = deserializeJson(doc, softSerial);
-
-    keyboardInputMode = NULL;
+    DeserializationError err = deserializeJson(json, softSerial);
 
     if (err == DeserializationError::Ok) {
-        strcpy(currentBuffer, doc["string"]);
-        msgType = doc["type"].as<const char*>()[0];
-        switch (msgType) {
-            case MSGTYPE_ONE_BY_ONE:
-            case MSGTYPE_CHONKY_SLIDE: { //OneByOne, ChonkySlide
-                textColor = {doc["r"], doc["g"], doc["b"]};
-                textDelay = doc["delayMs"];
-                break;
-            }
-            case MSGTYPE_CHOOSER: { // Chooser Mode
-                strcpy(extraDataBuffer, doc["flashy"]);
-                break;
-            }
-            case MSGTYPE_UTILITY: { // Utility messages
-                char subtype = doc["subtype"].as<const char*>()[0];
-
-                switch (subtype) {
-                    case 'M': { // Microphone enable/disable
-                        if (*currentBuffer == 'E') {
-                            PCICR |= bit (PCIE1); // enable pin change interrupts for A0 to A5
-                        } else if (*currentBuffer == 'D') {
-                            PCICR &= ~bit (PCIE1); // disable pin change interrupts for A0 to A5
-                        }
-                        break;
-                    }
-                }
-                break;
-            }
-
-            case MSGTYPE_KEYBOARD: { // Keyboard input
-                keyboardInputMode = doc["mode"].as<const char*>()[0];
-                break;
-            }
-        }
-
         stopSerial();
         diagnosticBlink();
         return true;
     } else {
         softSerial.print(err.c_str());
 
-        // do I need to clear out the rest of the unread serial stream?
+//        char bytes[10] = {'\0'};
+//        softSerial.readBytes(bytes, 1);
+//        softSerial.print(":");
+//        softSerial.print(bytes);
+//
+//        // do I need to clear out the rest of the unread serial stream?
 //        while(softSerial.available()) {
 //            softSerial.read();
 //        }
         stopSerial();
-//        showcountdown((char*) err.c_str());
+        showcountdown((char*) err.c_str());
         diagnosticBlink();
         diagnosticBlink();
         diagnosticBlink();
@@ -1124,12 +877,14 @@ bool readSerialData() {
     }
 }
 
-void setup() {
-    strcpy_P(currentBuffer, ASOT);
+int loopcount = 0;
 
-    if (DEBUG) {
-        currentBuffer[10] = 0x00; //chop off intro when debugging
-    }
+void setup() {
+//    strcpy_P(currentBuffer, ASOT);
+
+//    if (DEBUG) {
+//        currentBuffer[10] = 0x00; //chop off intro when debugging
+//    }
 
     delay(100); //Try to introduce a bit of a delay to clear out serial noise on boot
     setupDiagnosticLed();
@@ -1139,9 +894,7 @@ void setup() {
     showcountdown("LIVE", 80);
     showcountdown("FOR", 80);
     showcountdown("THAT", 80);
-    showcountdown("!ENERGY!", 80);
-//    showcountdown("!!ENERGY!!", 80);
-//    showcountdown("!ENERGY!", 80);
+    showcountdown("ENERGY!", 80);
     showstarfield();
 
     setupSerial();
@@ -1151,58 +904,73 @@ void setup() {
     PCMSK1 |= bit (PCINT8);  // want pin A0
     PCIFR |= bit (PCIF1);   // clear any outstanding interrupts
     PCICR |= bit (PCIE1);   // enable pin change interrupts for A0 to A5
-    // TODO disable based on IMX command
 
     loopcount = 0;
 }
 
 void loop() {
-//return
-    //showcountdown();
-    //showstarfield();
-    //showjabber();
-
-//    diagnosticBlink();
     diagnosticLedOn();
-    readSerialData();
+    bool readSuccessful = readSerialData();
     diagnosticLedOff();
 
-    switch (msgType) {
-        case MSGTYPE_FLASHY: {
-            showcountdown(currentBuffer); //TODO extract color //TODO center
-            showstarfield();
-            break;
+    if (readSuccessful) {
+        const char* str = json["str"];
+        //TODO can I just point currentbuffer to the doc[string]? what happens when doc goes out of scope?
+        const char msgType = json["type"].as<const char*>()[0];
+        switch (msgType) {
+            case MSGTYPE_ONE_BY_ONE: {
+                showCharsOneByOneOnBothPanels(str, {json["r"], json["g"], json["b"]}, json["dly"]);
+                break;
+            }
+            case MSGTYPE_CHONKY_SLIDE: {
+                showallyourbasestyleOnBothPanels(str, 4);  //TODO extract color //TODO implement delay
+                break;
+            }
+            case MSGTYPE_CHOOSER: {
+                showAsChooser(str, json["flashy"]);
+                break;
+            }
+            case MSGTYPE_UTILITY: { // Utility messages
+                char subtype = json["subtype"].as<const char*>()[0];
+
+                switch (subtype) {
+                    case 'M': { // Microphone enable/disable
+                        if (*str == 'E') {
+                            PCICR |= bit (PCIE1); // enable pin change interrupts for A0 to A5
+                            showcountdown("MIC ON", 100);
+                        } else if (*str == 'D') {
+                            PCICR &= ~bit (PCIE1); // disable pin change interrupts for A0 to A5
+                            showcountdown("MIC OFF", 100);
+                        }
+                        break;
+                    }
+                }
+                break;
+            }
+            case MSGTYPE_KEYBOARD: { // Keyboard input
+                char keyboardInputMode = json["mode"].as<const char*>()[0];
+
+                showAsInputStyle(str, strlen(str) - 1 - 1, keyboardInputMode);
+                break;
+            }
+            case MSGTYPE_FLASHY: {
+                showcountdown(str);
+                showstarfield();
+                break;
+            }
+            case MSGTYPE_ICON: {
+                showInvaders();
+                break;
+            }
+            case MSGTYPE_DEFAULT:
+            default: {
+                showstarfieldcustom(100);
+                marquee(str);
+                break;
+            }
         }
-        case MSGTYPE_ONE_BY_ONE: {
-            showCharsOneByOneOnBothPanels(currentBuffer, textColor, textDelay);
-            break;
-        }
-        case MSGTYPE_CHONKY_SLIDE: {
-            showallyourbasestyleOnBothPanels(currentBuffer, 4);  //TODO extract color //TODO center
-            break;
-        }
-        case MSGTYPE_ICON: {
-            showInvaders();
-            break;
-        }
-        case MSGTYPE_UTILITY: {
-            showInvaders();
-            break;
-        }
-        case MSGTYPE_KEYBOARD: {
-            showAsInputStyle(currentBuffer, strlen(currentBuffer) - 1 - 1, keyboardInputMode);
-            break;
-        }
-        case MSGTYPE_CHOOSER: {
-            showAsChooser(currentBuffer, extraDataBuffer);
-            break;
-        }
-        case MSGTYPE_DEFAULT:
-        default: {
-            showstarfieldcustom(100);
-            marquee();
-            break;
-        }
+    } else {
+        showstarfieldcustom(600);
     }
 /*
     // Returns true if we should show the new msg alert
@@ -1227,8 +995,4 @@ void loop() {
     // TODO: Add offBits also to maintain the pullup state of unused pins.
 
     loopcount++;
-//    return;
 }
-
-
-
