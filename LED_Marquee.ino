@@ -10,6 +10,8 @@
 
 #include "Fonts.h"
 
+#include "Icons.h"
+
 #include "PixelBitBanging.h"
 
 #include "ArduinoJson-v6.16.0.h"
@@ -82,7 +84,7 @@ const char ASOT[] PROGMEM = "                    ";
 //How often to advertise "MSG ME!!!", e.g. every 5 marquee scrolls
 #define ADVERTISE_EVERY 5
 //Speed of invader sequence, lower is faster
-#define INVADER_DELAY 50
+#define INVADER_DELAY 60
 //Speed of scrolling text marquee, lower is faster
 #define MARQUEE_DELAY 25
 //Affects how long the all your base style text stays on screen. Higher is faster
@@ -149,13 +151,15 @@ void show() {
                       1);       // Round up since the delay must be _at_least_ this long (too short might not work, too long not a problem)
 }
 
+uint BRIGHTNESS_SHIFT = 0;
+
 // Send 3 bytes of color data (R,G,B) for a signle pixel down all the connected stringsat the same time
 // A 1 bit in "row" means send the color, a 0 bit means send black.
 static inline void sendColumnRGB(uint row, uint r, uint g, uint b) {
 
-    sendBitx8(row, g, onBits);    // WS2812 takes colors in GRB order
-    sendBitx8(row, r, onBits);    // WS2812 takes colors in GRB order
-    sendBitx8(row, b, onBits);    // WS2812 takes colors in GRB order
+    sendBitx8(row, g >> BRIGHTNESS_SHIFT, onBits);    // WS2812 takes colors in GRB order
+    sendBitx8(row, r >> BRIGHTNESS_SHIFT, onBits);    // WS2812 takes colors in GRB order
+    sendBitx8(row, b >> BRIGHTNESS_SHIFT, onBits);    // WS2812 takes colors in GRB order
 
 }
 
@@ -551,8 +555,8 @@ static inline void sendIcon(const uint* fontbase, uint which, int8_t shift, uint
     if (shift < 0) {
         uint shiftabs = -1 * shift;
         while (width--) {
-            uint row = pgm_read_byte_near(charbase++);
-            sendColumnRGB(row << shiftabs, r, g, b);
+            uint col = pgm_read_byte_near(charbase++);
+            sendColumnRGB(col << shiftabs, r, g, b);
         }
     } else {
         while (width--) {
@@ -653,37 +657,9 @@ void showMsgMeAd() {
 //    showCharsOneByOne(1, " = 10 POINTS", 0x00, 0xff, 0x00);
 }
 
-#define ENEMIES_WIDTH 12
+void showIconInvaders(ICON icon) {
 
-//TODO hmm, the last one is an explosion and I've never seen that displayed before
-const uint enemies[]
-        PROGMEM = {
-                // anjuna v1: upside down anjuna
-//              0x00, 0x0C, 0x1e, 0x3b, 0x19, 0x0b, 0x05, 0x09, 0x11, 0x22, 0x44, 0x48, 0x50, 0x60, 0x40, 0x00,
-                // anjuna v2: inner downward triangle touches bar
-//                0x08, 0x18, 0x3C, 0x6E, 0x4C, 0x68, 0x50, 0x48, 0x44, 0x22, 0x11, 0x09, 0x05, 0x03, 0x01,
-                // anjuna v3: space between bar and downward triangle, necessitating a larger downward triangle
-//                0x08, 0x1C, 0x3E, 0x6C, 0x48, 0x60, 0x50, 0x48, 0x44, 0x22, 0x11, 0x09, 0x05, 0x03, 0x01,
-//                0x08, 0x1C, 0x3E, 0x6C, 0x48, 0x60, 0x50, 0x48, 0x44, 0x22, 0x11, 0x09, 0x05, 0x03, 0x01,
-                // anjuna v3 with filled in bar
-//                0x08, 0x1C, 0x3E, 0x6C, 0x48, 0x60, 0x70, 0x78, 0x7C, 0x3E, 0x1F, 0x0F, 0x07, 0x03, 0x01
-                // baaahs v1: upside down
-//                0x06, 0x0d, 0x1D, 0x33, 0x47, 0x42, 0x47, 0x33, 0x1D, 0x0d, 0x06,
-                // baaahs v2:
-//                0x30, 0x58, 0x5C, 0x66, 0x71, 0x21, 0x71, 0x66, 0x5C, 0x58, 0x30,
-//                0x30, 0x58, 0x5C, 0x66, 0x71, 0x21, 0x71, 0x66, 0x5C, 0x58, 0x30
-
-                //
-                0x70, 0xf4, 0xfe, 0xda, 0xd8, 0xf4, 0xf4, 0xd8, 0xda, 0xfe, 0xf4, 0x70, // Enemy 1 - open
-                0x72, 0xf2, 0xf4, 0xdc, 0xd8, 0xf4, 0xf4, 0xd8, 0xdc, 0xf4, 0xf2, 0x72, // Enemy 1 - close
-                0x1c, 0x30, 0x7c, 0xda, 0x7a, 0x78, 0x7a, 0xda, 0x7c, 0x30, 0x1c, 0x00, // Enemy 2 - open
-                0xf0, 0x3a, 0x7c, 0xd8, 0x78, 0x78, 0x78, 0xd8, 0x7c, 0x3a, 0xf0, 0x00, // Enemy 2 - closed
-                0x92, 0x54, 0x10, 0x82, 0x44, 0x00, 0x00, 0x44, 0x82, 0x10, 0x54, 0x92, // Explosion
-        };
-
-void showInvaders() {
-
-    uint acount = PIXELS / (ENEMIES_WIDTH + FONTSTD_WIDTH);      // How many aliens do we have room for?
+    uint acount = PIXELS / (ICON_WIDTH + FONTSTD_WIDTH);      // How many aliens do we have room for?
 
     for (int8_t row = -7; row < 7; row++) {     // Walk down the rows
         //  Walk them 6 pixels per row
@@ -714,7 +690,7 @@ void showInvaders() {
             }
 
             for (uint l = 0; l < acount; l++) {
-                sendIcon(enemies, p & 1, row, ENEMIES_WIDTH, GAMMA(0x4f), GAMMA(0x62), GAMMA(0xd2));
+                sendIcon(icons + (icon * ICON_WIDTH), p & 1, row, ICON_WIDTH, GAMMA(0x4f), GAMMA(0x62), GAMMA(0xd2));
 //                sendChar(' ', 0, 0x00, 0x00, 0x00); // No over crowding
                 sendColumnRGB(0, 0x00, 0x00, 0x00);
                 sendColumnRGB(0, 0x00, 0x00, 0x00);
@@ -942,11 +918,24 @@ void loop() {
                     case 'M': { // Microphone enable/disable
                         if (*str == 'E') {
                             PCICR |= bit (PCIE1); // enable pin change interrupts for A0 to A5
-                            showcountdown("MIC ON", 100);
+                            showcountdown("MIC ON", 200);
                         } else if (*str == 'D') {
                             PCICR &= ~bit (PCIE1); // disable pin change interrupts for A0 to A5
-                            showcountdown("MIC OFF", 100);
+                            showcountdown("MIC OFF", 200);
                         }
+                        break;
+                    }
+                    case 'B': { // Brightness shift
+                        uint shift;
+                        if (strlen(str) == 0) {
+                            shift = BRIGHTNESS_SHIFT;
+                        } else {
+                            shift = atoi(str);
+                        }
+                        BRIGHTNESS_SHIFT = shift;
+                        char out[10];
+                        sprintf(out, "BRIGHT=%d", shift);
+                        showcountdown(out, 200);
                         break;
                     }
                 }
@@ -964,7 +953,34 @@ void loop() {
                 break;
             }
             case MSGTYPE_ICON: {
-                showInvaders();
+                showIconInvaders(ENEMY1);
+
+//                switch (*str) {
+//                    case '1': {
+//                        showIconInvaders(ENEMY1);
+//                        break;
+//                    }
+//                    case '2': {
+//                        showIconInvaders(ENEMY2);
+//                        break;
+//                    }
+//                    case 'E': {
+//                        showIconInvaders(EXPLOSION);
+//                        break;
+//                    }
+////                    case 'A': {
+////                        showIconInvaders(ANJUNA);
+////                        break;
+////                    }
+//                    case 'B': {
+//                        showIconInvaders(BAAAHS);
+//                        break;
+//                    }
+//                    default: {
+//                        showcountdown(strcat("INVALID ICON: ",str), 100);
+//                        break;
+//                    }
+//                }
                 break;
             }
             case MSGTYPE_TRACKID: {
@@ -995,7 +1011,7 @@ void loop() {
             showstarfieldcustom(100);
             if (loopcount % ADVERTISE_EVERY == 0) {
                 showMsgMeAd();
-                showInvaders();
+                showIconInvaders();
             }
         }
     }
