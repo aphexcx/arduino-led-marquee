@@ -14,7 +14,7 @@
 
 #include "PixelBitBanging.h"
 
-#include "ArduinoJson-v6.16.0.h"
+#include "ArduinoJson-v6.18.3.h"
 
 // Used to receive data on a virtual RX pin instead of the usual pin 0
 #include "SoftwareSerial/SoftwareSerial.h"
@@ -316,7 +316,7 @@ void setupLeds() {
 
 void startSerial() {
     // set the data rate for the SoftwareSerial port
-    softSerial.begin(9600);
+    softSerial.begin(57600);
     softSerial.flush();
 //    Serial.begin(19200);
 }
@@ -342,7 +342,7 @@ void showAsInputStyle(const char* str, int idxToBlink, const char mode) {
     // so that last MAX_CHARS_PER_PANEL chars are always visible (plus _)
     str = str + shiftBy;
 
-    unsigned int count = 20;
+    unsigned int count = 2;
 
     clear();
 
@@ -823,12 +823,21 @@ void marquee(const char* marqueePtr, bool pad = true, uint marqueeDelay = MARQUE
 // Notifies the IMX that we're ready to retrieve custom message data
 bool readSerialData() {
     startSerial();
+    // Flushing Serial input buffer
+//            while (softSerial.available())
+//                softSerial.read();
+
+//            while (isspace(Serial.peek())) {
+//                Serial.read();
+//            }
+
     // send special symbol so IMX knows to respond with custom message data
     softSerial.print('~');
-
-//    // Flushing Serial input buffer
-//    while (softSerial.available())
-//        softSerial.read();
+//    int firstByte = softSerial.read();
+//
+//    switch (firstByte) {
+//
+//    }
 
     // Read the JSON document from the serial port
     DeserializationError err = deserializeJson(json, softSerial);
@@ -837,6 +846,8 @@ bool readSerialData() {
         stopSerial();
         diagnosticBlink();
         return true;
+    } else if (err == DeserializationError::EmptyInput) {
+        return false;
     } else {
         softSerial.print(err.c_str());
 
