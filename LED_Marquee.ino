@@ -84,11 +84,11 @@ const char ASOT[] PROGMEM = "                    ";
 //How often to advertise "MSG ME!!!", e.g. every 5 marquee scrolls
 #define ADVERTISE_EVERY 5
 //Speed of invader sequence, lower is faster
-#define INVADER_DELAY 60
+#define INVADER_DELAY 50
 //Speed of scrolling text marquee, lower is faster
 #define MARQUEE_DELAY 25
 //Affects how long the all your base style text stays on screen. Higher is faster
-#define ALLYOURBASE_DELAY 12
+#define ALLYOURBASE_DELAY 10
 //Speed of chars spelled out one by one effect, lower is faster
 #define CHARS_ONEBYONE_DELAY 50
 
@@ -101,11 +101,11 @@ const char ASOT[] PROGMEM = "                    ";
 
 // The length of the buffer used to read a new string from the serial port
 #define MAX_BUFFER_LEN 600
-#define STRINGBUFFER_LEN MAX_BUFFER_LEN + 1
-#define PADDED_STRINGBUFFER_LEN STD_STRING_PADDING + STRINGBUFFER_LEN
+#define STRINGBUFFER_LEN (MAX_BUFFER_LEN + 1)
+#define PADDED_STRINGBUFFER_LEN (STD_STRING_PADDING + STRINGBUFFER_LEN)
 
 // Pad this amount so that scrolling starts nicely off the end, for FontStd
-#define STRING_PADDING(font_width) NUM_PANELS * COLUMNS_PER_PANEL / (font_width + INTERCHAR_SPACE)
+#define STRING_PADDING(font_width) (NUM_PANELS * COLUMNS_PER_PANEL / (font_width + INTERCHAR_SPACE))
 
 const int json_capacity = STRINGBUFFER_LEN + JSON_OBJECT_SIZE(8);
 StaticJsonDocument<json_capacity> json;
@@ -127,22 +127,28 @@ const char KEYBOARD_MODE_WARNING = 'W';
 //vertical tab or \v; single column
 const char VT = '\u000B';
 
-/* Return how many columns to pad this string by on each side to get it to be in the middle of the panel.
+/* Calculates how many empty columns to pad this string on its start and on its end,
+ * and stores the results in startPad and endPad. get it to be in the middle of the panel.
  * E.g.
- * (60-6)/2 = 27
- * (60-1)/2 = 29
+ * (columns - total string width) = startPad, endPad
+ * (60-6) = 27, 27
+ * (60-5) = 27, 28
  */
-uint getColumnsToPadForString(const char* str, int fontWidth) {
+void getColumnsToPadForString(const char* str, int fontWidth, uint* startPad, uint* endPad) {
     uint stringColumns = 0;
-    strlen(str) * (fontWidth + INTERCHAR_SPACE) - 1;
-    //Minus 1 because we don't need an interchar space at the end
-
     while (*str++) {
         if (*str != VT) {
             stringColumns += (fontWidth + INTERCHAR_SPACE);
         }
     }
-    return (COLUMNS_PER_PANEL - stringColumns) / 2;
+    //TODO Do we need to subtract 1 because we don't need an interchar space at the end?
+    uint usedCols = COLUMNS_PER_PANEL - stringColumns;
+    *startPad = usedCols / 2;
+    if (usedCols % 2 == 0) {
+        *endPad = usedCols / 2;
+    } else {
+        *endPad = usedCols / 2 + 1;
+    }
 }
 
 // Just wait long enough without sending any bits to cause the pixels to latch and display the last sent frame
@@ -241,18 +247,19 @@ sendPaddedString(const char* padding, const char* str, uint skip, const uint r, 
     }
 }
 
-void sendPaddingForString(const char* str, int fontWidth) {
-    int padding = getColumnsToPadForString(str, fontWidth);
-    while (padding--) {
+void sendEmptyColumns(int columns) {
+    while (columns--) {
         sendColumnRGB(0, 0, 0, 0);
     }
 }
 
 static inline void
 sendStringJustified(const char* s, int fontWidth, uint skip, const uint r, const uint g, const uint b) {
-    sendPaddingForString(s, fontWidth);
+    uint startPad, endPad;
+    getColumnsToPadForString(s, FONTSTD_WIDTH, &startPad, &endPad);
+    sendEmptyColumns(startPad);
     sendString(s, skip, r, g, b);
-    sendPaddingForString(s, fontWidth);
+    sendEmptyColumns(endPad);
 }
 
 // Keep track of where we are in the color cycle between chars
@@ -316,7 +323,7 @@ void setupLeds() {
 
 void startSerial() {
     // set the data rate for the SoftwareSerial port
-    softSerial.begin(57600);
+    softSerial.begin(14400);
     softSerial.flush();
 //    Serial.begin(19200);
 }
@@ -447,6 +454,9 @@ void showcountdown(const char* countdownstr, unsigned int count = 600) {
 //    const char *countdownstr2 = "PLAYING";
 
     clear();
+    uint startPad, endPad;
+    getColumnsToPadForString("0.00", FONTSTD_WIDTH, &startPad, &endPad);
+
     while (count > 0) {
 
         count--;
@@ -468,10 +478,12 @@ void showcountdown(const char* countdownstr, unsigned int count = 600) {
 
         //  sendChar( '0' , 0 , 0x80, 0 , 0 );
 
+        sendEmptyColumns(startPad);
         sendChar(char1, 0, 0x80, 0, 0);
         sendChar('.', 0, 0x80, 0, 0);
         sendChar(char2, 0, 0x80, 0, 0);
         sendChar(char3, 0, 0x80, 0, 0);
+        sendEmptyColumns(endPad);
 
         sei();
         show();
@@ -493,11 +505,13 @@ void showcountdown(const char* countdownstr, unsigned int count = 600) {
 
         sendColumnRGB(0x00, 0, 0,
                       0xff);   // We need to quickly send a blank byte just to keep from missing our deadlne.
+
+        sendEmptyColumns(startPad);
         sendChar('0', 0, brightness, 0, 0);
         sendChar('.', 0, brightness, 0, 0);
         sendChar('0', 0, brightness, 0, 0);
         sendChar('0', 0, brightness, 0, 0);
-
+        sendEmptyColumns(endPad);
 
         sei();
         show();
@@ -569,92 +583,59 @@ static inline void sendIcon(const uint* fontbase, uint which, int8_t shift, uint
 void showCharsOneByOneOnBothPanels(const char* str, Color textColor, int delayMs = 500) {
     Color tc = textColor;
     clear();
+    uint startPad, endPad;
+    getColumnsToPadForString(str, FONTSTD_WIDTH, &startPad, &endPad);
+
     for (uint p = 0; p < strlen(str); p++) {
         cli();
-        sendPaddingForString(str, FONTSTD_WIDTH);
-//        sendStringColorCycle("                ");
-//        sendIcon(enemies, which, 0, ENEMIES_WIDTH, r, g, b);
+
+        sendEmptyColumns(startPad);
         for (uint i = 0; i <= p; i++) {
             sendChar(*(str + i), 0, GAMMA(tc.r), GAMMA(tc.g), GAMMA(tc.b));
         }
-        sendPaddingForString(str, FONTSTD_WIDTH);
+        int usedCols = startPad + (p + 1) * (FONTSTD_WIDTH + INTERCHAR_SPACE);
+        sendEmptyColumns(COLUMNS_PER_PANEL - usedCols);
+
+        sendEmptyColumns(startPad);
+        for (uint i = 0; i <= p; i++) {
+            sendChar(*(str + i), 0, GAMMA(tc.r), GAMMA(tc.g), GAMMA(tc.b));
+        }
+        sendEmptyColumns(COLUMNS_PER_PANEL - usedCols);
+
         sei();
         delay(CHARS_ONEBYONE_DELAY);
     }
     delay(delayMs);
 }
 
-void showStringColorCycleOnBothPanels(const uint* font, const int fontWidth, const char* str, int columnsPrefix,
+void showStringColorCycleOnBothPanels(const uint* font, const int fontWidth, const char* str, int delayMs,
                                       uint* r, uint* g, uint* b, uint slide) {
+    //TODO cycle color without slide
     clear();
+    uint startPad, endPad;
+    getColumnsToPadForString(str, fontWidth, &startPad, &endPad);
     for (slide; slide; slide -= 10) {
         *cyclingColor = (slide & 0xff);
         cli();
-        sendStringColorCycle(font, fontWidth, str, columnsPrefix, r, g, b);
-        sendStringColorCycle(font, fontWidth, str, columnsPrefix + 5, r, g, b);
+        sendEmptyColumns(startPad);
+        sendStringColorCycle(font, fontWidth, str, 0, r, g, b);
+        sendEmptyColumns(endPad);
+        sendEmptyColumns(startPad);
+        sendStringColorCycle(font, fontWidth, str, 0, r, g, b);
+        sendEmptyColumns(endPad);
         sei();
         show();
-        delay(ALLYOURBASE_DELAY);
+        delay(delayMs / 200);
     }
 
 }
 
-void showallyourbasestyleOnBothPanels(const char* str, int columnsPrefix) {
+void showChonkySlideStyleOnBothPanels(const char* str, int delayMs = ALLYOURBASE_DELAY) {
 //    const char *allyourbase = "CAT: ALL YOUR BASE ARE BELONG TO US !!!";
+    // TODO color support
     uint g = 0;
     uint b = 0x80;
-    showStringColorCycleOnBothPanels(FontChonk, FONTCHONK_WIDTH, str, columnsPrefix, cyclingColor, &g, &b, 1250);
-}
-
-void showInstagramAd() {
-    showCharsOneByOneOnBothPanels("INSTAGRAM:", Color{0xfe, 0xd4, 0x3b});
-    showCharsOneByOneOnBothPanels("@APHEXCX", Color{0xef, 0x0c, 0x1d}, 1000);
-//    showCharsOneByOne("TWITTER:  TWITTER:  ", GAMMA(0x1d), GAMMA(0xa1), GAMMA(0xf2));
-//    showCharsOneByOneAndWait("  @APHEX    @APHEX ", GAMMA(0x1d), GAMMA(0xa1), GAMMA(0xf2), 1000);
-//    showCharsOneByOne("SOUNDCLOUDSOUNDCLOUD", GAMMA(0xff), GAMMA(0x77), GAMMA(0x00));
-//    showCharsOneByOneAndWait("DADPARTYSFDADPARTYSF", GAMMA(0xff), GAMMA(0x77), GAMMA(0x00), 1000);
-    uint r = GAMMA(0xef);
-    uint g = GAMMA(0x0c);
-    uint b = GAMMA(0x2d);
-//    // Idk why I can't get the slide value to show up for longer, even 30000 is really short, so just call it twice
-//    showStringColorCycleOnBothPanels(FontStd5x7, FONTSTD_WIDTH, " @APHEXCX ", 0, cyclingColor, &g, &b, 1250);
-    //TODO cycle color without slide
-//    showStringColorCycleOnBothPanels(FontStd5x7, FONTSTD_WIDTH, " @APHEXCX ", 0, cyclingColor, &g, &b, 1250);
-
-//    showallyourbasestyle("INSTAGRAM INSTAGRAM ");
-//    showallyourbasestyle("@APHEXCX  @APHEXCX ");
-}
-
-void showMainAd() {
-    showallyourbasestyleOnBothPanels("DAD SF", 4);
-    showallyourbasestyleOnBothPanels("DAD SF", 4);
-    showallyourbasestyleOnBothPanels("X X X ", 6);
-    showallyourbasestyleOnBothPanels("BAAAHS", 4);
-    showallyourbasestyleOnBothPanels("BAAAHS", 4);
-//    showallyourbasestyleOnBothPanels("TRANCE", 4);
-//    showallyourbasestyleOnBothPanels("2019!!", 4);
-}
-
-void showTalkToUsAd() {
-
-//    showCharsOneByOne("THANK YOU THANK YOU ", GAMMA(0xfe), GAMMA(0xd4), GAMMA(0x3b));
-//    showCharsOneByOne("FOR RIDINGFOR RIDING", GAMMA(0xfe), GAMMA(0xd4), GAMMA(0x3b));
-//    showCharsOneByOneAndWait("  BAAAHS    BAAAHS  ", GAMMA(0xea), GAMMA(0x17), GAMMA(0x8c), 1000);
-
-//    showCharsOneByOne("WANT TO...WANT TO...", GAMMA(0x04), GAMMA(0xff), GAMMA(0x19));
-//    showCharsOneByOneAndWait("ADD A MSG?ADD A MSG?", GAMMA(0x04), GAMMA(0xff), GAMMA(0x19), 1200);
-//    showCharsOneByOneAndWait("ASK US!!<3ASK US!!<3", GAMMA(0xff), GAMMA(0x05), GAMMA(0x5d), 1200);
-//    showCharsOneByOneAndWait("CUM ON IN!CUM ON IN!", GAMMA(0xff), GAMMA(0x05), GAMMA(0x5d), 1200);
-}
-
-void showMsgMeAd() {
-    clear();
-    showMainAd();
-    showInstagramAd();
-    showTalkToUsAd();
-//    showCharsOneByOne(" MSG ME!!! MSG ME!!! ", GAMMA(0xE6), GAMMA(0x00), GAMMA(0x7E));
-
-//    showCharsOneByOne(1, " = 10 POINTS", 0x00, 0xff, 0x00);
+    showStringColorCycleOnBothPanels(FontChonk, FONTCHONK_WIDTH, str, delayMs, cyclingColor, &g, &b, 1250);
 }
 
 void showIconInvaders(ICON icon) {
@@ -690,13 +671,13 @@ void showIconInvaders(ICON icon) {
             }
 
             for (uint l = 0; l < acount; l++) {
-                sendIcon(icons + (icon * ICON_WIDTH), p & 1, row, ICON_WIDTH, GAMMA(0x4f), GAMMA(0x62), GAMMA(0xd2));
+                sendIcon(icons + (icon * ICON_WIDTH),
+                         p & 1,
+                         row,
+                         ICON_WIDTH,
+                         GAMMA(0x4f), GAMMA(0x62), GAMMA(0xd2));
 //                sendChar(' ', 0, 0x00, 0x00, 0x00); // No over crowding
-                sendColumnRGB(0, 0x00, 0x00, 0x00);
-                sendColumnRGB(0, 0x00, 0x00, 0x00);
-                sendColumnRGB(0, 0x00, 0x00, 0x00);
-                sendColumnRGB(0, 0x00, 0x00, 0x00);
-                sendColumnRGB(0, 0x00, 0x00, 0x00);
+                sendEmptyColumns(5);
             }
 
             sei();
@@ -915,7 +896,7 @@ void loop() {
                 break;
             }
             case MSGTYPE_CHONKY_SLIDE: {
-                showallyourbasestyleOnBothPanels(str, 4);  //TODO extract color //TODO implement delay
+                showChonkySlideStyleOnBothPanels(str, json["dly"]);  //TODO extract color
                 break;
             }
             case MSGTYPE_CHOOSER: {
