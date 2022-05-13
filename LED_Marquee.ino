@@ -131,7 +131,7 @@ const char KEYBOARD_MODE_WARNING = 'W';
 const char VT = '\u000B';
 
 /* Calculates how many empty columns to pad this string on its start and on its end,
- * and stores the results in startPad and endPad. get it to be in the middle of the panel.
+ * and stores the results in startPad and endPad. Helps get it to be in the middle of the panel.
  * E.g.
  * (columns - total string width) = startPad, endPad
  * (60-6) = 27, 27
@@ -144,7 +144,9 @@ void getColumnsToPadForString(const char* str, int fontWidth, uint* startPad, ui
             stringColumns += (fontWidth + INTERCHAR_SPACE);
         }
     }
-    //TODO Do we need to subtract 1 because we don't need an interchar space at the end?
+    //Subtract 1 because we don't append an interchar space at the end of the string
+    stringColumns -= 1;
+
     uint usedCols = COLUMNS_PER_PANEL - stringColumns;
     *startPad = usedCols / 2;
     if (usedCols % 2 == 0) {
