@@ -91,6 +91,8 @@ const char ASOT[] PROGMEM = "                    ";
 #define ALLYOURBASE_DELAY 10
 //Speed of chars spelled out one by one effect, lower is faster
 #define CHARS_ONEBYONE_DELAY 50
+//Speed (delay between frames) of flashy countdown animation, lower is faster
+#define COUNTDOWN_DELAY 500
 
 // Change this to be at least as long as your pixel string (too long will work fine, just be a little slower)
 #define NUM_PANELS 2  // Number of panels. There are 2.
@@ -105,7 +107,7 @@ const char ASOT[] PROGMEM = "                    ";
 #define PADDED_STRINGBUFFER_LEN (STD_STRING_PADDING + STRINGBUFFER_LEN)
 
 // Pad this amount so that scrolling starts nicely off the end, for FontStd
-#define STRING_PADDING(font_width) (NUM_PANELS * COLUMNS_PER_PANEL / (font_width + INTERCHAR_SPACE))
+#define STRING_PADDING(font_width) (NUM_PANELS * COLUMNS_PER_PANEL / ((font_width) + INTERCHAR_SPACE))
 
 const int json_capacity = STRINGBUFFER_LEN + JSON_OBJECT_SIZE(8);
 StaticJsonDocument<json_capacity> json;
@@ -114,6 +116,7 @@ StaticJsonDocument<json_capacity> json;
 const char MSGTYPE_CHONKY_SLIDE = 'C';
 const char MSGTYPE_ONE_BY_ONE = 'O';
 const char MSGTYPE_FLASHY = 'F';
+const char MSGTYPE_COUNTDOWN = 'W';
 const char MSGTYPE_UTILITY = 'U';
 const char MSGTYPE_KEYBOARD = 'K';
 const char MSGTYPE_CHOOSER = 'H';
@@ -189,9 +192,9 @@ static inline void clear() {
 // TODO: Also could pad the beginning of the font table to aovid the offset subtraction at the cost of 20*8 bytes of progmem
 // TODO: Could pad all chars out to 8 bytes wide to turn the the multiply by FONTSTD_WIDTH into a shift
 
-static void sendChar(uint ch, uint skip, uint r, uint g, uint b) {
+static void sendChar(uint ch, uint skip, uint r, uint g, uint b, boolean sendTrailingSpace = true) {
 
-    // For the VT char, we only send a single column
+    // For the VT char, we only send a single column (so just the interchar space)
     if (ch != VT) {
         const uint* charbase = FontStd5x7 + ((ch - ' ') * FONTSTD_WIDTH);
         uint col = FONTSTD_WIDTH;
@@ -207,18 +210,20 @@ static void sendChar(uint ch, uint skip, uint r, uint g, uint b) {
 
         // TODO: FLexible interchar spacing
     }
-    sendColumnRGB(0, r, g, b);    // Interchar space
+    if (sendTrailingSpace) {
+        sendColumnRGB(0, r, g, b);    // Interchar space
+    }
 
 }
 
-static void sendString(const char* str, uint skip, const uint r, const uint g, const uint b) {
-    unsigned int l = PIXELS / (FONTSTD_WIDTH + INTERCHAR_SPACE);
+static void sendString(const char* str, int fontWidth, uint skip, const uint r, const uint g, const uint b) {
+    unsigned int l = PIXELS / (fontWidth + INTERCHAR_SPACE);
 
     sendChar(*str, skip, r, g, b); // First char is special case because it can be stepped for smooth scrolling
 
     // Send rest of string
     while (*(++str) && l--) {
-        sendChar(*str, 0, r, g, b);
+        sendChar(*str, 0, r, g, b, *(str + 1) != '\0'); //dont send interchar space on last char
     }
 }
 
@@ -256,9 +261,9 @@ void sendEmptyColumns(int columns) {
 static inline void
 sendStringJustified(const char* s, int fontWidth, uint skip, const uint r, const uint g, const uint b) {
     uint startPad, endPad;
-    getColumnsToPadForString(s, FONTSTD_WIDTH, &startPad, &endPad);
+    getColumnsToPadForString(s, fontWidth, &startPad, &endPad);
     sendEmptyColumns(startPad);
-    sendString(s, skip, r, g, b);
+    sendString(s, fontWidth, skip, r, g, b);
     sendEmptyColumns(endPad);
 }
 
@@ -419,7 +424,7 @@ void showAsChooser(const char* blinkyStr, const char* countyStr) {
         cli();
 
         // County part
-        sendString(countyStr, 0, 0x80, 0, 0);
+        sendString(countyStr, FONTSTD_WIDTH, 0, 0x80, 0, 0);
 
         sendColumnRGB(0x00, 0, 0, 0xff);
 
@@ -433,7 +438,7 @@ void showAsChooser(const char* blinkyStr, const char* countyStr) {
 //                                       INTERCHAR_SPACE; step++) {
 //                // step though each column of the 1st char for smooth scrolling
 //                sendString(blinkyStr, step, brightness, brightness, brightness);
-        sendString(blinkyStr, 0, brightness, brightness, brightness);
+        sendString(blinkyStr, FONTSTD_WIDTH, 0, brightness, brightness, brightness);
 //            }
 //            blinkyStr = blinkyStr + s;
 //        }
@@ -444,18 +449,8 @@ void showAsChooser(const char* blinkyStr, const char* countyStr) {
     }
 }
 
-void showcountdown(const char* countdownstr, unsigned int count = 600) {
-
-    // Start sequence.....
-
-//    const char *countdownstr = "NEW MSG IN   ";
-//    const char *countdownstr = "NOW PLAYING";
-//    const char *countdownstr1 = "NOW";
-//    const char *countdownstr2 = "PLAYING";
-
+void showAsCountdownStyle(const char* countdownstr, unsigned int count = 600, boolean showCount = true) {
     clear();
-    uint startPad, endPad;
-    getColumnsToPadForString("0.00", FONTSTD_WIDTH, &startPad, &endPad);
 
     while (count > 0) {
 
@@ -472,20 +467,37 @@ void showcountdown(const char* countdownstr, unsigned int count = 600) {
         uint brightness = GAMMA(((count % 100) * 256) / 100);
 
         cli();
-        sendStringJustified(countdownstr, FONTSTD_WIDTH, 0, brightness, brightness, brightness);
-
-        sendColumnRGB(0x00, 0, 0, 0xff);
+        if (showCount) {
+            sendString(countdownstr, FONTSTD_WIDTH, 0, brightness, brightness, brightness);
+        } else {
+            // align string to middle if we're not showing the countdown.
+            sendStringJustified(countdownstr, FONTSTD_WIDTH, 0, brightness, brightness, brightness);
+        }
 
         //  sendChar( '0' , 0 , 0x80, 0 , 0 );
 
-        sendEmptyColumns(startPad);
-        sendChar(char1, 0, 0x80, 0, 0);
-        sendChar('.', 0, 0x80, 0, 0);
-        sendChar(char2, 0, 0x80, 0, 0);
-        sendChar(char3, 0, 0x80, 0, 0);
-        sendEmptyColumns(endPad);
+        if (showCount) {
+//            sendColumnRGB(0x00, 0, 0, 0xff);
+            //Panel A:
+            sendChar(char1, 0, 0x80, 0, 0);
+            sendChar('.', 0, 0x80, 0, 0);
+            sendChar(char2, 0, 0x80, 0, 0);
+            sendChar(char3, 0, 0x80, 0, 0, false);
+
+            //Other panel:
+            sendString(countdownstr, FONTSTD_WIDTH, 0, brightness, brightness, brightness);
+            sendChar(char1, 0, 0x80, 0, 0);
+            sendChar('.', 0, 0x80, 0, 0);
+            sendChar(char2, 0, 0x80, 0, 0);
+            sendChar(char3, 0, 0x80, 0, 0, false);
+
+        } else {
+            // show the string on the other panel too if we're not showing the count
+            sendStringJustified(countdownstr, FONTSTD_WIDTH, 0, brightness, brightness, brightness);
+        }
 
         sei();
+        delayMicroseconds(COUNTDOWN_DELAY);
         show();
     }
 
@@ -499,25 +511,44 @@ void showcountdown(const char* countdownstr, unsigned int count = 600) {
         uint brightness = GAMMA(((count % 100) * 256) / 100);
 
         cli();
-        sendStringJustified(countdownstr, FONTSTD_WIDTH, 0, brightness, brightness, brightness);
+        if (showCount) {
+            sendString(countdownstr, FONTSTD_WIDTH, 0, brightness, brightness, brightness);
+        } else {
+            // align string to middle if we're not showing the countdown.
+            sendStringJustified(countdownstr, FONTSTD_WIDTH, 0, brightness, brightness, brightness);
+        }
+
 //        sendColumnRGB(0x00, 0, 0, 0xff);
-//        sendString(countdownstr2, 0, brightness, brightness, brightness);
 
-        sendColumnRGB(0x00, 0, 0,
-                      0xff);   // We need to quickly send a blank byte just to keep from missing our deadlne.
+        if (showCount) {
+//            sendColumnRGB(0x00, 0, 0,
+//                          0xff);   // We need to quickly send a blank byte just to keep from missing our deadlne.
 
-        sendEmptyColumns(startPad);
-        sendChar('0', 0, brightness, 0, 0);
-        sendChar('.', 0, brightness, 0, 0);
-        sendChar('0', 0, brightness, 0, 0);
-        sendChar('0', 0, brightness, 0, 0);
-        sendEmptyColumns(endPad);
+            sendChar('0', 0, brightness, 0, 0);
+            sendChar('.', 0, brightness, 0, 0);
+            sendChar('0', 0, brightness, 0, 0);
+            sendChar('0', 0, brightness, 0, 0, false);
+
+            //Other panel:
+            sendString(countdownstr, FONTSTD_WIDTH, 0, brightness, brightness, brightness);
+            sendChar('0', 0, brightness, 0, 0);
+            sendChar('.', 0, brightness, 0, 0);
+            sendChar('0', 0, brightness, 0, 0);
+            sendChar('0', 0, brightness, 0, 0, false);
+        } else {
+            // show the string on the other panel too if we're not showing the count
+            sendStringJustified(countdownstr, FONTSTD_WIDTH, 0, brightness, brightness, brightness);
+        }
 
         sei();
+        delayMicroseconds(COUNTDOWN_DELAY);
         show();
     }
 }
 
+void showAsFlashyStyle(const char* countdownstr, unsigned int time = 200) {
+    showAsCountdownStyle(countdownstr, time, false);
+}
 
 void showstarfieldcustom(int stars) {
 
@@ -842,7 +873,7 @@ bool readSerialData() {
 //            softSerial.read();
 //        }
         stopSerial();
-        showcountdown((char*) err.c_str());
+        showAsFlashyStyle((char*) err.c_str());
         diagnosticBlink();
         diagnosticBlink();
         diagnosticBlink();
@@ -864,11 +895,12 @@ void setup() {
     setupDiagnosticLed();
     setupLeds();
 
-    showcountdown("I", 80);
-    showcountdown("LIVE", 80);
-    showcountdown("FOR", 80);
-    showcountdown("THAT", 80);
-    showcountdown("ENERGY!", 80);
+    showAsFlashyStyle("I", 60);
+    showAsFlashyStyle("LIVE", 60);
+    showAsFlashyStyle("FOR", 60);
+    showAsFlashyStyle("THAT", 60);
+    showAsFlashyStyle("ENERGY!", 60);
+//    showAsCountdownStyle("NEW\u000BMSG\u000B", 600);
     showstarfield();
 
     setupSerial();
@@ -910,10 +942,10 @@ void loop() {
                     case 'M': { // Microphone enable/disable
                         if (*str == 'E') {
                             PCICR |= bit (PCIE1); // enable pin change interrupts for A0 to A5
-                            showcountdown("MIC ON", 200);
+                            showAsFlashyStyle("MIC ON", 200);
                         } else if (*str == 'D') {
                             PCICR &= ~bit (PCIE1); // disable pin change interrupts for A0 to A5
-                            showcountdown("MIC OFF", 200);
+                            showAsFlashyStyle("MIC OFF", 200);
                         }
                         break;
                     }
@@ -927,7 +959,7 @@ void loop() {
                         BRIGHTNESS_SHIFT = shift;
                         char out[10];
                         sprintf(out, "BRIGHT=%d", shift);
-                        showcountdown(out, 200);
+                        showAsFlashyStyle(out, 200);
                         break;
                     }
                 }
@@ -940,7 +972,12 @@ void loop() {
                 break;
             }
             case MSGTYPE_FLASHY: {
-                showcountdown(str);
+                showAsFlashyStyle(str);
+                showstarfield();
+                break;
+            }
+            case MSGTYPE_COUNTDOWN: {
+                showAsCountdownStyle(str);
                 showstarfield();
                 break;
             }
@@ -969,7 +1006,7 @@ void loop() {
 //                        break;
 //                    }
 //                    default: {
-//                        showcountdown(strcat("INVALID ICON: ",str), 100);
+//                        showAsCountdownStyle(strcat("INVALID ICON: ",str), 100);
 //                        break;
 //                    }
 //                }
@@ -994,7 +1031,7 @@ void loop() {
 /*
     // Returns true if we should show the new msg alert
     if (readSerialData()) {
-        showcountdown();
+        showAsCountdownStyle();
         showstarfield();
     } else {
         //TODO can move the contents of this else block above the readSerialData call to make new messages
