@@ -663,11 +663,12 @@ void showStringColorCycleOnBothPanels(const uint* font, const int fontWidth, con
 
 }
 
-void showChonkySlideStyleOnBothPanels(const char* str, int delayMs = ALLYOURBASE_DELAY) {
+void showChonkySlideStyleOnBothPanels(const char* str, int delayMs = ALLYOURBASE_DELAY,
+                                      Color colorFrom = Color{0, 0, 0x80}) {
 //    const char *allyourbase = "CAT: ALL YOUR BASE ARE BELONG TO US !!!";
-    // TODO color support
-    uint g = 0;
-    uint b = 0x80;
+    // TODO colorFrom, colorTo support
+    uint g = colorFrom.g;
+    uint b = colorFrom.b;
     showStringColorCycleOnBothPanels(FontChonk, FONTCHONK_WIDTH, str, delayMs, cyclingColor, &g, &b, 1250);
 }
 
@@ -930,7 +931,7 @@ void loop() {
                 break;
             }
             case MSGTYPE_CHONKY_SLIDE: {
-                showChonkySlideStyleOnBothPanels(str, json["dly"]);  //TODO extract color
+                showChonkySlideStyleOnBothPanels(str, json["dly"], {json["r"], json["g"], json["b"]});
                 break;
             }
             case MSGTYPE_CHOOSER: {
