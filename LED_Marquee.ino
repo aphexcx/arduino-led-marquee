@@ -117,6 +117,7 @@ const char MSGTYPE_CHONKY_SLIDE = 'C';
 const char MSGTYPE_ONE_BY_ONE = 'O';
 const char MSGTYPE_FLASHY = 'F';
 const char MSGTYPE_COUNTDOWN = 'W';
+const char MSGTYPE_STARFIELD = 'S';
 const char MSGTYPE_UTILITY = 'U';
 const char MSGTYPE_KEYBOARD = 'K';
 const char MSGTYPE_CHOOSER = 'H';
@@ -129,6 +130,7 @@ const char KEYBOARD_MODE_WARNING = 'W';
 
 //vertical tab or \v; single column
 const char VT = '\u000B';
+const char HEART = '\u007F';
 
 /* Calculates how many empty columns to pad this string on its start and on its end,
  * and stores the results in startPad and endPad. Helps get it to be in the middle of the panel.
@@ -200,6 +202,9 @@ static void sendChar(uint ch, uint skip, uint r, uint g, uint b, boolean sendTra
     if (ch != VT) {
         const uint* charbase = FontStd5x7 + ((ch - ' ') * FONTSTD_WIDTH);
         uint col = FONTSTD_WIDTH;
+        if (ch == HEART) {
+            col = HEART_WIDTH;
+        }
 
         while (skip--) {
             charbase++;
@@ -750,6 +755,7 @@ void marquee(const char* marqueePtr, bool pad = true, uint marqueeDelay = MARQUE
 
     float beatPct = 0.0f;
     unsigned long delta;
+    uint charWidth;
 
     while (*marqueePtr) {
 
@@ -786,7 +792,13 @@ void marquee(const char* marqueePtr, bool pad = true, uint marqueeDelay = MARQUE
                 break;
         };
 
-        for (uint step = 0; step < FONTSTD_WIDTH + INTERCHAR_SPACE; step++) {
+        if (!*paddingPtr && *marqueePtr == HEART) {
+            charWidth = HEART_WIDTH;
+        } else {
+            charWidth = FONTSTD_WIDTH;
+        }
+
+        for (uint step = 0; step < charWidth + INTERCHAR_SPACE; step++) {
             // step though each column of the 1st char for smooth scrolling
 
             delta = millis() - timeOfLastBeat;
@@ -980,6 +992,11 @@ void loop() {
                 break;
             }
             case MSGTYPE_COUNTDOWN: {
+                showAsCountdownStyle(str);
+                showstarfield();
+                break;
+            }
+            case MSGTYPE_STARFIELD: {
                 showAsCountdownStyle(str);
                 showstarfield();
                 break;
