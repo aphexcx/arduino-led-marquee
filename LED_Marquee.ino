@@ -62,7 +62,7 @@ ISR (PCINT1_vect) {
 #define txPin 11
 SoftwareSerial softSerial(rxPin, txPin); // RX, TX
 
-const char ASOT[] PROGMEM = "                    ";
+//const char ASOT[] PROGMEM = "                    ";
 /*"I had a dream last night... A vision! I saw a world full of people. "
 "Everybody was dancing! And screaming loud! They were just there to listen to "
 "the music. Some even had their eyes closed. "
@@ -112,6 +112,12 @@ const char ASOT[] PROGMEM = "                    ";
 const int json_capacity = STRINGBUFFER_LEN + JSON_OBJECT_SIZE(8);
 StaticJsonDocument<json_capacity> json;
 
+
+const char HEADER_JSON = 'J';
+const char HEADER_KEYBOARD = 'K';
+const char HEADER_KEYBOARD_WARNING = 'W';
+
+
 // This is what style the current text will be shown in
 const char MSGTYPE_CHONKY_SLIDE = 'C';
 const char MSGTYPE_ONE_BY_ONE = 'O';
@@ -122,14 +128,12 @@ const char MSGTYPE_UTILITY = 'U';
 const char MSGTYPE_KEYBOARD = 'K';
 const char MSGTYPE_CHOOSER = 'H';
 const char MSGTYPE_ICON = 'I';
-const char MSGTYPE_TRACKID = 'T';
 const char MSGTYPE_DEFAULT = 'D';
-
-// Modes to show keyboard mode in
-const char KEYBOARD_MODE_WARNING = 'W';
+const char MSGTYPE_TRACKID = 'T';
 
 //vertical tab or \v; single column
 const char VT = '\u000B';
+//address of heart icon in std font
 const char HEART = '\u007F';
 
 /* Calculates how many empty columns to pad this string on its start and on its end,
@@ -393,7 +397,7 @@ void showAsInputStyle(const char* str, int idxToBlink, const char mode) {
             int g = 0xff;
             int b = 0xff;
             // Blink idxToBlink char, or all chars if we're in input warning mode
-            if (i == idxToBlink || mode == KEYBOARD_MODE_WARNING) {
+            if (i == idxToBlink || mode == HEADER_KEYBOARD_WARNING) {
                 sendChar(str[i], 0, 0xff, brightness, brightness);
             } else {
                 sendChar(str[i], 0, GAMMA(r), GAMMA(g), GAMMA(b));
@@ -848,7 +852,7 @@ void marquee(const char* marqueePtr, bool pad = true, uint marqueeDelay = MARQUE
 }
 
 // Notifies the IMX that we're ready to retrieve custom message data
-bool readSerialData() {
+char readSerialData() {
     startSerial();
     // Flushing Serial input buffer
 //            while (softSerial.available())
@@ -860,23 +864,29 @@ bool readSerialData() {
 
     // send special symbol so IMX knows to respond with custom message data
     softSerial.print('~');
-//    int firstByte = softSerial.read();
-//
-//    switch (firstByte) {
-//
-//    }
+    char header = softSerial.read();
 
-    // Read the JSON document from the serial port
-    DeserializationError err = deserializeJson(json, softSerial);
+    switch (header) {
 
-    if (err == DeserializationError::Ok) {
-        stopSerial();
-        diagnosticBlink();
-        return true;
-    } else if (err == DeserializationError::EmptyInput) {
-        return false;
-    } else {
-        softSerial.print(err.c_str());
+        case HEADER_KEYBOARD:
+        case HEADER_KEYBOARD_WARNING: {
+
+            showAsInputStyle(str, strlen(str) - 1 - 1, header);
+            break;
+        }
+        case HEADER_JSON: {
+            // Read the JSON document from the serial port
+            DeserializationError err = deserializeJson(json, softSerial);
+
+            if (err == DeserializationError::Ok) {
+                stopSerial();
+                diagnosticBlink();
+                return true;
+            } else if (err == DeserializationError::EmptyInput) {
+                stopSerial();
+                return false;
+            } else {
+                softSerial.print(err.c_str());
 
 //        char bytes[10] = {'\0'};
 //        softSerial.readBytes(bytes, 1);
@@ -887,13 +897,16 @@ bool readSerialData() {
 //        while(softSerial.available()) {
 //            softSerial.read();
 //        }
-        stopSerial();
-        showAsFlashyStyle((char*) err.c_str());
-        diagnosticBlink();
-        diagnosticBlink();
-        diagnosticBlink();
-        diagnosticBlink();
-        return false;
+                stopSerial();
+                showAsFlashyStyle((char*) err.c_str());
+                diagnosticBlink();
+                diagnosticBlink();
+                diagnosticBlink();
+                diagnosticBlink();
+                return false;
+            }
+        }
+
     }
 }
 
@@ -980,12 +993,12 @@ void loop() {
                 }
                 break;
             }
-            case MSGTYPE_KEYBOARD: { // Keyboard input
-                char keyboardInputMode = json["mode"].as<const char*>()[0];
-
-                showAsInputStyle(str, strlen(str) - 1 - 1, keyboardInputMode);
-                break;
-            }
+//            case MSGTYPE_KEYBOARD: { // Keyboard input
+//                char keyboardInputMode = json["mode"].as<const char*>()[0];
+//
+//                showAsInputStyle(str, strlen(str) - 1 - 1, keyboardInputMode);
+//                break;
+//            }
             case MSGTYPE_FLASHY: {
                 showAsFlashyStyle(str);
                 showstarfield();
