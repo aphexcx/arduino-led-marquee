@@ -7,7 +7,7 @@ set(${CMAKE_PROJECT_NAME}_SKETCH LED_Marquee.ino)
 
 #### Uncomment below additional settings as needed.
 set(${CMAKE_PROJECT_NAME}_BOARD uno)
-set(${CMAKE_PROJECT_NAME}_PORT /dev/tty.usbmodem2101)
+set(${CMAKE_PROJECT_NAME}_PORT /dev/tty.usbmodem143201)
 # set(mega.build.mcu atmega2560)
 # set(mega.upload.protocol wiring)
 # set(mega.upload.speed 115200)

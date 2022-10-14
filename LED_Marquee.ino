@@ -84,7 +84,7 @@ const char ASOT[] PROGMEM = "                    ";
 //How often to advertise "MSG ME!!!", e.g. every 5 marquee scrolls
 #define ADVERTISE_EVERY 5
 //Speed of invader sequence, lower is faster
-#define INVADER_DELAY 50
+#define INVADER_DELAY 55
 //Speed of scrolling text marquee, lower is faster
 #define MARQUEE_DELAY 25
 //Affects how long the all your base style text stays on screen. Higher is faster
@@ -677,9 +677,13 @@ void showChonkySlideStyleOnBothPanels(const char* str, int delayMs = ALLYOURBASE
     showStringColorCycleOnBothPanels(FontChonk, FONTCHONK_WIDTH, str, delayMs, cyclingColor, &g, &b, 1250);
 }
 
-void showIconInvaders(ICON icon) {
+void showIconInvaders(const Icon* icon) {
+    int iconWidth = pgm_read_byte_near(icon);
+//    char blah[4];
+//    itoa(iconWidth, blah, 10);
+//    showAsFlashyStyle(blah);
 
-    uint acount = PIXELS / (ICON_WIDTH + FONTSTD_WIDTH);      // How many aliens do we have room for?
+    uint acount = PIXELS / (iconWidth + FONTSTD_WIDTH);      // How many aliens do we have room for?
 
     for (int8_t row = -7; row < 7; row++) {     // Walk down the rows
         //  Walk them 6 pixels per row
@@ -710,13 +714,13 @@ void showIconInvaders(ICON icon) {
             }
 
             for (uint l = 0; l < acount; l++) {
-                sendIcon(icons + (icon * ICON_WIDTH),
+                sendIcon(icon->data,
                          p & 1,
                          row,
-                         ICON_WIDTH,
+                         iconWidth,
                          GAMMA(0x4f), GAMMA(0x62), GAMMA(0xd2));
 //                sendChar(' ', 0, 0x00, 0x00, 0x00); // No over crowding
-                sendEmptyColumns(5);
+                sendEmptyColumns(4);
             }
 
             sei();
@@ -1002,34 +1006,38 @@ void loop() {
                 break;
             }
             case MSGTYPE_ICON: {
-                showIconInvaders(ENEMY1);
+//                showIconInvaders(&DREAMSTATE);
 
-//                switch (*str) {
-//                    case '1': {
-//                        showIconInvaders(ENEMY1);
-//                        break;
-//                    }
-//                    case '2': {
-//                        showIconInvaders(ENEMY2);
-//                        break;
-//                    }
-//                    case 'E': {
-//                        showIconInvaders(EXPLOSION);
-//                        break;
-//                    }
-////                    case 'A': {
-////                        showIconInvaders(ANJUNA);
-////                        break;
-////                    }
-//                    case 'B': {
-//                        showIconInvaders(BAAAHS);
-//                        break;
-//                    }
-//                    default: {
-//                        showAsCountdownStyle(strcat("INVALID ICON: ",str), 100);
-//                        break;
-//                    }
-//                }
+                switch (*str) {
+                    case '1': {
+                        showIconInvaders(&ENEMY1);
+                        break;
+                    }
+                    case '2': {
+                        showIconInvaders(&ENEMY2);
+                        break;
+                    }
+                    case 'E': {
+                        showIconInvaders(&EXPLOSION);
+                        break;
+                    }
+                    case 'A': {
+                        showIconInvaders(&ANJUNA);
+                        break;
+                    }
+                    case 'B': {
+                        showIconInvaders(&BAAAHS);
+                        break;
+                    }
+                    case 'D': {
+                        showIconInvaders(&DREAMSTATE);
+                        break;
+                    }
+                    default: {
+                        showAsCountdownStyle(strcat("INVALID ICON: ", str), 100);
+                        break;
+                    }
+                }
                 break;
             }
             case MSGTYPE_TRACKID: {
