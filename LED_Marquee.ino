@@ -677,7 +677,8 @@ void showChonkySlideStyleOnBothPanels(const char* str, int delayMs = ALLYOURBASE
     showStringColorCycleOnBothPanels(FontChonk, FONTCHONK_WIDTH, str, delayMs, cyclingColor, &g, &b, 1250);
 }
 
-void showIconInvaders(const Icon* icon) {
+void showIconInvaders(const Icon* icon, Color iconColor) {
+    Color ic = iconColor;
     int iconWidth = pgm_read_byte_near(icon);
 //    char blah[4];
 //    itoa(iconWidth, blah, 10);
@@ -718,7 +719,7 @@ void showIconInvaders(const Icon* icon) {
                          p & 1,
                          row,
                          iconWidth,
-                         GAMMA(0x4f), GAMMA(0x62), GAMMA(0xd2));
+                         GAMMA(ic.r), GAMMA(ic.g), GAMMA(ic.b));
 //                sendChar(' ', 0, 0x00, 0x00, 0x00); // No over crowding
                 sendEmptyColumns(4);
             }
@@ -1006,31 +1007,34 @@ void loop() {
                 break;
             }
             case MSGTYPE_ICON: {
-//                showIconInvaders(&DREAMSTATE);
-
+                Color iconColor = {json["r"], json["g"], json["b"]};
                 switch (*str) {
                     case '1': {
-                        showIconInvaders(&ENEMY1);
+                        showIconInvaders(&ENEMY1, iconColor);
                         break;
                     }
                     case '2': {
-                        showIconInvaders(&ENEMY2);
+                        showIconInvaders(&ENEMY2, iconColor);
                         break;
                     }
-                    case 'E': {
-                        showIconInvaders(&EXPLOSION);
+                    case 'X': {
+                        showIconInvaders(&EXPLOSION, iconColor);
                         break;
                     }
                     case 'A': {
-                        showIconInvaders(&ANJUNA);
+                        showIconInvaders(&ANJUNA, iconColor);
                         break;
                     }
                     case 'B': {
-                        showIconInvaders(&BAAAHS);
+                        showIconInvaders(&BAAAHS, iconColor);
                         break;
                     }
                     case 'D': {
-                        showIconInvaders(&DREAMSTATE);
+                        showIconInvaders(&DREAMSTATE, iconColor);
+                        break;
+                    }
+                    case 'E': { //TODO EDC
+                        showIconInvaders(&DREAMSTATE, iconColor);
                         break;
                     }
                     default: {
