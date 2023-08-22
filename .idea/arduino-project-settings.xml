@@ -2,6 +2,6 @@
 <project version="4">
   <component name="Arduino Project Settings">
     <option name="baudRate" value="57600" />
-    <option name="port" value="/dev/cu.usbmodem143201" />
+    <option name="port" value="/dev/cu.usbmodem11301" />
   </component>
 </project>
