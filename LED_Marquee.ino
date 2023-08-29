@@ -285,34 +285,46 @@ sendStringJustified(const char* s, const Font& font, uint skip, const uint r, co
 uint* cyclingColor = (uint * )(calloc(1, sizeof(uint)));
 
 // Send a char with a column-based color cycle
-static inline void sendCharColorCycle(const uint* font, const int fontWidth, uint c, uint* r, uint* g, uint* b) {
-    const uint* charbase = font + ((c - ' ') * fontWidth);
-    uint col = fontWidth;
+static inline void sendCharColorCycle(const Font& font, uint c,
+                                      uint skip,
+                                      uint* r, uint* g, uint* b) {
+    const uint* charbase = font.data + ((c - ' ') * font.width);
+    uint col = font.width;
+
+    while (skip--) {
+        charbase++;
+        col--;
+    }
+
     while (col--) {
         sendColumnRGB(pgm_read_byte_near(charbase++), *r, *g, *b);
         *cyclingColor += 10;
     }
-    sendColumnRGB(0, 0, 0, 0);
+//    if (sendTrailingSpace) {
+    sendColumnRGB(0, 0, 0, 0); // Interchar space
+//    }
     *cyclingColor += 10;
 }
 
 // Show the passed string with the arcade font and a nice vertical color cycle effect
 // columnsPrefix: the # of empty columns to add before the string, useful for spacing
 static inline void
-sendStringColorCycle(const uint* font, const int fontWidth, const char* s, int columnsPrefix, uint* r, uint* g,
-                     uint* b) {
+sendStringColorCycle(const Font& font, const char* str, int columnsPrefix,
+                     uint skip,
+                     uint* r, uint* g, uint* b) {
 
-    unsigned int l = PIXELS / (fontWidth + INTERCHAR_SPACE);
+    unsigned int l = PIXELS / (font.width + INTERCHAR_SPACE);
 
     while (columnsPrefix--) {
         sendColumnRGB(0, 0x00, 0x00, 0x00);
     }
 
-    while (l--) {
-        char c;
-        c = *s++;
-        if (!c) break;
-        sendCharColorCycle(font, fontWidth, c, r, g, b);
+    sendCharColorCycle(font, *str, skip, r, g,
+                       b); // First char is special case because it can be stepped for smooth scrolling
+
+    // Send rest of string
+    while (*(++str) && l--) {
+        sendCharColorCycle(font, *str, 0, r, g, b);
     }
 }
 
@@ -622,21 +634,34 @@ void showCharsOneByOneOnBothPanels(const char* str, Color textColor, int delayMs
     delay(delayMs);
 }
 
-void showStringColorCycleOnBothPanels(const uint* font, const int fontWidth, const char* str, int delayMs,
-                                      uint* r, uint* g, uint* b, uint slide) {
+void showStringColorCycleOnBothPanels(const Font& font, const char* str, int delayMs, bool alignMiddle, uint skip,
+                                      uint* r, uint* g, uint* b) { //, uint slide) {
     //TODO cycle color without slide
+    uint slide = delayMs;
     clear();
-    uint startPad, endPad;
-    getColumnsToPadForString(str, fontWidth, &startPad, &endPad);
+    uint startPad = 0;
+    uint endPad = 0;
+    getColumnsToPadForString(str, font.width, &startPad, &endPad);
+
     for (slide; slide; slide -= 10) {
         *cyclingColor = (slide & 0xff);
         cli();
-        sendEmptyColumns(startPad);
-        sendStringColorCycle(font, fontWidth, str, 0, r, g, b);
-        sendEmptyColumns(endPad);
-        sendEmptyColumns(startPad);
-        sendStringColorCycle(font, fontWidth, str, 0, r, g, b);
-        sendEmptyColumns(endPad);
+        if (alignMiddle) {
+            sendEmptyColumns(startPad);
+        }
+        sendStringColorCycle(font, str, 0, skip, r, g, b);
+        if (alignMiddle) {
+            sendEmptyColumns(endPad);
+            sendEmptyColumns(startPad);
+        } else {
+            sendEmptyColumns(startPad + endPad + font.width);
+        }
+        sendStringColorCycle(font, str, 0, skip, r, g, b);
+        if (alignMiddle) {
+            sendEmptyColumns(endPad);
+        } else {
+            sendEmptyColumns(startPad + endPad + font.width);
+        }
         sei();
         show();
         delay(delayMs / 200);
@@ -645,12 +670,27 @@ void showStringColorCycleOnBothPanels(const uint* font, const int fontWidth, con
 }
 
 void showChonkySlideStyleOnBothPanels(const char* str, int delayMs = ALLYOURBASE_DELAY,
-                                      Color colorFrom = Color{0, 0, 0x80}) {
+                                      Color colorFrom = Color{0, 0, 0x80}, bool scrollToLastChar = false) {
 //    const char *allyourbase = "CAT: ALL YOUR BASE ARE BELONG TO US !!!";
     // TODO colorFrom, colorTo support
     uint g = colorFrom.g;
     uint b = colorFrom.b;
-    showStringColorCycleOnBothPanels(FontChonk, FONTCHONK_WIDTH, str, delayMs, cyclingColor, &g, &b, 1250);
+//    delayMs = ALLYOURBASE_DELAY + 10; //FIXME rmove
+    if (scrollToLastChar) {
+        uint charWidth = fontChonk.width;
+        int l = 5; //or infinite loop to end of str
+        while (l--) {
+            for (uint skip = 0; skip <= charWidth; skip++) {
+                showStringColorCycleOnBothPanels(fontChonk, str, delayMs, false, skip, cyclingColor, &g, &b);
+            }
+            str++;
+            if (*(str + 1) == '|') {
+                break;
+            }
+        }
+    } else {
+        showStringColorCycleOnBothPanels(fontChonk, str, delayMs, false, 0, cyclingColor, &g, &b);//1250);
+    }
 }
 
 void showIconInvaders(const Icon* icon, Color iconColor) {
@@ -929,7 +969,7 @@ void loop() {
                 break;
             }
             case MSGTYPE_CHONKY_SLIDE: {
-                showChonkySlideStyleOnBothPanels(str, json["dly"], {json["r"], json["g"], json["b"]});
+                showChonkySlideStyleOnBothPanels(str, json["dly"], {json["r"], json["g"], json["b"]}, json["scroll"]);
                 break;
             }
             case MSGTYPE_CHOOSER: {
@@ -1044,6 +1084,7 @@ void loop() {
     } else {
         showstarfieldcustom(600);
     }
+
 /*
     // Returns true if we should show the new msg alert
     if (readSerialData()) {
