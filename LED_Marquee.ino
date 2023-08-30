@@ -252,7 +252,7 @@ sendPaddedString(const char* padding, const char* str, const Font& font, uint sk
         sendChar(*padding, skip, r, g, b, true, font); // First char is special case because it can be stepped for smooth scrolling
 
         while (*(++padding) && l--) {
-            sendChar(*padding, 0, r, g, b), true, font;
+            sendChar(*padding, 0, r, g, b, true, font);
         }
 
         sendChar(*str, 0, r, g, b, true, font); // First char is special case because it can be stepped for smooth scrolling
@@ -1071,7 +1071,7 @@ void loop() {
                 break;
             }
             case MSGTYPE_CHONKYMARQUEE: {
-                marquee(str, fontChonk, true, MARQUEE_DELAY + 40);
+                marquee(str, fontChonk, true, MARQUEE_DELAY - 5);
                 break;
             }
             case MSGTYPE_DEFAULT:

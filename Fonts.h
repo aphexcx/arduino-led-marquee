@@ -138,7 +138,7 @@ PROGMEM = {
         0b01110000
 };
 
-Font fontStd = {FONTSTD_WIDTH, FontStd5x7};
+const Font fontStd = {FONTSTD_WIDTH, FontStd5x7};
 
 //0b01110000,
 //0b11111100,
@@ -271,6 +271,6 @@ PROGMEM = {
         0x00, 0xfe, 0x02, 0xfe, 0x00, 0x00, 0x00, 0x00,// ~
 };
 
-Font fontChonk = {FONTCHONK_WIDTH, FontChonk};
+const Font fontChonk = {FONTCHONK_WIDTH, FontChonk};
 
 #endif //LED_MARQUEE_FONTS_H
