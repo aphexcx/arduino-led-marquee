@@ -638,14 +638,14 @@ void showStringColorCycleOnBothPanels(const Font& font, const char* str, int del
                                       uint* r, uint* g, uint* b) { //, uint slide) {
     //TODO cycle color without slide
     uint slide = delayMs;
-    clear();
+//    clear();
     uint startPad = 0;
     uint endPad = 0;
     getColumnsToPadForString(str, font.width, &startPad, &endPad);
-
+    cli();
     for (slide; slide; slide -= 10) {
         *cyclingColor = (slide & 0xff);
-        cli();
+
         if (alignMiddle) {
             sendEmptyColumns(startPad);
         }
@@ -662,10 +662,10 @@ void showStringColorCycleOnBothPanels(const Font& font, const char* str, int del
         } else {
             sendEmptyColumns(startPad + endPad + font.width);
         }
-        sei();
         show();
         delay(delayMs / 200);
     }
+    sei();
 
 }
 
@@ -678,7 +678,7 @@ void showChonkySlideStyleOnBothPanels(const char* str, int delayMs = ALLYOURBASE
 //    delayMs = ALLYOURBASE_DELAY + 10; //FIXME rmove
     if (scrollToLastChar) {
         uint charWidth = fontChonk.width;
-        int l = 5; //or infinite loop to end of str
+        int l = 1; //or infinite loop to end of str
         while (l--) {
             for (uint skip = 0; skip <= charWidth; skip++) {
                 showStringColorCycleOnBothPanels(fontChonk, str, delayMs, false, skip, cyclingColor, &g, &b);
@@ -1071,7 +1071,7 @@ void loop() {
                 break;
             }
             case MSGTYPE_CHONKYMARQUEE: {
-                marquee(str, fontChonk, true, MARQUEE_DELAY - 5);
+                marquee(str, fontChonk, true, MARQUEE_DELAY + 40);
                 break;
             }
             case MSGTYPE_DEFAULT:
