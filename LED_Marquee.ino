@@ -642,9 +642,9 @@ void showStringColorCycleOnBothPanels(const Font& font, const char* str, int del
     uint startPad = 0;
     uint endPad = 0;
     getColumnsToPadForString(str, font.width, &startPad, &endPad);
-    cli();
     for (slide; slide; slide -= 10) {
         *cyclingColor = (slide & 0xff);
+        cli();
 
         if (alignMiddle) {
             sendEmptyColumns(startPad);
@@ -662,10 +662,10 @@ void showStringColorCycleOnBothPanels(const Font& font, const char* str, int del
         } else {
             sendEmptyColumns(startPad + endPad + font.width);
         }
+        sei();
         show();
         delay(delayMs / 200);
     }
-    sei();
 
 }
 
@@ -1071,7 +1071,7 @@ void loop() {
                 break;
             }
             case MSGTYPE_CHONKYMARQUEE: {
-                marquee(str, fontChonk, true, MARQUEE_DELAY - 5);
+                marquee(str, fontChonk, true, MARQUEE_DELAY - 10);
                 break;
             }
             case MSGTYPE_DEFAULT:
