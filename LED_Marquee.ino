@@ -85,9 +85,9 @@ PROGMEM = "                    ";
 //How often to advertise "MSG ME!!!", e.g. every 5 marquee scrolls
 #define ADVERTISE_EVERY 5
 //Speed of invader sequence, lower is faster
-#define INVADER_DELAY 55
+#define INVADER_DELAY 50
 //Speed of scrolling text marquee, lower is faster
-#define MARQUEE_DELAY 25
+#define MARQUEE_DELAY 19
 //Affects how long the all your base style text stays on screen. Higher is faster
 #define ALLYOURBASE_DELAY 10
 //Speed of chars spelled out one by one effect, lower is faster
@@ -1071,7 +1071,8 @@ void loop() {
                 break;
             }
             case MSGTYPE_CHONKYMARQUEE: {
-                marquee(str, fontChonk, true, MARQUEE_DELAY - 10);
+                marquee(str, fontChonk, true, MARQUEE_DELAY - 6);
+                showstarfieldcustom(100);
                 break;
             }
             case MSGTYPE_DEFAULT:
