@@ -52,6 +52,7 @@
 #define CHOOSER_POLL_EVERY_MS 200
 #define CHOOSER_POLL_TIMEOUT_MS 60
 #define CHOOSER_MAX_FAILED_POLLS 3
+#define CHOOSER_REFRESH_MS 8000
 
 const char MSGTYPE_CHOOSER = 'H';
 const char HEART = '\x7F';
@@ -216,6 +217,8 @@ struct FakeApp {
     std::string lastWritten;    // V1_APP only: the last full message it wrote to the UART
     uint64_t latencyUs;         // from the request byte to the first byte of the answer
     uint64_t silentFromUs;      // from this time on it does not answer at all
+    long stuckReport;           // V2_APP: answer every '?' with this checksum whatever it holds (-1 = off).
+                                // Stands for anything that makes the fast path lie: a collision, a bug.
     // What happens to the answer to request number n (counting from 1):
     std::map<int, std::string> damaged; // arrives as these bytes instead ("" = cut in half)
     std::map<int, Late> late;           // is held back and arrives during a later request
@@ -233,6 +236,7 @@ struct FakeApp {
         lastWritten.clear();
         latencyUs = 3000;
         silentFromUs = UINT64_MAX;
+        stuckReport = -1;
         damaged.clear();
         late.clear();
         dropped.clear();
@@ -280,7 +284,7 @@ struct FakeApp {
         std::string reply;
         if (nowUs < silentFromUs) {
             if (kind == V2_APP && byte == '?' && chooserMode) {
-                reply = report(appChecksum(message));
+                reply = report(stuckReport >= 0 ? (uint16_t) stuckReport : appChecksum(message));
             } else if (kind == V1_APP && byte == '?' && chooserMode && message == lastWritten) {
                 reply = "{}";
             } else {
@@ -540,16 +544,18 @@ static void previewThatFitsBlinksExactlyAsBefore() {
     if (wantShow) printFrame(frames[0], "a preview that fits: \"HELLO\" beside \"3/9\" (o = dim red, # = white)");
 }
 
-static void previewThatFitsIsPolledWithQuestionMarkBetweenBlinks() {
+static void previewThatFitsIsReadInFullAfterEveryBlink() {
+    // as on master: the message itself after every blink, never the checksum
     freshApp();
     app.at(1000, BYE, false);
     runChooser(FakeApp::V2_APP, "HELLO", "3/9");
     assert(app.requests.size() >= 4);
-    assert(questionMarks() == (int) app.requests.size()); // never '~' while all is well
-    // every answer but the last (which ends chooser mode) is the checksum of the message on the sign
+    assert(questionMarks() == 0);
     for (size_t i = 0; i + 1 < app.replies.size(); i++) {
-        assert(app.replies[i] == report(chooserCrc("HELLO", "3/9")));
+        assert(app.replies[i] == chooserJson("HELLO", "3/9"));
     }
+    // one request per blink
+    assert(app.requests.size() == frames.size() / 58);
     assert(longestSilenceMs() <= 250);
 }
 
@@ -610,8 +616,21 @@ static void longTextIsPolledEverySixColumnsAndDuringTheHold() {
     freshApp();
     app.at(12000, BYE, false);
     runChooser(FakeApp::V2_APP, text, "3/9");
-    assert(questionMarks() == (int) app.requests.size());
     assert(longestSilenceMs() <= 250);
+    // The message itself is asked for ('~') only at the stand-still each time round: the first
+    // request of the hold at 4.7 s and of the one at 9.4 s. Not in the first hold, which began
+    // with the read that brought the text. Everything else is '?'.
+    const int cycle = 95 + CHOOSER_GAP_COLS;
+    int tildes = 0;
+    for (size_t r = 0; r < app.requests.size(); r++) {
+        size_t f = 0;
+        while (f + 1 < frames.size() && frames[f + 1].tUs <= app.requests[r].tUs) f++; // the frame on screen
+        bool inHold = positionOf(frames[f], text, "3/9", cycle) == 0;
+        bool firstOfHold = inHold && r > 0 && app.requests[r - 1].tUs < frames[f].tUs && f > 0;
+        assert((app.requests[r].byte == '~') == firstOfHold);
+        tildes += app.requests[r].byte == '~';
+    }
+    assert(tildes == 2);
     // between two polls there are never more than CHOOSER_POLL_EVERY_COLS frames
     size_t f = 0;
     for (size_t r = 0; r + 1 < app.requests.size(); r++) {
@@ -893,18 +912,28 @@ static void escapedTextHasTheChecksumOfItsDecodedBytes() {
     // The app's Gson is html-safe: ' < > & = go out as \uXXXX, while its checksum is over the text
     // itself. The two agree only if the sign stores the decoded bytes. If they did not, every
     // report would differ and the sign would re-read the whole message at every poll.
-    // (1) the list-empty text, one of the contract's vectors
+    // (1) the list-empty text, one of the contract's vectors. It fits beside its count, so it is
+    // read in full after every blink and the checksum is not asked for; what the sign would
+    // compare a report with is still the vector's value, and so is what the app would report.
     freshApp();
     app.at(1500, BYE, false);
     assert(runChooser(FakeApp::V2_APP, "\\u003cempty\\u003e", "1/0"));
     assert(strcmp(chooser.text, "<empty>") == 0);
     assert(chooser.crc == 7805);
+    assert(appChecksum(chooserJson("\\u003cempty\\u003e", "1/0")) == 7805);
+    assert(panelOneIs(frames[0], expectedPanel("<empty>", "1/0", 0, GAMMA(145), false)));
+    for (size_t i = 1; i < frames.size(); i++) assert(frames[i].afterClear == (i % 58 == 0));
+
+    // the same text made to scroll (a wide count): now it is polled, and every report is accepted
+    freshApp();
+    app.at(1500, BYE, false);
+    assert(runChooser(FakeApp::V2_APP, "\\u003cempty\\u003e", "123/456"));
+    assert(strcmp(chooser.text, "<empty>") == 0 && chooserScrolls(chooser.layout));
     assert(app.requests.size() > 5);
     for (size_t i = 0; i + 1 < app.requests.size(); i++) {
         assert(app.requests[i].byte == '?');          // never a '~': nothing is read again
-        assert(app.replies[i] == "{\"c\":7805}");
+        assert(app.replies[i] == report(chooserCrc("<empty>", "123/456")));
     }
-    assert(panelOneIs(frames[0], expectedPanel("<empty>", "1/0", 0, GAMMA(145), false)));
 
     // (2) a scrolling text with an apostrophe, an ampersand and an equals sign
     freshApp();
@@ -976,10 +1005,10 @@ static void bytesOutsideTheFontAreDrawnAsSpaces() {
 static void failedRequestsOfAnEarlierVisitAreForgotten() {
     freshApp();
     app.silentFromUs = 0;
-    assert(!runChooser(FakeApp::V2_APP, "HELLO", "3/9")); // gave up
+    assert(!runChooser(FakeApp::V2_APP, "PLUR IS NOT DEAD", "3/9")); // gave up
     freshApp();
     app.at(1000, BYE, false);
-    assert(runChooser(FakeApp::V2_APP, "HELLO", "3/9"));
+    assert(runChooser(FakeApp::V2_APP, "PLUR IS NOT DEAD", "3/9"));
     assert(app.requests[0].byte == '?');
     assert(questionMarks() == (int) app.requests.size());
 }
@@ -1182,13 +1211,215 @@ static void versionOneEmptyObjectIsAFailedRead() {
     freshApp();
     app.at(2000, chooserJson("NEXT ONE", "2/9"), true);
     app.at(3000, BYE, false);
-    assert(runChooser(FakeApp::V1_APP, "HELLO", "3/9")); // true: it never gave up
+    assert(runChooser(FakeApp::V1_APP, "PLUR IS NOT DEAD", "3/9")); // true: it never gave up
     for (size_t i = 0; i < 8; i += 2) {
         assert(app.requests[i].byte == '?' && app.replies[i] == "{}");
-        assert(app.requests[i + 1].byte == '~' && app.replies[i + 1] == chooserJson("HELLO", "3/9"));
+        assert(app.requests[i + 1].byte == '~' && app.replies[i + 1] == chooserJson("PLUR IS NOT DEAD", "3/9"));
     }
     assert(strcmp(chooser.text, "NEXT ONE") == 0);
     assert(positionOf(frames.back(), "NEXT ONE", "2/9", 47 + CHOOSER_GAP_COLS) >= 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The full refresh (contract 2.1; what the review gate found in round 2: a checksum is not the
+// content). The invariant: while the chooser is on screen, nothing that goes wrong on the fast
+// path ('?' and the report) can leave the sign on one chooser message while the app holds another
+// for longer than CHOOSER_REFRESH_MS plus one read.
+// ---------------------------------------------------------------------------------------------
+
+// One poll period and one read of a long message: what "plus one read" allows in these tests
+static const double REFRESH_SLACK_MS = 400;
+
+static std::vector<double> tildeTimesMs() {
+    std::vector<double> times;
+    for (size_t i = 0; i < app.requests.size(); i++) {
+        if (app.requests[i].byte == '~') times.push_back(ms(app.requests[i].tUs));
+    }
+    return times;
+}
+
+static bool showsCount(const Frame& f, const std::string& count) {
+    std::vector<Led> expected = expectedPanel("", count, 0, 0, false);
+    for (size_t x = 0; x < 18; x++) {
+        if (!(f.leds[x] == expected[x])) return false;
+    }
+    return true;
+}
+
+static std::string longTextOne() { return repeat("THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG. ", 64); }
+
+static std::string longTextTwo() { return repeat("PACK MY BOX WITH FIVE DOZEN LIQUOR JUGS, ", 64); }
+
+static void collidingPairWhileScrollingIsCorrectedByAFullRead() {
+    // The gate's pair: two different messages, one checksum. Every report matches for ever.
+    std::string first = "FIRST MESSAGE", second = "SECOND MESSAGE 44930";
+    assert(chooserCrc(first.c_str(), "1/2") == 31751 && chooserCrc(second.c_str(), "2/2") == 31751);
+    assert(appChecksum(chooserJson(first, "1/2")) == 31751 && appChecksum(chooserJson(second, "2/2")) == 31751);
+    freshApp();
+    app.at(1000, chooserJson(second, "2/2"), true);
+    app.at(1000 + CHOOSER_REFRESH_MS + 3000, BYE, false);
+    assert(runLoop(FakeApp::V2_APP, first, "1/2") == 'D');
+
+    // every poll after the selection was answered, promptly, with the checksum the sign expects
+    for (size_t i = 0; i < app.requests.size(); i++) {
+        if (app.requests[i].byte == '?' && isReport(app.replies[i])) assert(app.replies[i] == "{\"c\":31751}");
+    }
+    // the sign shows the second message and its count within the bound, from its start
+    std::vector<std::pair<std::string, std::string> > known;
+    known.push_back(std::make_pair(first, "1/2"));
+    known.push_back(std::make_pair(second, "2/2"));
+    std::vector<std::string> seen = restarts(known);
+    assert(seen.size() == 1 && seen[0] == second);
+    size_t change = 1;
+    while (!frames[change].afterClear) change++;
+    assert(ms(frames[change].tUs) > 1000);
+    assert(ms(frames[change].tUs) < 1000 + CHOOSER_REFRESH_MS + REFRESH_SLACK_MS);
+    assert(showsCount(frames[change], "2/2"));
+    assert(strcmp(chooser.text, "SECOND MESSAGE 44930") == 0 && strcmp(chooser.count, "2/2") == 0);
+}
+
+static void collidingPairWhileBlinkingIsCorrectedAfterOneBlink() {
+    // A colliding pair that fits beside its count. The blink path does not use the checksum at all.
+    assert(chooserCrc("MSG 309", "1/2") == chooserCrc("MSG 6", "2/2"));
+    assert(appChecksum(chooserJson("MSG 309", "1/2")) == appChecksum(chooserJson("MSG 6", "2/2")));
+    freshApp();
+    app.at(1000, chooserJson("MSG 6", "2/2"), true);
+    app.at(3000, BYE, false);
+    assert(runChooser(FakeApp::V2_APP, "MSG 309", "1/2"));
+    assert(!chooserScrolls(chooser.layout));
+    assert(questionMarks() == 0);
+
+    size_t selected = 0; // the first frame latched after the selection changed
+    while (ms(frames[selected].tUs) < 1000) selected++;
+    size_t shown = selected;
+    while (shown < frames.size() && !showsCount(frames[shown], "2/2")) shown++;
+    assert(shown < frames.size());
+    assert(shown - selected <= 58); // the blink that was running, then the new message
+    assert(panelOneIs(frames[shown], expectedPanel("MSG 6", "2/2", 0, GAMMA(145), false)));
+    assert(strcmp(chooser.text, "MSG 6") == 0);
+}
+
+static void matchingReportsForEverStillGetAFullReadInTime() {
+    // An app whose reports always match and whose message never changes: the message itself is
+    // still read at least every CHOOSER_REFRESH_MS, and since it is the same the scroll never
+    // restarts or loses its place.
+    std::string text = longTextOne();
+    const int cycle = 64 * 6 - 1 + CHOOSER_GAP_COLS;
+    freshApp();
+    app.stuckReport = chooserCrc(text.c_str(), "12/34");
+    app.at(40000, BYE, false);
+    assert(runLoop(FakeApp::V2_APP, text, "12/34") == 'D');
+
+    std::vector<double> tildes = tildeTimesMs();
+    assert(tildes.size() >= 4);
+    double last = 0; // the read that brought the text
+    for (size_t i = 0; i < tildes.size(); i++) {
+        assert(tildes[i] - last <= CHOOSER_REFRESH_MS + REFRESH_SLACK_MS);
+        last = tildes[i];
+    }
+    assert(40000 - last <= CHOOSER_REFRESH_MS + REFRESH_SLACK_MS);
+    // where they fall: 8 s after the first read (mid-scroll), at the stand-still when the text has
+    // come round (14.7 s), 8 s after that, ...
+    assert(tildes[0] >= CHOOSER_REFRESH_MS && tildes[0] < CHOOSER_REFRESH_MS + REFRESH_SLACK_MS);
+    assert(tildes[1] > 14000 && tildes[1] < 15500);
+    assert(tildes[2] >= tildes[1] + CHOOSER_REFRESH_MS && tildes[2] < tildes[1] + CHOOSER_REFRESH_MS + REFRESH_SLACK_MS);
+    for (size_t i = 0; i < app.requests.size(); i++) {
+        if (app.requests[i].byte == '~' && i + 1 < app.requests.size()) assert(app.replies[i] == chooserJson(text, "12/34"));
+    }
+
+    // same content: the scroll goes on, one column after the other, no clear
+    int expectPos = 0;
+    double longestStep = 0;
+    for (size_t i = 0; i < frames.size(); i++) {
+        assert(i == 0 || !frames[i].afterClear);
+        assert(panelOneIs(frames[i], expectedPanel(text, "12/34", expectPos, GAMMA(CHOOSER_TEXT_BRIGHTNESS), true)));
+        if (expectPos != 0 && i + 1 < frames.size()) {
+            double step = ms(frames[i + 1].tUs - frames[i].tUs);
+            if (step > longestStep) longestStep = step;
+        }
+        expectPos = (expectPos + 1) % cycle;
+    }
+    // the read in the middle of the scroll costs one hitch of about the message's time on the wire
+    // (104 bytes here: 72 ms, plus the app's 3 ms), not more
+    assert(longestStep > CHOOSER_SCROLL_DELAY_MS + 20 && longestStep < 100);
+    if (wantShow) {
+        printf("  full reads of an unchanged 64-character message (ms):");
+        for (size_t i = 0; i < tildes.size(); i++) printf(" %.0f", tildes[i]);
+        printf("   longest scroll step %.0f ms\n", longestStep);
+    }
+}
+
+// The time of the first '~' after `afterMs`, and a check that it comes one CHOOSER_REFRESH_MS
+// after the full read at `fullReadMs`, with none in between.
+static void assertNextFullReadIsOneRefreshAfter(double fullReadMs) {
+    std::vector<double> tildes = tildeTimesMs();
+    size_t i = 0;
+    while (i < tildes.size() && tildes[i] <= fullReadMs + 1) i++;
+    assert(i < tildes.size());
+    assert(tildes[i] >= fullReadMs + CHOOSER_REFRESH_MS);
+    assert(tildes[i] < fullReadMs + CHOOSER_REFRESH_MS + REFRESH_SLACK_MS);
+}
+
+static void refreshTimerIsResetByEveryKindOfFullRead() {
+    std::string one = longTextOne(), two = longTextTwo();
+    // (the first read and the two kinds of refresh are in matchingReportsForEverStillGetAFullReadInTime:
+    // 8 s after the first read; nothing between the refresh at 8 s and the stand-still at 14.7 s;
+    // 8 s after the read at the stand-still)
+
+    // a fetch after a report that did not match, at 3 s
+    freshApp();
+    app.at(3000, chooserJson(two, "12/34"), true);
+    app.at(13000, BYE, false);
+    assert(runLoop(FakeApp::V2_APP, one, "12/34") == 'D');
+    std::vector<double> tildes = tildeTimesMs();
+    assert(tildes[0] > 3000 && tildes[0] < 3000 + 250);
+    assertNextFullReadIsOneRefreshAfter(tildes[0]);
+
+    // a recovery '~' after one failed poll, at 5 s. First find out which request that poll is.
+    freshApp();
+    app.at(15000, BYE, false);
+    assert(runLoop(FakeApp::V2_APP, one, "12/34") == 'D');
+    int atFive = 0;
+    while (ms(app.requests[atFive].tUs) < 5000) atFive++;
+    freshApp();
+    app.dropped.insert(atFive + 1);
+    app.at(15000, BYE, false);
+    assert(runLoop(FakeApp::V2_APP, one, "12/34") == 'D');
+    assert(app.requests[atFive].byte == '?' && app.requests[atFive + 1].byte == '~');
+    assertNextFullReadIsOneRefreshAfter(ms(app.requests[atFive + 1].tUs));
+
+    // loop()'s normal read after three failed reads, at 5 s: the same message, so the scroll resumes
+    freshApp();
+    app.dropped.insert(atFive + 1);
+    app.dropped.insert(atFive + 2);
+    app.dropped.insert(atFive + 3);
+    app.at(15000, BYE, false);
+    assert(runLoop(FakeApp::V2_APP, one, "12/34") == 'D');
+    assert(app.requests[atFive + 3].byte == '~'); // loop()'s own request
+    for (size_t i = 1; i < frames.size(); i++) assert(!frames[i].afterClear);
+    assertNextFullReadIsOneRefreshAfter(ms(app.requests[atFive + 3].tUs));
+}
+
+static void nothingOnTheFastPathKeepsTheSignStaleBeyondTheBound() {
+    // The app's reports say "the first message" whatever it holds (a collision, a bug: it does not
+    // matter which). Whenever the selection changes, the sign is on the new message within
+    // CHOOSER_REFRESH_MS plus one read.
+    std::string one = longTextOne(), two = longTextTwo();
+    const double changes[] = {500, 4000, 7950, 8300, 12000, 14600};
+    for (size_t c = 0; c < sizeof(changes) / sizeof(changes[0]); c++) {
+        freshApp();
+        app.stuckReport = chooserCrc(one.c_str(), "12/34");
+        app.at(changes[c], chooserJson(two, "12/34"), true);
+        app.at(changes[c] + CHOOSER_REFRESH_MS + 2000, BYE, false);
+        assert(runLoop(FakeApp::V2_APP, one, "12/34") == 'D');
+        size_t change = 1;
+        while (change < frames.size() && !frames[change].afterClear) change++;
+        assert(change < frames.size());
+        assert(ms(frames[change].tUs) > changes[c]);
+        assert(ms(frames[change].tUs) <= changes[c] + CHOOSER_REFRESH_MS + REFRESH_SLACK_MS);
+        assert(panelOneIs(frames[change], expectedPanel(two, "12/34", 0, GAMMA(CHOOSER_TEXT_BRIGHTNESS), true)));
+        assert(two == chooser.text);
+    }
 }
 
 int main(int argc, char** argv) {
@@ -1196,7 +1427,7 @@ int main(int argc, char** argv) {
     int tests = 0;
 #define RUN(test) do { test(); tests++; } while (0)
     RUN(previewThatFitsBlinksExactlyAsBefore);
-    RUN(previewThatFitsIsPolledWithQuestionMarkBetweenBlinks);
+    RUN(previewThatFitsIsReadInFullAfterEveryBlink);
     RUN(leavingChooserHandsTheOtherMessageToLoop);
     RUN(longTextHoldsThenScrollsOneColumnPerDelay);
     RUN(longTextIsPolledEverySixColumnsAndDuringTheHold);
@@ -1225,6 +1456,11 @@ int main(int argc, char** argv) {
     RUN(untypedObjectIsNeverAMessageForLoop);
     RUN(normalReadSkipsUntypedObjectsOnlySoFar);
     RUN(versionOneEmptyObjectIsAFailedRead);
+    RUN(collidingPairWhileScrollingIsCorrectedByAFullRead);
+    RUN(collidingPairWhileBlinkingIsCorrectedAfterOneBlink);
+    RUN(matchingReportsForEverStillGetAFullReadInTime);
+    RUN(refreshTimerIsResetByEveryKindOfFullRead);
+    RUN(nothingOnTheFastPathKeepsTheSignStaleBeyondTheBound);
     printf("chooser_display_test: all %d tests passed\n", tests);
     return 0;
 }

@@ -99,7 +99,7 @@ PROGMEM = "                    ";
 #define COUNTDOWN_DELAY 500
 
 // ---- Chooser preview (MSGTYPE_CHOOSER): a message too wide for the space beside the count scrolls.
-// ---- These five values are the ones to tune:
+// ---- These six values are the ones to tune:
 //How long the start of a scrolling message stands still before it moves (and again every time round), in ms
 #define CHOOSER_HOLD_MS 600
 //Time per scrolled LED column in ms, lower is faster. 35 is about 4.8 characters a second
@@ -111,6 +111,10 @@ PROGMEM = "                    ";
 #define CHOOSER_TEXT_BRIGHTNESS 145
 //While scrolling, ask the app "anything changed?" ('?') every this many columns. Lower reacts faster to !next
 #define CHOOSER_POLL_EVERY_COLS 6
+//While a text scrolls the app is only asked for a checksum of its message. The message itself is read again
+//every time the text has come round, and at the latest after this many ms (one short hitch if the text is moving).
+//Lower is safer against a wrong preview staying up, higher hitches long texts less often. 1000 to 30000
+#define CHOOSER_REFRESH_MS 8000
 // ---- The rest rarely needs touching:
 //Ask the app at least every this many ms, whatever the scroll is doing (the app lane counts on 250 at most)
 #define CHOOSER_POLL_EVERY_MS 200
@@ -165,6 +169,7 @@ static_assert(CHOOSER_GLYPH_COLS == FONTSTD_WIDTH && CHOOSER_HEART_COLS == HEART
               "ChooserScroll.h: font widths");
 static_assert(CHOOSER_CHAR_VT == VT && CHOOSER_CHAR_HEART == HEART, "ChooserScroll.h: special characters");
 static_assert(CHOOSER_GAP_COLS >= 1 && CHOOSER_GAP_COLS <= 240, "CHOOSER_GAP_COLS must be 1 to 240");
+static_assert(CHOOSER_REFRESH_MS >= 1000 && CHOOSER_REFRESH_MS <= 30000, "CHOOSER_REFRESH_MS must be 1000 to 30000");
 static_assert(CHOOSER_POLL_EVERY_MS <= 250, "the app expects a chooser poll at least every 250 ms");
 
 /* Calculates how many empty columns to pad this string on its start and on its end,

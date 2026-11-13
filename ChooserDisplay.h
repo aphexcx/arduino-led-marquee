@@ -34,6 +34,8 @@ struct ChooserState {
     uint16_t holdLeftMs;      // how much longer the text stands still before it scrolls
     uint failedPolls;         // failed reads in a row
     bool onScreen;            // the picture on the LEDs is still ours (nothing else was drawn since)
+    unsigned long fullReadMs; // when the whole message was last read and compared (see chooserPoll)
+    bool fullReadAtHold;      // the text has come round: the first request of this hold reads it whole
 };
 
 static ChooserState chooser;
@@ -131,10 +133,30 @@ static bool chooserRequest(char request) {
     return err == DeserializationError::Ok;
 }
 
+// The whole message has just been read and compared with what is shown.
+static void chooserFullReadDone() {
+    chooser.fullReadMs = millis();
+    chooser.fullReadAtHold = false;
+}
+
 // Asks the app what it holds now and takes in its answer.
+//
+// '?' and the checksum report are only the fast path: they keep a moving text from stalling on a
+// whole message at every poll. A checksum is not the content (two messages can share one), so
+// what the picture rests on is reading the message itself ('~') and comparing its text and count:
+//  - always, when the preview fits: after every blink, as the sign did before it could scroll
+//  - at the first request of the stand-still each time a scrolling text has come round
+//  - whenever CHOOSER_REFRESH_MS has passed since the last such read
+//  - after a failed read
+// So, as long as the link works at all, nothing that goes wrong with the reports (a collision, a
+// late or reordered report, a bug on either side) can leave the sign on one chooser message while
+// the app holds another for longer than CHOOSER_REFRESH_MS plus one read.
 static uint chooserPoll() {
-    // After a failed read ask for the whole message ('~') until one read works again.
-    char request = chooser.failedPolls ? '~' : '?';
+    char request = '?';
+    if (chooser.failedPolls || !chooserScrolls(chooser.layout) || chooser.fullReadAtHold ||
+        millis() - chooser.fullReadMs >= CHOOSER_REFRESH_MS) {
+        request = '~';
+    }
     bool ok = chooserRequest(request);
     const char* type = json["type"];
 
@@ -159,6 +181,7 @@ static uint chooserPoll() {
     if (type[0] != MSGTYPE_CHOOSER) {
         return CHOOSER_REPLY_OTHER;
     }
+    chooserFullReadDone();
     const char* text = json["str"];
     const char* count = json["flashy"];
     if (chooserSame(chooser.text, text, CHOOSER_MAX_CHARS) &&
@@ -185,6 +208,7 @@ bool showAsChooser(const char* blinkyStr, const char* countyStr) {
         chooserStore(blinkyStr, countyStr);
     }
     chooser.onScreen = true;
+    chooserFullReadDone(); // loop()'s read has just brought this message, new or the same
 
     for (;;) {
         unsigned long sliceStart = millis();
@@ -214,8 +238,10 @@ bool showAsChooser(const char* blinkyStr, const char* countyStr) {
             chooser.pos = chooserNextPos(chooser.layout, chooser.pos);
             chooserDrawFrame(GAMMA(CHOOSER_TEXT_BRIGHTNESS));
             if (chooser.pos == 0) {
-                // The second copy has reached the left edge: same picture as the start, hold again
+                // The second copy has reached the left edge: same picture as the start, hold again.
+                // The stand-still is where reading the whole message costs nothing visible.
                 chooser.holdLeftMs = CHOOSER_HOLD_MS;
+                chooser.fullReadAtHold = true;
                 continue;
             }
             sliceMs = CHOOSER_SCROLL_DELAY_MS;
