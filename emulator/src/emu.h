@@ -41,6 +41,7 @@ typedef void (*ws_frame_cb_t)(const image_t *img, uint64_t latch_cycle,
 void ws_init(avr_t *avr, uint32_t reset_cycles, ws_frame_cb_t cb);
 void ws_poll(uint64_t now);          // latch on a quiet line; call regularly
 const image_t *ws_image(void);       // what the LEDs show right now
+uint32_t ws_shortest_latch_gap(void); // shortest low gap that latched, in cycles (0 = none)
 
 // ---- softuart.c -----------------------------------------------------------
 // The firmware's SoftwareSerial: TX on Arduino pin 11 (PB3), RX on pin 10 (PB2).

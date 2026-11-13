@@ -496,10 +496,12 @@ int main(int argc, char **argv)
             wall > 0 ? sim / wall : 0, opt.speed > 0 ? " (paced)" : " (unpaced)");
     fprintf(out, "sign-emu: frames latched %llu, bits per strip per frame %u..%u\n",
             (unsigned long long) g_frames, g_frames ? g_bits_min : 0, g_bits_max);
-    fprintf(out, "sign-emu: WS2812 high times: 0-bit %u..%u cycles, 1-bit %u..%u cycles; "
-                 "longest low gap inside a frame %.1f us (latch at %.0f us)\n",
-            g_t0h_max ? g_t0h_min : 0, g_t0h_max, g_t1h_max ? g_t1h_min : 0, g_t1h_max,
-            g_gap_max / 16.0, opt.reset_us);
+    fprintf(out, "sign-emu: WS2812 high times: 0-bit %u..%u cycles, 1-bit %u..%u cycles\n",
+            g_t0h_max ? g_t0h_min : 0, g_t0h_max, g_t1h_max ? g_t1h_min : 0, g_t1h_max);
+    fprintf(out, "sign-emu: WS2812 low gaps: longest inside a frame %.1f us, shortest between "
+                 "frames %.1f us: these pictures hold for any latch time between the two "
+                 "(used %.0f us)\n",
+            g_gap_max / 16.0, ws_shortest_latch_gap() / 16.0, opt.reset_us);
     fprintf(out, "sign-emu: serial: sign sent %llu bytes (%llu requests), app sent %llu bytes\n",
             (unsigned long long) g_tx_bytes, (unsigned long long) g_requests,
             (unsigned long long) g_rx_bytes);

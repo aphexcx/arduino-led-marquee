@@ -36,6 +36,8 @@ static strip_t g_strip[8];          // indexed by port bit
 static uint8_t g_last;              // last pin levels (masked)
 static image_t g_image;
 static ws_frame_info_t g_info;
+static uint64_t g_any_fall;         // last falling edge on any strip
+static uint32_t g_latch_gap_min = UINT32_MAX;
 
 static void info_reset(void)
 {
@@ -88,6 +90,11 @@ static void port_notify(struct avr_irq_t *irq, uint32_t value, void *param)
 
     if (rising) {
         uint64_t latched_at = 0;
+        // Shortest low gap that counted as a latch. If this is far above the
+        // latch time, the pictures do not depend on which WS2812 generation
+        // (50 us or 280 us reset) the strips are.
+        if (g_any_fall && now - g_any_fall > g_reset_cycles && now - g_any_fall < g_latch_gap_min)
+            g_latch_gap_min = (uint32_t) (now - g_any_fall);
         for (int bit = 1; bit < 8; bit++) {
             if (!(rising & (1 << bit)))
                 continue;
@@ -107,6 +114,7 @@ static void port_notify(struct avr_irq_t *irq, uint32_t value, void *param)
             emit(latched_at);
     }
     if (falling) {
+        g_any_fall = now;
         for (int bit = 1; bit < 8; bit++) {
             if (!(falling & (1 << bit)))
                 continue;
@@ -158,6 +166,11 @@ void ws_poll(uint64_t now)
             latched_at = at;
     }
     emit(latched_at);
+}
+
+uint32_t ws_shortest_latch_gap(void)
+{
+    return g_latch_gap_min == UINT32_MAX ? 0 : g_latch_gap_min;
 }
 
 const image_t *ws_image(void)
