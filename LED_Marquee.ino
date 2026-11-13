@@ -861,6 +861,11 @@ void marquee(const char* marqueePtr, const Font& font = fontStd, bool pad = true
     free(paddingString);
 }
 
+// The chooser display (MSGTYPE_CHOOSER): showAsChooser() with its scrolling and polling, and the two
+// decisions readSerialData() and loop() make about a reply (chooserReadMessage, chooserDispatch).
+// It is in its own file so that the host test can run it against a fake sign and a fake app.
+#include "ChooserDisplay.h"
+
 // Notifies the IMX that we're ready to retrieve custom message data
 bool readSerialData() {
     startSerial();
@@ -880,8 +885,9 @@ bool readSerialData() {
 //
 //    }
 
-    // Read the JSON document from the serial port
-    DeserializationError err = deserializeJson(json, softSerial);
+    // Read the JSON document from the serial port (stepping over a late answer to a chooser poll,
+    // which is an object without a "type" and not a message)
+    DeserializationError err = chooserReadMessage();
 
     if (err == DeserializationError::Ok) {
         stopSerial();
@@ -910,10 +916,6 @@ bool readSerialData() {
         return false;
     }
 }
-
-// The chooser display (MSGTYPE_CHOOSER): showAsChooser() and its scrolling and polling.
-// It is in its own file so that the host test can run it against a fake sign and a fake app.
-#include "ChooserDisplay.h"
 
 int loopcount = 0;
 
@@ -952,20 +954,20 @@ void loop() {
     bool readSuccessful = readSerialData();
     diagnosticLedOff();
 
-    if (readSuccessful && json["type"].as<const char*>()[0] == MSGTYPE_CHOOSER) {
-        // Stays in the chooser display (asking '?' between frames) until a message of another type
-        // arrives, which is then in `json` and shown below, or until the app stops answering.
-        readSuccessful = showAsChooser(json["str"], json["flashy"]);
-        if (!readSuccessful) {
-            loopcount++;
-            return; // ask again with a normal '~'
-        }
-    }
-    chooserLeft(); // whatever is drawn below replaces the chooser picture
-
     if (readSuccessful) {
+        // A chooser message is shown in there, for as long as the chooser is on screen (the app is
+        // asked '?' between frames); what comes back is the type of the message that ended it.
+        // 0 means there is nothing to show: what was read is not a message (it has no "type"), or
+        // the chooser's reads kept failing. Draw nothing and ask again with a normal '~'.
+        const char msgType = chooserDispatch();
+        if (!msgType) {
+            loopcount++;
+            return;
+        }
         const char* str = json["str"];
-        const char msgType = json["type"].as<const char*>()[0];
+        if (!str) {
+            str = ""; // a message without a text is shown as an empty one
+        }
         switch (msgType) {
             case MSGTYPE_ONE_BY_ONE: {
                 showCharsOneByOneOnBothPanels(str, {json["r"], json["g"], json["b"]}, json["dly"]);
@@ -1082,6 +1084,7 @@ void loop() {
             }
         }
     } else {
+        chooserLeft(); // the starfield (or the error flash before it) replaces the chooser picture
         showstarfieldcustom(600);
     }
 
