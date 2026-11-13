@@ -173,4 +173,32 @@ static inline bool chooserSame(const char* stored, const char* incoming, uint8_t
     return *stored == '\0';
 }
 
+// One step of CRC-16/CCITT-FALSE (polynomial 0x1021, start value 0xFFFF, no reflection, no final xor).
+static inline uint16_t chooserCrcByte(uint16_t crc, uint8_t byte) {
+    crc ^= (uint16_t) ((uint16_t) byte << 8);
+    for (uint8_t bit = 0; bit < 8; bit++) {
+        if (crc & 0x8000) {
+            crc = (uint16_t) ((uint16_t) (crc << 1) ^ 0x1021);
+        } else {
+            crc = (uint16_t) (crc << 1);
+        }
+    }
+    return crc;
+}
+
+// The checksum of a chooser message: over the bytes of the text, one zero byte, the bytes of the
+// count. The app answers a poll with the checksum of the message it holds now; the sign compares
+// it with the checksum of what it shows.
+static inline uint16_t chooserCrc(const char* text, const char* count) {
+    uint16_t crc = 0xFFFF;
+    while (*text) {
+        crc = chooserCrcByte(crc, (uint8_t) *text++);
+    }
+    crc = chooserCrcByte(crc, 0);
+    while (*count) {
+        crc = chooserCrcByte(crc, (uint8_t) *count++);
+    }
+    return crc;
+}
+
 #endif //LED_MARQUEE_CHOOSERSCROLL_H

@@ -317,6 +317,37 @@ static void sameComparesWhatWouldBeStored() {
     assert(chooserSame(buf, NULL, CHOOSER_MAX_CHARS));
 }
 
+static void checksumIsCrc16CcittFalse() {
+    // the standard check value: "123456789" -> 0x29B1. Here the text, one zero byte and the count
+    // go in, so feed the check string as the text of a plain CRC step by step.
+    uint16_t crc = 0xFFFF;
+    for (const char* p = "123456789"; *p; p++) crc = chooserCrcByte(crc, (uint8_t) *p);
+    assert(crc == 0x29B1);
+}
+
+static void checksumMatchesTheContractVectors() {
+    // the app lane has the same seven vectors in its unit test: this is how the two halves agree
+    assert(chooserCrc("HELLO W", "3/12") == 13345);
+    const char* longest = "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG AND KEEPS ON RUNNING";
+    assert(strlen(longest) == 64);
+    assert(chooserCrc(longest, "7/12") == 36894);
+    assert(chooserCrc("<empty>", "1/0") == 7805);
+    assert(chooserCrc("", "1/1") == 18175);
+    assert(chooserCrc("A", "1/1") == 26634);
+    assert(chooserCrc("A", "11/1") == 47554); // the zero byte keeps "A1" + "1/1" apart from "A" + "11/1"
+    assert(chooserCrc("I \x7F U", "12/345") == 46267);
+}
+
+static void checksumTakesBytesAboveAsciiAsUnsigned() {
+    // char is signed on the AVR and on the Mac: 0xC3 must go in as 195, not as -61
+    uint16_t expect = 0xFFFF;
+    expect = chooserCrcByte(expect, 0xC3);
+    expect = chooserCrcByte(expect, 0xA9);
+    expect = chooserCrcByte(expect, 0);
+    expect = chooserCrcByte(expect, '1');
+    assert(chooserCrc("\xC3\xA9", "1") == expect);
+}
+
 int main() {
     int tests = 0;
 #define RUN(test) do { test(); tests++; } while (0)
@@ -339,6 +370,9 @@ int main() {
     RUN(gapOfZeroIsTreatedAsOneSoTheLoopAlwaysAdvances);
     RUN(copyCutsAtTheLimitAndAlwaysTerminates);
     RUN(sameComparesWhatWouldBeStored);
+    RUN(checksumIsCrc16CcittFalse);
+    RUN(checksumMatchesTheContractVectors);
+    RUN(checksumTakesBytesAboveAsciiAsUnsigned);
     printf("chooser_scroll_test: all %d tests passed\n", tests);
     return 0;
 }
