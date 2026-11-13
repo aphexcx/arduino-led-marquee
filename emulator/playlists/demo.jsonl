@@ -1,0 +1,4 @@
+# A short run for a recording: the chooser, a chonky message, a marquee.
+{"type":"H","str":"HELLO W","flashy":"3/12","_polls":0}
+{"type":"C","str":"ENERGY","dly":300,"r":0,"g":0,"b":128,"scroll":false}
+{"type":"D","str":"HELLO WORLD"}
