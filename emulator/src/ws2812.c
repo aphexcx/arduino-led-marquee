@@ -25,7 +25,7 @@
 
 typedef struct {
     uint64_t rise, fall;
-    uint32_t nbits;
+    uint64_t nbits;
     uint8_t shadow[COLS * 3];       // bytes as received: G, R, B per pixel
 } strip_t;
 
@@ -51,7 +51,7 @@ static int latch_strip(int bit)
     strip_t *s = &g_strip[bit];
     if (!s->nbits)
         return 0;
-    uint32_t bits = s->nbits > COLS * 24 ? COLS * 24 : s->nbits;
+    uint32_t bits = s->nbits > COLS * 24 ? COLS * 24 : (uint32_t) s->nbits;   // at most 2880
     uint32_t pixels = bits / 24;
     int row = 7 - bit;
     for (uint32_t i = 0; i < pixels; i++) {
@@ -67,8 +67,15 @@ static int latch_strip(int bit)
     return 1;
 }
 
+// A frame is the whole picture at one moment: every strip that has gone quiet
+// for the latch time is taken into it together, and its stamp is the moment
+// the last of them latched. Stamps never go backwards.
 static void emit(uint64_t latch_cycle)
 {
+    static uint64_t newest;
+    if (latch_cycle < newest)
+        latch_cycle = newest;
+    newest = latch_cycle;
     if (g_info.t0h_min == UINT32_MAX)
         g_info.t0h_min = 0;
     if (g_info.t1h_min == UINT32_MAX)
@@ -76,6 +83,24 @@ static void emit(uint64_t latch_cycle)
     if (g_cb)
         g_cb(&g_image, latch_cycle, &g_info);
     info_reset();
+}
+
+// Latches every strip that holds data and has been low for longer than the
+// latch time. Returns the latest of their latch moments, 0 if there was none.
+static uint64_t latch_quiet_strips(uint64_t now)
+{
+    uint64_t latched_at = 0;
+    for (int bit = 1; bit < 8; bit++) {
+        strip_t *s = &g_strip[bit];
+        // A strip that rose at this very cycle still counts as low until now.
+        int high = (g_last & (1 << bit)) && s->rise != now;
+        if (!s->nbits || high || now - s->fall <= g_reset_cycles)
+            continue;
+        uint64_t at = s->fall + g_reset_cycles;
+        if (latch_strip(bit) && at > latched_at)
+            latched_at = at;
+    }
+    return latched_at;
 }
 
 static void port_notify(struct avr_irq_t *irq, uint32_t value, void *param)
@@ -89,29 +114,32 @@ static void port_notify(struct avr_irq_t *irq, uint32_t value, void *param)
     uint8_t rising = changed & v, falling = changed & ~v;
 
     if (rising) {
-        uint64_t latched_at = 0;
         // Shortest low gap that counted as a latch. If this is far above the
         // latch time, the pictures do not depend on which WS2812 generation
         // (50 us or 280 us reset) the strips are.
         if (g_any_fall && now - g_any_fall > g_reset_cycles && now - g_any_fall < g_latch_gap_min)
             g_latch_gap_min = (uint32_t) (now - g_any_fall);
+        int latch = 0;
         for (int bit = 1; bit < 8; bit++) {
             if (!(rising & (1 << bit)))
                 continue;
             strip_t *s = &g_strip[bit];
             if (s->nbits) {
                 uint64_t gap = now - s->fall;
-                if (gap > g_reset_cycles) {
-                    if (latch_strip(bit) && s->fall + g_reset_cycles > latched_at)
-                        latched_at = s->fall + g_reset_cycles;
-                } else if (gap > g_info.gap_max) {
-                    g_info.gap_max = (uint32_t) gap;
-                }
+                if (gap > g_reset_cycles)
+                    latch = 1;                       // new data for a strip that had latched
+                else if (gap > g_info.gap_max)
+                    g_info.gap_max = (uint32_t) gap; // at most g_reset_cycles, which is 32 bits
             }
             s->rise = now;
         }
-        if (latched_at)
-            emit(latched_at);
+        if (latch) {
+            // The picture that was complete before this new data began: all
+            // quiet strips, not only the ones that happen to rise now.
+            uint64_t latched_at = latch_quiet_strips(now);
+            if (latched_at)
+                emit(latched_at);
+        }
     }
     if (falling) {
         g_any_fall = now;
@@ -119,7 +147,9 @@ static void port_notify(struct avr_irq_t *irq, uint32_t value, void *param)
             if (!(falling & (1 << bit)))
                 continue;
             strip_t *s = &g_strip[bit];
-            uint32_t width = (uint32_t) (now - s->rise);
+            // A pin can stay high for longer than 32 bits of cycles (4.5 minutes).
+            uint64_t high = now - s->rise;
+            uint32_t width = high > UINT32_MAX ? UINT32_MAX : (uint32_t) high;
             int one = width >= ONE_MIN_CYCLES;
             if (s->nbits < COLS * 24) {
                 uint8_t m = 0x80 >> (s->nbits & 7);
@@ -178,15 +208,18 @@ const image_t *ws_image(void)
     return &g_image;
 }
 
-void ws_init(avr_t *avr, uint32_t reset_cycles, ws_frame_cb_t cb)
+int ws_init(avr_t *avr, uint32_t reset_cycles, ws_frame_cb_t cb)
 {
+    // Without this the emulator would run and never see a frame.
+    avr_irq_t *port = avr_io_getirq(avr, AVR_IOCTL_IOPORT_GETIRQ('D'), IOPORT_IRQ_PIN_ALL);
+    if (!port)
+        return -1;
     g_avr = avr;
     g_reset_cycles = reset_cycles;
     g_cb = cb;
     memset(g_strip, 0, sizeof(g_strip));
     memset(&g_image, 0, sizeof(g_image));
     info_reset();
-    avr_irq_register_notify(
-        avr_io_getirq(avr, AVR_IOCTL_IOPORT_GETIRQ('D'), IOPORT_IRQ_PIN_ALL),
-        port_notify, NULL);
+    avr_irq_register_notify(port, port_notify, NULL);
+    return 0;
 }

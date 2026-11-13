@@ -1,6 +1,7 @@
 // sign-emu: runs the sign's real firmware image on a simulated ATmega328P
 // (simavr) and shows what the LEDs would show. See ../README.md.
 #include <errno.h>
+#include <math.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,13 +79,19 @@ static void usage(FILE *f)
         f);
 }
 
+// Exit status: 0 the run ended as asked; 1 it could not start; 2 bad command
+// line; 3 the firmware crashed or stopped; 4 a recording could not be written.
+#define EXIT_FIRMWARE 3
+#define EXIT_RECORDING 4
+
 // ---- state -----------------------------------------------------------------
 static avr_t *avr;
 static volatile sig_atomic_t g_stop;
 static uint64_t g_frames, g_requests, g_rx_bytes, g_tx_bytes, g_marginal, g_partial, g_framing_errors;
+static uint64_t g_rx_wire_errors;   // bytes to the sign that the wire did not carry as asked
 static uint32_t g_gap_max, g_t0h_min = UINT32_MAX, g_t0h_max, g_t1h_min = UINT32_MAX, g_t1h_max;
-static uint32_t g_bits_min = UINT32_MAX, g_bits_max;
-static char g_last_tx[80] = "(nothing yet)", g_last_rx[80] = "(nothing yet)";
+static uint64_t g_bits_min = UINT64_MAX, g_bits_max;
+static char g_last_tx[80], g_last_rx[80];   // the latest bytes each way, for the view
 static int g_beat_on;
 static double g_wall_blocked;     // real seconds spent holding for the app
 
@@ -107,8 +114,6 @@ static void tail_append(char *tail, size_t cap, uint8_t byte)
         snprintf(piece, sizeof(piece), "%c", byte);
     else
         snprintf(piece, sizeof(piece), "\\x%02x", byte);
-    if (tail[0] == '(')
-        tail[0] = 0;
     size_t len = strlen(tail), add = strlen(piece);
     if (len + add >= cap - 1) {
         size_t drop = len + add - (cap - 2);
@@ -137,9 +142,9 @@ static void on_frame(const image_t *img, uint64_t latch_cycle, const ws_frame_in
     if (info->bits > g_bits_max) g_bits_max = info->bits;
     rec_frame(img, latch_cycle, info);
     if (opt.verbose > 1)
-        fprintf(stderr, "[%10.6f] frame %llu: %u bits/strip, longest gap %.1f us\n",
-                cycles_to_s(latch_cycle), (unsigned long long) g_frames, info->bits,
-                info->gap_max / 16.0);
+        fprintf(stderr, "[%10.6f] frame %llu: %llu bits/strip, longest gap %.1f us\n",
+                cycles_to_s(latch_cycle), (unsigned long long) g_frames,
+                (unsigned long long) info->bits, info->gap_max / 16.0);
 }
 
 // ---- replies from the app ----------------------------------------------------
@@ -150,7 +155,14 @@ static struct {
     int active, done;
     uint64_t base;
 } g_hold;
-static uint64_t g_unfinished_replies;
+
+// Milliseconds as CPU cycles, to the nearest cycle (16000 cycles in a
+// millisecond). Every caller's value is at most 1e9 ms, 1.6e13 cycles.
+static uint64_t ms_to_cycles(double ms)
+{
+    return (uint64_t) llround(ms * (F_CPU_HZ / 1000.0));
+}
+static uint64_t g_unfinished_replies, g_link_changes;
 
 static void deliver(const uint8_t *data, size_t n, int has_delay, double delay_ms, int complete,
                     void *param)
@@ -159,9 +171,28 @@ static void deliver(const uint8_t *data, size_t n, int has_delay, double delay_m
     uint64_t base = answering ? g_hold.base : avr->cycle;
     double ms = has_delay ? delay_ms : answering ? opt.latency_ms : 0;
     if (n)
-        uart_rx_enqueue(data, n, base + (uint64_t) (ms * F_CPU_HZ / 1000.0));
+        uart_rx_enqueue(data, n, base + ms_to_cycles(ms));
     if (answering && complete)
         g_hold.done = 1;
+}
+
+// The client changed: it closed, a read or write on it failed, or another
+// connected. Everything that belonged to the old connection and was not
+// finished goes with it:
+//   - what it had sent of a reply that was not complete, a directive in
+//     progress or waiting for its reply, whitespace waiting for the next reply
+//   - the hold on the clock, if the sign's request was waiting for its answer
+//     (the next client never saw that request)
+// A reply that had arrived whole is not touched: it was handed over, and it
+// goes on the wire at its moment even though its sender is gone.
+static void on_link_change(int connected)
+{
+    g_link_changes++;
+    reply_reset();
+    g_hold.active = 0;
+    if (opt.verbose)
+        fprintf(stderr, "[%10.6f] link: %s\n", cycles_to_s(avr->cycle),
+                connected ? "a client connected" : "the client is gone");
 }
 
 static void json_byte(char *out, size_t cap, uint8_t byte)
@@ -202,10 +233,13 @@ static void on_tx(uint8_t byte, int framing_ok, uint64_t start_cycle, uint64_t e
         // reach the firmware, and runs repeat exactly.
         uint8_t buf[4096];
         double t0 = wall_now(), deadline = t0 + opt.wait_ms / 1000.0;
+        reply_new_exchange(0);      // this request's reply starts outside any object
         g_hold.active = 1;
         g_hold.done = 0;
         g_hold.base = end_cycle;
-        while (!g_hold.done && !g_stop && link_connected()) {
+        // on_link_change() ends the hold (g_hold.active = 0) if the client
+        // goes away or is replaced while the clock is held for it.
+        while (g_hold.active && !g_hold.done && !g_stop) {
             double left = deadline - wall_now();
             if (left <= 0)
                 break;
@@ -213,22 +247,35 @@ static void on_tx(uint8_t byte, int framing_ok, uint64_t start_cycle, uint64_t e
             if (n)
                 reply_feed(buf, n, deliver, NULL);
         }
-        if (!g_hold.done) {
+        if (g_hold.active && !g_hold.done && !g_stop) {
             // The reply did not finish in time. What has arrived of it goes
             // where a reply goes; the rest goes on the wire when it comes.
             g_unfinished_replies++;
             reply_flush(deliver, NULL);
+            reply_new_exchange(1);  // and it is given up: it must not swallow later replies
         }
         g_hold.active = 0;
+        // Anything the client sent after its reply in the same breath is not
+        // an answer to this request: like all unasked-for bytes, it goes on
+        // the wire as it arrives, whichever read it happened to arrive in.
+        reply_flush(deliver, NULL);
         g_wall_blocked += wall_now() - t0;
     }
 }
 
-static void on_rx(uint8_t byte, uint64_t start_cycle)
+// A byte seen on the line to the sign. byte and start_cycle are what the
+// listener on the pin saw; due_cycle and sent are what the driver was asked
+// to put there. They should agree: the byte exactly, and the start bit at the
+// first instruction boundary not before its due cycle.
+static void on_rx(uint8_t byte, int framing_ok, uint64_t start_cycle, uint64_t due_cycle,
+                  uint8_t sent)
 {
-    char extra[64];
+    char extra[128], value[64];
     g_rx_bytes++;
-    json_byte(extra, sizeof(extra), byte);
+    if (byte != sent || !framing_ok || start_cycle < due_cycle)
+        g_rx_wire_errors++;
+    json_byte(value, sizeof(value), byte);
+    snprintf(extra, sizeof(extra), "%s,\"due\":%llu", value, (unsigned long long) due_cycle);
     rec_event("rx", start_cycle, extra);
     tail_append(g_last_rx, sizeof(g_last_rx), byte);
     if (opt.verbose > 1)
@@ -252,7 +299,7 @@ static void beat_set(int level)
 
 static avr_cycle_count_t beat_timer(avr_t *a, avr_cycle_count_t when, void *param)
 {
-    uint64_t high = (uint64_t) (BEAT_HIGH_MS * F_CPU_HZ / 1000.0);
+    uint64_t high = ms_to_cycles(BEAT_HIGH_MS);
     if (!g_beat_on) {
         beat_set(1);
         return when + high;
@@ -267,13 +314,37 @@ static void no_sleep(avr_t *a, avr_cycle_count_t how_long)
 }
 
 // ---- main -------------------------------------------------------------------
-static double arg_num(int argc, char **argv, int *i)
+// A number option. Anything that is not a number in [min, max] is refused
+// here, with the range, so that no later conversion to an integer type, a
+// cycle count or a file field can overflow or be given nonsense.
+static double arg_num(int argc, char **argv, int *i, double min, double max)
 {
+    const char *name = argv[*i];
     if (*i + 1 >= argc) {
-        fprintf(stderr, "sign-emu: %s needs a value\n", argv[*i]);
+        fprintf(stderr, "sign-emu: %s needs a value\n", name);
         exit(2);
     }
-    return atof(argv[++*i]);
+    const char *text = argv[++*i];
+    char *end;
+    errno = 0;
+    double v = strtod(text, &end);
+    if (end == text || *end || errno || !(v >= min && v <= max)) {
+        fprintf(stderr, "sign-emu: %s %s: expected a number from %g to %g\n", name, text, min, max);
+        exit(2);
+    }
+    return v;
+}
+
+// The same for options that are whole numbers.
+static long arg_int(int argc, char **argv, int *i, long min, long max)
+{
+    const char *name = argv[*i];
+    double v = arg_num(argc, argv, i, (double) min, (double) max);
+    if (v != (double) (long) v) {
+        fprintf(stderr, "sign-emu: %s %s: expected a whole number\n", name, argv[*i]);
+        exit(2);
+    }
+    return (long) v;
 }
 
 static const char *arg_str(int argc, char **argv, int *i)
@@ -290,25 +361,28 @@ int main(int argc, char **argv)
     opt.headless = !isatty(STDOUT_FILENO);
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
-        if (!strcmp(a, "--duration")) opt.duration_s = arg_num(argc, argv, &i);
-        else if (!strcmp(a, "--until-requests")) opt.until_requests = (long) arg_num(argc, argv, &i);
-        else if (!strcmp(a, "--speed")) { opt.speed = arg_num(argc, argv, &i); opt.speed_set = 1; }
+        // The ranges keep every derived number in its type: cycle counts in 64
+        // bits (1e9 s is 1.6e16 cycles), the latch time in 32, the canvas in
+        // GIF's 16-bit sizes, the port in 16.
+        if (!strcmp(a, "--duration")) opt.duration_s = arg_num(argc, argv, &i, 1e-6, 1e9);
+        else if (!strcmp(a, "--until-requests")) opt.until_requests = arg_int(argc, argv, &i, 1, 1000000000);
+        else if (!strcmp(a, "--speed")) { opt.speed = arg_num(argc, argv, &i, 0, 1000); opt.speed_set = 1; }
         else if (!strcmp(a, "--headless")) opt.headless = 1;
         else if (!strcmp(a, "--band")) opt.band = 1;
         else if (!strcmp(a, "--record")) opt.gif = arg_str(argc, argv, &i);
         else if (!strcmp(a, "--png-dir")) opt.png_dir = arg_str(argc, argv, &i);
         else if (!strcmp(a, "--frames")) opt.events = arg_str(argc, argv, &i);
-        else if (!strcmp(a, "--scale")) opt.scale = (int) arg_num(argc, argv, &i);
-        else if (!strcmp(a, "--tick-cs")) opt.tick_cs = (int) arg_num(argc, argv, &i);
-        else if (!strcmp(a, "--gamma")) opt.gamma = arg_num(argc, argv, &i);
-        else if (!strcmp(a, "--port")) opt.port = (int) arg_num(argc, argv, &i);
-        else if (!strcmp(a, "--wait-client")) opt.wait_client_s = (int) arg_num(argc, argv, &i);
-        else if (!strcmp(a, "--link-latency-ms")) opt.latency_ms = arg_num(argc, argv, &i);
-        else if (!strcmp(a, "--link-wait-ms")) opt.wait_ms = (int) arg_num(argc, argv, &i);
+        else if (!strcmp(a, "--scale")) opt.scale = (int) arg_int(argc, argv, &i, 2, 64);
+        else if (!strcmp(a, "--tick-cs")) opt.tick_cs = (int) arg_int(argc, argv, &i, 1, 6000);
+        else if (!strcmp(a, "--gamma")) opt.gamma = arg_num(argc, argv, &i, 0.1, 10);
+        else if (!strcmp(a, "--port")) opt.port = (int) arg_int(argc, argv, &i, 0, 65535);
+        else if (!strcmp(a, "--wait-client")) opt.wait_client_s = (int) arg_int(argc, argv, &i, 0, 86400);
+        else if (!strcmp(a, "--link-latency-ms")) opt.latency_ms = arg_num(argc, argv, &i, 0, 1e6);
+        else if (!strcmp(a, "--link-wait-ms")) opt.wait_ms = (int) arg_int(argc, argv, &i, 0, 3600000);
         else if (!strcmp(a, "--link-directives")) opt.directives = 1;
         else if (!strcmp(a, "--request-chars")) opt.request_chars = arg_str(argc, argv, &i);
-        else if (!strcmp(a, "--bpm")) opt.bpm = arg_num(argc, argv, &i);
-        else if (!strcmp(a, "--reset-us")) opt.reset_us = arg_num(argc, argv, &i);
+        else if (!strcmp(a, "--bpm")) opt.bpm = arg_num(argc, argv, &i, 1, 600);
+        else if (!strcmp(a, "--reset-us")) opt.reset_us = arg_num(argc, argv, &i, 1, 1e6);
         else if (!strcmp(a, "-v")) opt.verbose++;
         else if (!strcmp(a, "-vv")) opt.verbose += 2;
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(stdout); return 0; }
@@ -328,7 +402,10 @@ int main(int argc, char **argv)
         fprintf(stderr, "sign-emu: simavr has no atmega328p core\n");
         return 1;
     }
-    avr_init(avr);
+    if (avr_init(avr) != 0) {
+        fprintf(stderr, "sign-emu: simavr could not set up the atmega328p\n");
+        return 1;
+    }
     avr->frequency = (uint32_t) F_CPU_HZ;
     avr->log = LOG_ERROR;
     avr->sleep = no_sleep;
@@ -344,31 +421,38 @@ int main(int argc, char **argv)
 
     // The world around it.
     view_set_gamma(opt.gamma);
-    rec_set_layout(opt.band);
+    rec_configure(opt.band, opt.scale, opt.tick_cs);
     view_set_band(opt.band);
-    ws_init(avr, (uint32_t) (opt.reset_us * F_CPU_HZ / 1e6), on_frame);
-    uart_init(avr, 14400.0, on_tx, on_rx);
+    // reset_us is at most 1e6, so the latch time is at most 1.6e7 cycles.
+    if (ws_init(avr, (uint32_t) (opt.reset_us * F_CPU_HZ / 1e6), on_frame) ||
+        uart_init(avr, 14400, on_tx, on_rx)) {
+        fprintf(stderr, "sign-emu: simavr's atmega328p has no port B or port D to attach to\n");
+        return 1;
+    }
     reply_init(opt.directives);
     if (opt.bpm > 0) {
+        // bpm is 1..600: a period of 0.1 to 60 s, always longer than the pulse.
         g_beat_period = (uint64_t) (60.0 / opt.bpm * F_CPU_HZ);
+        avr_ioport_external_t low = { .name = 'C', .mask = 1, .value = 0 };
+        if (!avr_io_getirq(avr, AVR_IOCTL_IOPORT_GETIRQ('C'), 0) ||
+            avr_ioctl(avr, AVR_IOCTL_IOPORT_SET_EXTERNAL('C'), &low) != 0) {
+            fprintf(stderr, "sign-emu: simavr's atmega328p has no port C for the beat input\n");
+            return 1;
+        }
         beat_set(0);
         avr_cycle_timer_register(avr, g_beat_period, beat_timer, NULL);
     }
 
-    if (opt.gif && rec_gif_open(opt.gif, opt.scale, opt.tick_cs)) {
-        fprintf(stderr, "sign-emu: cannot write %s: %s\n", opt.gif, strerror(errno));
-        return 1;
-    }
-    if (opt.png_dir && rec_png_open(opt.png_dir, opt.scale, opt.tick_cs)) {
-        fprintf(stderr, "sign-emu: cannot write into %s: %s\n", opt.png_dir, strerror(errno));
-        return 1;
+    if ((opt.gif && rec_gif_open(opt.gif)) || (opt.png_dir && rec_png_open(opt.png_dir))) {
+        fprintf(stderr, "sign-emu: recording failed: %s\n", rec_error());
+        return EXIT_RECORDING;
     }
     if (opt.events) {
         char settings[512];
         int n = snprintf(settings, sizeof(settings),
                  "\"f_cpu\":16000000,\"rows\":%d,\"cols\":%d,"
-                 "\"panel_cols\":%d,\"reset_us\":%g,\"baud\":14400,\"link_latency_ms\":%g,"
-                 "\"bpm\":%g,\"row_order\":\"rows[0] is the top row\","
+                 "\"panel_cols\":%d,\"reset_us\":%.17g,\"baud\":14400,\"link_latency_ms\":%.17g,"
+                 "\"bpm\":%.17g,\"row_order\":\"rows[0] is the top row\","
                  "\"pixel_format\":\"6 hex digits RRGGBB per column, raw LED values\"",
                  ROWS, COLS, PANEL_COLS, opt.reset_us, opt.latency_ms, opt.bpm);
         if (n < 0 || n >= (int) sizeof(settings)) {
@@ -376,16 +460,18 @@ int main(int argc, char **argv)
             return 1;
         }
         if (rec_events_open(opt.events, opt.hex, settings)) {
-            fprintf(stderr, "sign-emu: cannot write %s: %s\n", opt.events, strerror(errno));
-            return 1;
+            fprintf(stderr, "sign-emu: recording failed: %s\n", rec_error());
+            return EXIT_RECORDING;
         }
     }
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
     signal(SIGPIPE, SIG_IGN);
+    signal(SIGXFSZ, SIG_IGN);       // a file size limit is then a write error, which is reported
 
     if (opt.port > 0) {
+        link_on_change(on_link_change);
         if (link_listen(opt.port)) {
             fprintf(stderr, "sign-emu: cannot listen on 127.0.0.1:%d: %s\n", opt.port, strerror(errno));
             return 1;
@@ -407,7 +493,9 @@ int main(int argc, char **argv)
 
     // Run. One slice is 1 ms of simulated time.
     const uint64_t slice = (uint64_t) (F_CPU_HZ / 1000);
-    const uint64_t end_cycle = opt.duration_s > 0 ? (uint64_t) (opt.duration_s * F_CPU_HZ) : UINT64_MAX;
+    // To the nearest cycle; --duration is at most 1e9 s, 1.6e16 cycles.
+    const uint64_t end_cycle = opt.duration_s > 0 ? (uint64_t) llround(opt.duration_s * F_CPU_HZ)
+                                                  : UINT64_MAX;
     double wall_start = wall_now();
     double pace_wall = wall_start, pace_sim = 0;        // pacing reference
     double meas_wall = wall_start, meas_sim = 0, speed_now = 0, last_draw = 0;
@@ -426,6 +514,8 @@ int main(int argc, char **argv)
         if (state == cpu_Done || state == cpu_Crashed)
             break;
         ws_poll(avr->cycle);
+        if (rec_failed())
+            break;                  // an output could not be written: stop and say so
 
         // Bytes the app sent on its own (not as a held answer) go on the wire now.
         if (opt.port > 0) {
@@ -481,14 +571,15 @@ int main(int argc, char **argv)
     double sim = cycles_to_s(avr->cycle);
     if (!opt.headless)
         view_close();
-    rec_close(avr->cycle);
+    int recording_failed = rec_close(avr->cycle) != 0;
     link_close();
 
     FILE *out = stderr;
     fprintf(out, "sign-emu: simulated %.3f s in %.3f s of real time: %.2fx real time%s\n", sim, wall,
             wall > 0 ? sim / wall : 0, opt.speed > 0 ? " (paced)" : " (unpaced)");
-    fprintf(out, "sign-emu: frames latched %llu, bits per strip per frame %u..%u\n",
-            (unsigned long long) g_frames, g_frames ? g_bits_min : 0, g_bits_max);
+    fprintf(out, "sign-emu: frames latched %llu, bits per strip per frame %llu..%llu\n",
+            (unsigned long long) g_frames, (unsigned long long) (g_frames ? g_bits_min : 0),
+            (unsigned long long) g_bits_max);
     fprintf(out, "sign-emu: WS2812 high times: 0-bit %u..%u cycles, 1-bit %u..%u cycles\n",
             g_t0h_max ? g_t0h_min : 0, g_t0h_max, g_t1h_max ? g_t1h_min : 0, g_t1h_max);
     fprintf(out, "sign-emu: WS2812 low gaps: longest inside a frame %.1f us, shortest between "
@@ -505,18 +596,23 @@ int main(int argc, char **argv)
     if (uart_rx_dropped())
         fprintf(out, "sign-emu: WARNING: %zu bytes from the app were dropped: the queue to the "
                      "sign was full\n", uart_rx_dropped());
+    if (g_rx_wire_errors)
+        fprintf(out, "sign-emu: WARNING: %llu byte(s) to the sign were not seen on the wire as "
+                     "they were sent (emulator fault)\n", (unsigned long long) g_rx_wire_errors);
     if (g_marginal || g_partial || g_framing_errors)
         fprintf(out, "sign-emu: WARNING: %llu marginal WS2812 pulses, %llu frames with a partial "
                      "pixel, %llu serial framing errors\n",
                 (unsigned long long) g_marginal, (unsigned long long) g_partial,
                 (unsigned long long) g_framing_errors);
+    if (recording_failed)
+        fprintf(out, "sign-emu: RECORDING FAILED, the run was stopped: %s\n", rec_error());
     if (state == cpu_Crashed) {
         fprintf(out, "sign-emu: the firmware CRASHED at pc=0x%04x (simavr stopped the CPU)\n", avr->pc);
-        return 3;
+        return EXIT_FIRMWARE;
     }
     if (state == cpu_Done) {
         fprintf(out, "sign-emu: the firmware stopped (sleep with interrupts off) at pc=0x%04x\n", avr->pc);
-        return 3;
+        return EXIT_FIRMWARE;
     }
-    return 0;
+    return recording_failed ? EXIT_RECORDING : 0;
 }

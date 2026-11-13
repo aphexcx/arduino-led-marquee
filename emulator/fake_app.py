@@ -64,6 +64,9 @@ def load_playlist(path):
                 sys.exit("%s:%d: not JSON: %s" % (path, number, e))
             if not isinstance(obj, dict) or "type" not in obj:
                 sys.exit('%s:%d: every message is a JSON object with a "type"' % (path, number))
+            polls = obj.get("_polls", 0)
+            if not isinstance(polls, int) or isinstance(polls, bool) or polls < 0:
+                sys.exit('%s:%d: "_polls" is a whole number, 0 or more' % (path, number))
             messages.append(obj)
     if not messages:
         sys.exit("%s: no messages" % path)
@@ -255,6 +258,9 @@ def main():
         App(args).run()
     except KeyboardInterrupt:
         pass
+    except OSError as e:
+        # The link broke under a read or a write: say so, do not pretend it ended well.
+        sys.exit("fake_app: the link to the emulator failed: %s" % e)
 
 
 if __name__ == "__main__":

@@ -34,17 +34,17 @@ long load_ihex(const char *path, uint8_t *mem, size_t cap);
 
 // ---- ws2812.c -------------------------------------------------------------
 typedef struct {
-    uint32_t bits;          // most bits clocked into any one strip since the last latch
+    uint64_t bits;          // most bits clocked into any one strip since the last latch
     uint32_t partial_bits;  // bits left over that did not make a whole 24-bit pixel
     uint32_t t0h_min, t0h_max, t1h_min, t1h_max;   // high times seen, in CPU cycles
-    uint32_t marginal;      // pulses whose width is between a clean 0 and a clean 1
+    uint64_t marginal;      // pulses whose width is between a clean 0 and a clean 1
     uint32_t gap_max;       // longest low gap between two bits of this frame, in cycles
 } ws_frame_info_t;
 
 typedef void (*ws_frame_cb_t)(const image_t *img, uint64_t latch_cycle,
                               const ws_frame_info_t *info);
 
-void ws_init(avr_t *avr, uint32_t reset_cycles, ws_frame_cb_t cb);
+int ws_init(avr_t *avr, uint32_t reset_cycles, ws_frame_cb_t cb);   // 0, or -1: no port D
 void ws_poll(uint64_t now);          // latch on a quiet line; call regularly
 const image_t *ws_image(void);       // what the LEDs show right now
 uint32_t ws_shortest_latch_gap(void); // shortest low gap that latched, in cycles (0 = none)
@@ -53,9 +53,14 @@ uint32_t ws_shortest_latch_gap(void); // shortest low gap that latched, in cycle
 // The firmware's SoftwareSerial: TX on Arduino pin 11 (PB3), RX on pin 10 (PB2).
 typedef void (*uart_tx_cb_t)(uint8_t byte, int framing_ok, uint64_t start_cycle,
                              uint64_t end_cycle);
-typedef void (*uart_rx_cb_t)(uint8_t byte, uint64_t start_cycle);
+// A byte seen on the line to the sign: what a listener on the pin decoded and
+// the cycle its start bit fell, then the cycle the driver had it due and the
+// byte the driver was given.
+typedef void (*uart_rx_cb_t)(uint8_t byte, int framing_ok, uint64_t start_cycle,
+                             uint64_t due_cycle, uint8_t sent);
 
-void uart_init(avr_t *avr, double baud, uart_tx_cb_t on_tx, uart_rx_cb_t on_rx);
+// 0, or -1 if the simulated chip has no port B pins to attach to.
+int uart_init(avr_t *avr, unsigned baud, uart_tx_cb_t on_tx, uart_rx_cb_t on_rx);
 // Queue one reply for the firmware's RX pin. Replies go out in the order they
 // were queued, as from one UART: each one's bytes back to back, 8N1, its first
 // start bit no earlier than not_before_cycle and not before the reply ahead of
@@ -72,11 +77,22 @@ size_t uart_rx_dropped(void);                 // bytes lost because the queue wa
 typedef void (*reply_cb_t)(const uint8_t *data, size_t n, int has_delay, double delay_ms,
                            int complete, void *param);
 void reply_init(int directives);
+// Forgets everything unfinished: a directive in progress or waiting for its
+// reply, a partly received reply, whitespace. For when the client changes.
+void reply_reset(void);
+// A new request, or the wait for the last one's answer ran out: the next
+// reply starts from outside any JSON object. drop_delay also forgets a
+// directive's delay that was waiting for a reply.
+void reply_new_exchange(int drop_delay);
 void reply_feed(const uint8_t *buf, size_t len, reply_cb_t cb, void *param);
 void reply_flush(reply_cb_t cb, void *param);
 
 // ---- link.c ---------------------------------------------------------------
 int link_listen(int port);                    // 127.0.0.1:port; 0 on success
+// cb is called whenever the client changes: it closed, a read or write on it
+// failed, or a new one connected (connected = 1), replacing any old one.
+typedef void (*link_change_cb_t)(int connected);
+void link_on_change(link_change_cb_t cb);
 int link_connected(void);
 int link_wait_client(int timeout_ms);         // 1 if a client is connected
 void link_send(uint8_t byte);
@@ -112,12 +128,17 @@ void view_draw(const image_t *img, const view_status_t *st);
 void view_close(void);
 
 // ---- record.c -------------------------------------------------------------
-void rec_set_layout(int band);   // 1 = one 120 x 7 band, 0 = two stacked sides
-int rec_gif_open(const char *path, int scale, int tick_cs);
-int rec_png_open(const char *dir, int scale, int tick_cs);
+// Before any output is opened: layout (1 = one 120 x 7 band, 0 = two stacked
+// sides), screen pixels per LED, and the GIF/PNG tick in 1/100 s.
+void rec_configure(int band, int scale, int tick_cs);
+// The three opens return 0, or -1 with the reason in rec_error().
+int rec_gif_open(const char *path);
+int rec_png_open(const char *dir);
 int rec_events_open(const char *path, const char *firmware, const char *settings_json);
 void rec_frame(const image_t *img, uint64_t latch_cycle, const ws_frame_info_t *info);
 void rec_event(const char *type, uint64_t cycle, const char *extra_json);
-void rec_close(uint64_t end_cycle);
+int rec_close(uint64_t end_cycle);            // 0, or -1 if any output failed
+int rec_failed(void);                         // an output has failed: stop the run
+const char *rec_error(void);                  // the first failure: path and reason
 
 #endif

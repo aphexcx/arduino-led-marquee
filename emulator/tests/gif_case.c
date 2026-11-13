@@ -7,8 +7,11 @@
 //   rand <cycle> <seed> <colours> <percent_lit>          random picture, latch a frame
 //   close <cycle>
 //
+// Exit status 4 and one line on stderr if the recorder reports a failure.
+//
 // The frames go to the GIF and to the frames dump, so tests/gif_check.py can
 // decode the one and compare it with the other.
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +34,7 @@ int main(void)
     char line[1024], gif[400], dump[400];
     ws_frame_info_t info;
     memset(&info, 0, sizeof(info));
+    signal(SIGXFSZ, SIG_IGN);      // a file size limit is then a write error
     while (fgets(line, sizeof(line), stdin)) {
         unsigned long long cycle;
         int scale, tick, band, row, c0, c1, colours, percent;
@@ -38,12 +42,16 @@ int main(void)
         double gamma;
         if (sscanf(line, "open %399s %399s %d %d %d %lf", gif, dump, &scale, &tick, &band, &gamma) == 6) {
             view_set_gamma(gamma);
-            rec_set_layout(band);
-            if (rec_gif_open(gif, scale, tick) || rec_events_open(dump, "gif_case", "\"rows\":7,\"cols\":120")) {
-                perror("gif_case: open");
-                return 2;
+            rec_configure(band, scale, tick);
+            if (rec_gif_open(gif) || rec_events_open(dump, "gif_case", "\"rows\":7,\"cols\":120")) {
+                fprintf(stderr, "gif_case: recording failed: %s\n", rec_error());
+                return 4;
             }
         } else if (sscanf(line, "fill %llu %d %d %d %x", &cycle, &row, &c0, &c1, &rgb) == 5) {
+            if (row < 0 || row >= ROWS || c0 < 0) {
+                fprintf(stderr, "gif_case: no such LED: %s", line);
+                return 2;
+            }
             for (int c = c0; c <= c1 && c < COLS; c++) {
                 img.px[row][c][0] = rgb >> 16;
                 img.px[row][c][1] = rgb >> 8;
@@ -51,6 +59,10 @@ int main(void)
             }
             info.bits = COLS * 24;
             rec_frame(&img, cycle, &info);
+            if (rec_failed()) {
+                fprintf(stderr, "gif_case: recording failed: %s\n", rec_error());
+                return 4;
+            }
         } else if (sscanf(line, "rand %llu %u %d %d", &cycle, &seed, &colours, &percent) == 4) {
             rng = seed * 2654435761u + 1;
             uint8_t palette[1024][3];
@@ -68,8 +80,15 @@ int main(void)
                 }
             info.bits = COLS * 24;
             rec_frame(&img, cycle, &info);
+            if (rec_failed()) {
+                fprintf(stderr, "gif_case: recording failed: %s\n", rec_error());
+                return 4;
+            }
         } else if (sscanf(line, "close %llu", &cycle) == 1) {
-            rec_close(cycle);
+            if (rec_close(cycle)) {
+                fprintf(stderr, "gif_case: recording failed: %s\n", rec_error());
+                return 4;
+            }
             return 0;
         } else if (line[0] != '\n' && line[0] != '#') {
             fprintf(stderr, "gif_case: bad command: %s", line);

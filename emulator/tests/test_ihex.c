@@ -74,6 +74,14 @@ int main(int argc, char **argv)
            "segment 0x1000 puts address 0 at 0x10000");
     expect("bad-checksum", ":0400000001020304F3\n:00000001FF\n", -1, "wrong checksum");
     expect("bad-length", ":0400000001020304\n:00000001FF\n", -1, "record shorter than its length byte says");
+    // A file cut short, or with something that is not a record in it, must not
+    // load as a smaller firmware.
+    expect("no-end-record", ":0400000001020304F2\n", -1, "no end-of-file record");
+    expect("cut-mid-file", ":0400000001020304F2\n:02001000AA", -1, "the last record is cut");
+    expect("empty", "", -1, "an empty file");
+    expect("leading-space", " :0400000001020304F2\n:00000001FF\n", -1, "a record that does not start its line");
+    expect("not-hex", "hello\n:00000001FF\n", -1, "a line that is not a record");
+    expect("blank-lines", "\n:0400000001020304F2\r\n\r\n:00000001FF\n", 4, "blank lines and \\r\\n endings are fine");
 
     if (failures) {
         printf("FAILED: %d ihex check(s)\n", failures);

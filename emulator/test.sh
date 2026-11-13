@@ -8,11 +8,13 @@
 #      serves playlists/all_types.jsonl once through the serial link, records a
 #      GIF and a frames dump under build/test/, and checks the frames against
 #      Fonts.h and the GIF against the frames (tests/check_frames.py)
-#   3. the serial link's timing model against the real firmware
-#      (tests/link_test.py)
+#   3. the command line, and recordings that cannot be written
+#      (tests/cli_test.py, tests/record_fail_test.py)
+#   4. the serial link's timing model against the real firmware, with clients
+#      that come and go (tests/link_test.py)
 #
 # The TCP ports can be moved with SIGN_EMU_TEST_PORT (default 14417; the link
-# tests use the next one) so two lanes can run the tests at once.
+# tests use the eleven after it) so two lanes can run the tests at once.
 set -eu
 cd "$(dirname "$0")"
 
@@ -70,6 +72,12 @@ odd="$OUT/path/a\"b\\c.hex"
 cp "$HEX" "$odd"
 build/sign-emu --headless --port 0 --duration 0.2 --frames "$OUT/path/out.jsonl" "$odd" 2> /dev/null
 python3 tests/check_meta.py "$OUT/path/out.jsonl" "$odd"
+
+echo "== command line"
+python3 tests/cli_test.py build/sign-emu "$HEX" build/tests/cli
+
+echo "== recordings that cannot be written"
+python3 tests/record_fail_test.py build/sign-emu "$HEX" build/tests/recfail
 
 echo "== serial link timing"
 python3 tests/link_test.py build/sign-emu "$HEX" build/tests/link $((PORT + 1))

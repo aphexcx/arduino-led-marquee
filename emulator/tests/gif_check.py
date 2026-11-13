@@ -1,24 +1,44 @@
 #!/usr/bin/env python3
-"""Decodes every frame of a GIF written by the emulator and compares it,
-pixel for pixel and delay for delay, with the pictures redrawn from the frames
-dump of the same run.
+"""Decodes every frame of a GIF written by the emulator and checks it against
+the frames dump of the same run: every pixel, and when each picture is shown.
 
-The LZW decoder here is strict: it follows the GIF89a rules for when the code
-width grows, and any code a conforming decoder could not accept (a code beyond
-the next free dictionary entry, data that runs out before the end code, bytes
-left over after it, a pixel count that is not width x height) is an error.
+This file is an independent statement of what the recording must be. It does
+not replay the recorder's steps; it works from the rules in the README
+("Recording"), in exact integer arithmetic:
+
+  change   "The picture" is what is drawn. Frames whose LED values differ but
+           map to the same screen colours are one picture, written once.
+  time     The clip is cut into ticks of tick_cs/100 s, which is exactly
+           160000 * tick_cs CPU cycles. During tick k the clip shows the last
+           frame latched in tick k or earlier (dark before the first). The
+           clip lasts ceil(end / tick) ticks, and at least to the end of the
+           tick in which the last frame latched. So its length is within one
+           tick of the simulated time the run covered, however long that is.
+  picture  Margin of `scale` pixels all round; each LED is a square of
+           scale - 1 pixels with one background pixel to its right and below;
+           stacked layout: side A, a gap of `scale`, side B.
+  colour   An LED that is off is (14, 14, 16). Otherwise each channel v is
+           shown as round(255 * (v / 255) ** (1 / gamma)), computed here with
+           exact fractions.
+
+The LZW decoder is strict: it follows the GIF89a rules for when the code width
+grows, and anything a conforming decoder could not accept is an error.
 
 usage: gif_check.py <clip.gif> <frames.jsonl>
 Python 3 standard library only.
 """
 import json
-import math
+import os
+import struct
 import sys
+import zlib
+from fractions import Fraction
 
 COLS, PANEL, ROWS = 120, 60, 7
-F_CPU = 16000000.0
-OFF_COLOUR = (14, 14, 16)        # view.c: an LED that is off
-BACKGROUND = (0, 0, 0)           # record.c: between and around the LEDs
+CYCLES_PER_CS = 160000           # 16 MHz: CPU cycles in 1/100 s
+OFF_COLOUR = (14, 14, 16)
+BACKGROUND = (0, 0, 0)
+GIF_MAX_DELAY = 65535            # the delay field is 16 bits, in 1/100 s
 
 
 class GifError(Exception):
@@ -86,7 +106,7 @@ def read_gif(path):
         n = 3 << ((data[10] & 7) + 1)
         global_palette = data[pos:pos + n]
         pos += n
-    frames, delay = [], 0
+    frames, delay = [], None
 
     def sub_blocks(p):
         chunks = []
@@ -95,109 +115,131 @@ def read_gif(path):
             p += data[p] + 1
         return b"".join(chunks), p + 1
 
-    while True:
-        if pos >= len(data):
-            raise GifError("no trailer")
-        block = data[pos]
-        if block == 0x3B:
-            break
-        if block == 0x21:
-            if data[pos + 1] == 0xF9:
-                delay = data[pos + 4] | data[pos + 5] << 8
-            _, pos = sub_blocks(pos + 2)
-        elif block == 0x2C:
-            x, y = data[pos + 1] | data[pos + 2] << 8, data[pos + 3] | data[pos + 4] << 8
-            w, h = data[pos + 5] | data[pos + 6] << 8, data[pos + 7] | data[pos + 8] << 8
-            flags = data[pos + 9]
-            pos += 10
-            if (x, y, w, h) != (0, 0, width, height) or flags & 0x40:
-                raise GifError("frame %d is not a full, non-interlaced image" % len(frames))
-            palette = global_palette
-            if flags & 0x80:
-                n = 3 << ((flags & 7) + 1)
-                palette = data[pos:pos + n]
-                pos += n
-            if palette is None:
-                raise GifError("frame %d has no colour table" % len(frames))
-            min_code = data[pos]
-            packed, pos = sub_blocks(pos + 1)
-            try:
-                indices = lzw_decode(min_code, packed, width * height)
-            except GifError as e:
-                raise GifError("frame %d: %s" % (len(frames), e)) from None
-            if max(indices) * 3 >= len(palette):
-                raise GifError("frame %d uses a colour index outside its table" % len(frames))
-            planes = tuple(indices.translate(bytes(palette[c::3]).ljust(256, b"\0"))
-                           for c in range(3))
-            frames.append((delay, planes))
-            delay = 0
-        else:
-            raise GifError("unknown block 0x%02x at byte %d" % (block, pos))
+    try:
+        while True:
+            block = data[pos]
+            if block == 0x3B:
+                break
+            if block == 0x21:
+                if data[pos + 1] == 0xF9:
+                    delay = data[pos + 4] | data[pos + 5] << 8
+                _, pos = sub_blocks(pos + 2)
+            elif block == 0x2C:
+                x, y = data[pos + 1] | data[pos + 2] << 8, data[pos + 3] | data[pos + 4] << 8
+                w, h = data[pos + 5] | data[pos + 6] << 8, data[pos + 7] | data[pos + 8] << 8
+                flags = data[pos + 9]
+                pos += 10
+                if (x, y, w, h) != (0, 0, width, height) or flags & 0x40:
+                    raise GifError("frame %d is not a full, non-interlaced image" % len(frames))
+                if delay is None:
+                    raise GifError("frame %d has no delay" % len(frames))
+                palette = global_palette
+                if flags & 0x80:
+                    n = 3 << ((flags & 7) + 1)
+                    palette = data[pos:pos + n]
+                    pos += n
+                if palette is None:
+                    raise GifError("frame %d has no colour table" % len(frames))
+                min_code = data[pos]
+                packed, pos = sub_blocks(pos + 1)
+                try:
+                    indices = lzw_decode(min_code, packed, width * height)
+                except GifError as e:
+                    raise GifError("frame %d: %s" % (len(frames), e)) from None
+                if max(indices) * 3 >= len(palette):
+                    raise GifError("frame %d uses a colour index outside its table" % len(frames))
+                planes = tuple(indices.translate(bytes(palette[c::3]).ljust(256, b"\0"))
+                               for c in range(3))
+                frames.append((delay, planes))
+                delay = None
+            else:
+                raise GifError("unknown block 0x%02x at byte %d" % (block, pos))
+    except IndexError:
+        raise GifError("the file ends in the middle of a block (no trailer)") from None
     if pos != len(data) - 1:
         raise GifError("%d bytes after the trailer" % (len(data) - 1 - pos))
+    if not frames:
+        raise GifError("no frames")
     return width, height, frames
 
 
-# ---- the pictures the recorder should have drawn, from the frames dump --------
-class Renderer:
-    """record.c's canvas, redrawn from the settings in the dump's meta line."""
+# ---- what the pictures must be, from the README's rules -------------------------
+def screen_table(gamma):
+    """table[v] = round(255 * (v / 255) ** (1 / gamma)) for v in 0..255, exactly.
+
+    s is the answer when ((s - 1/2) / 255) ** gamma <= v / 255 < ((s + 1/2) / 255) ** gamma.
+    With gamma = p / q that is a comparison of whole numbers:
+    (2s - 1) ** p * 255 ** q <= v ** q * 510 ** p.
+    """
+    g = Fraction(gamma).limit_denominator(1000)
+    if g <= 0:
+        raise GifError("gamma %r" % gamma)
+    p, q = g.numerator, g.denominator
+    table, s = [], 0
+    for v in range(256):
+        while s < 255 and (2 * s + 1) ** p * 255 ** q <= v ** q * 510 ** p:
+            s += 1
+        table.append(s)
+    return table
+
+
+class Picture:
+    """The canvas the README describes, drawn a scan line at a time."""
 
     def __init__(self, render):
-        self.scale, self.tick_cs = render["scale"], render["tick_cs"]
-        self.band = render["band"]
-        gamma = render["gamma"]
-        self.lut = [int(math.floor(255.0 * math.pow(v / 255.0, 1.0 / gamma) + 0.5))
-                    for v in range(256)]
+        self.scale, self.band = render["scale"], render["band"]
+        self.table = screen_table(render["gamma"])
         s = self.scale
-        if self.band:
-            self.width, self.height = COLS * s + 2 * s, ROWS * s + 2 * s
-        else:
-            self.width, self.height = PANEL * s + 2 * s, 2 * ROWS * s + 3 * s
+        self.sides = [(0, COLS)] if self.band else [(0, PANEL), (PANEL, PANEL)]
+        columns = self.sides[0][1]
+        self.width = s + columns * s + s
+        self.height = s + len(self.sides) * (ROWS * s + s)
+        self.cache = {}
 
     def colour(self, hex6):
         led = (int(hex6[0:2], 16), int(hex6[2:4], 16), int(hex6[4:6], 16))
-        if led == (0, 0, 0):
-            return OFF_COLOUR
-        return tuple(self.lut[v] for v in led)
+        return OFF_COLOUR if led == (0, 0, 0) else tuple(self.table[v] for v in led)
 
-    def planes(self, rows):
-        """rows: 7 strings of 120 x RRGGBB. Returns (r, g, b) planes of the canvas."""
+    def drawn(self, rows):
+        """The screen colour of every LED: what tells one picture from another."""
+        return tuple(tuple(self.colour(r[c * 6:c * 6 + 6]) for c in range(COLS)) for r in rows)
+
+    def planes(self, rows, all_colours=False):
+        """rows: 7 strings of 120 x RRGGBB. Returns the (r, g, b) planes of the canvas.
+
+        all_colours: for a format with no limit on colours (PNG), nothing is dropped.
+        """
+        key = (tuple(rows), all_colours)
+        if key in self.cache:
+            return self.cache[key]
         s = self.scale
-        grid = [[self.colour(r[c * 6:c * 6 + 6]) for c in range(COLS)] for r in rows]
-        colours = {c for row in grid for c in row} | {BACKGROUND}
-        # More than 256 colours: the recorder drops low bits until they fit.
+        leds = [[self.colour(r[c * 6:c * 6 + 6]) for c in range(COLS)] for r in rows]
+        # More than 256 colours cannot go in one GIF frame: low bits are dropped,
+        # as few as it takes.
+        colours = {c for row in leds for c in row} | {BACKGROUND}
         drop = 0
-        while len({tuple(v & (0xff << drop) & 0xff for v in c) for c in colours}) > 256:
+        while not all_colours and len({tuple(v >> drop for v in c) for c in colours}) > 256:
             drop += 1
-        mask = (0xff << drop) & 0xff
-        blank = bytes(self.width)
-        out = []
-        for plane in range(3):
-            lines = []
-            bg = bytes([BACKGROUND[plane] & mask])
-
-            def led_line(row, first, count):
-                cells = b"".join(bytes([grid[row][c][plane] & mask]) * (s - 1) + bg
-                                 for c in range(first, first + count))
-                return bg * s + cells + bg * s
-
-            lines += [blank] * s
-            if self.band:
+        result = []
+        for channel in range(3):
+            def shade(colour):
+                return bytes([colour[channel] >> drop << drop])
+            background = shade(BACKGROUND)
+            empty_line = background * self.width
+            lines = [empty_line] * s
+            for first, count in self.sides:
                 for row in range(ROWS):
-                    lines += [led_line(row, 0, COLS)] * (s - 1) + [blank]
-            else:
-                for side in range(2):
-                    for row in range(ROWS):
-                        lines += [led_line(row, side * PANEL, PANEL)] * (s - 1) + [blank]
-                    lines += [blank] * s
-            if self.band:
-                lines += [blank] * s
-            out.append(b"".join(lines))
-        return tuple(out)
+                    led_line = background * s + b"".join(
+                        shade(leds[row][c]) * (s - 1) + background
+                        for c in range(first, first + count)) + background * s
+                    lines += [led_line] * (s - 1) + [empty_line]
+                lines += [empty_line] * s
+            result.append(b"".join(lines))
+        self.cache = {key: tuple(result)}
+        return self.cache[key]
 
 
-def expected_frames(dump_path):
-    """Replays record.c's sampling: [(delay_cs, rows), ...] and the renderer."""
+def read_dump(dump_path):
     meta, frames, end_cycle = None, [], None
     for line in open(dump_path, encoding="utf-8"):
         d = json.loads(line)
@@ -209,51 +251,158 @@ def expected_frames(dump_path):
             end_cycle = d["cycle"]
     if meta is None or "render" not in meta or end_cycle is None:
         raise GifError("the dump has no meta line with render settings, or no end line")
-    renderer = Renderer(meta["render"])
-    tick_cs = renderer.tick_cs
+    return meta["render"], frames, end_cycle
+
+
+def timeline_from_dump(render, frames, end_cycle, picture):
+    """[(first tick, rows), ...] for each change of picture, and the number of ticks.
+
+    "Picture" is what is drawn: two frames whose LED values differ but map to
+    the same screen colours are the same picture.
+    """
+    cycles_per_tick = CYCLES_PER_CS * render["tick_cs"]
     dark = ["000000" * COLS] * ROWS
-    shown, shown_tick, out = dark, 0, []
-
-    def emit(until_tick):
-        out.append((min(max(until_tick - shown_tick, 1) * tick_cs, 65535), shown))
-
+    by_tick, previous = {}, 0                      # tick -> the last frame latched in it
     for cycle, rows in frames:
-        tick = int(cycle / F_CPU * 100.0 / tick_cs)
-        if tick > shown_tick and rows != shown:
-            emit(tick)
-            shown_tick = tick
-        shown = rows
-    emit(int(end_cycle / F_CPU * 100.0 / tick_cs + 0.999))
-    return renderer, out
+        if cycle < previous:
+            raise GifError("the frames dump goes back in time at cycle %d" % cycle)
+        previous = cycle
+        by_tick[cycle // cycles_per_tick] = rows
+    ticks = max(-(-end_cycle // cycles_per_tick), max(by_tick, default=0) + 1, 1)
+    first = by_tick.get(0, dark)
+    timeline, shown = [(0, first)], picture.drawn(first)
+    for tick in sorted(by_tick):
+        if tick and picture.drawn(by_tick[tick]) != shown:
+            shown = picture.drawn(by_tick[tick])
+            timeline.append((tick, by_tick[tick]))
+    return timeline, ticks
+
+
+def first_difference(planes, want, width):
+    for p in range(len(want[0])):
+        if any(planes[c][p] != want[c][p] for c in range(3)):
+            return "x=%d y=%d: file %s, expected %s" % (
+                p % width, p // width, tuple(planes[c][p] for c in range(3)),
+                tuple(want[c][p] for c in range(3)))
+    return "sizes differ"
 
 
 def compare(gif_path, dump_path):
     """Returns (frame count, total seconds). Raises GifError on any difference."""
-    width, height, frames = read_gif(gif_path)
-    renderer, expected = expected_frames(dump_path)
-    if (width, height) != (renderer.width, renderer.height):
-        raise GifError("the GIF is %d x %d, the dump's settings give %d x %d"
-                       % (width, height, renderer.width, renderer.height))
-    if len(frames) != len(expected):
-        raise GifError("the GIF has %d frames, the dump gives %d" % (len(frames), len(expected)))
-    cache = {}
-    for i, ((delay, planes), (want_delay, rows)) in enumerate(zip(frames, expected)):
-        if delay != want_delay:
-            raise GifError("frame %d is shown for %d/100 s, the dump gives %d/100 s"
-                           % (i, delay, want_delay))
-        key = tuple(rows)
-        if key not in cache:
-            cache.clear()
-            cache[key] = renderer.planes(rows)
-        if planes != cache[key]:
-            want = cache[key]
-            for p in range(width * height):
-                if any(planes[c][p] != want[c][p] for c in range(3)):
-                    raise GifError("frame %d differs at x=%d y=%d: GIF %s, dump %s"
-                                   % (i, p % width, p // width,
-                                      tuple(planes[c][p] for c in range(3)),
-                                      tuple(want[c][p] for c in range(3))))
-    return len(frames), sum(d for d, _ in frames) / 100.0
+    width, height, gif = read_gif(gif_path)
+    render, frames, end_cycle = read_dump(dump_path)
+    tick_cs = render["tick_cs"]
+    picture = Picture(render)
+    if (width, height) != (picture.width, picture.height):
+        raise GifError("the GIF is %d x %d; scale %d gives %d x %d"
+                       % (width, height, picture.scale, picture.width, picture.height))
+
+    # How long the clip is, against the run's closing cycle alone.
+    total_cs = sum(delay for delay, _ in gif)
+    end_cs = Fraction(end_cycle, CYCLES_PER_CS)
+    if not end_cs <= total_cs <= end_cs + tick_cs:
+        raise GifError("the GIF plays for %d/100 s but the run covered %.2f/100 s: the clip "
+                       "must be at least that long and at most one tick (%d/100 s) longer"
+                       % (total_cs, float(end_cs), tick_cs))
+
+    # Each picture of the timeline, in order: its frames in the GIF must show
+    # it, add up to the time it stays, and be as few as the delay field allows
+    # (one, unless it stays longer than 655.35 s).
+    timeline, ticks = timeline_from_dump(render, frames, end_cycle, picture)
+    ends = [tick for tick, _ in timeline[1:]] + [ticks]
+    i = 0
+    for (tick, rows), end in zip(timeline, ends):
+        want, stay = picture.planes(rows), (end - tick) * tick_cs
+        shown_for, count = 0, 0
+        while shown_for < stay:
+            if i == len(gif):
+                raise GifError("the GIF ends at %d/100 s; the picture from %d/100 s stays "
+                               "until %d/100 s" % (tick * tick_cs + shown_for, tick * tick_cs,
+                                                   end * tick_cs))
+            delay, planes = gif[i]
+            if delay < 1:
+                raise GifError("frame %d has a delay of 0" % i)
+            if planes != want:
+                raise GifError("frame %d, at %d/100 s, does not show the picture the frames "
+                               "dump has for that moment (%s)"
+                               % (i, tick * tick_cs + shown_for,
+                                  first_difference(planes, want, width)))
+            shown_for += delay
+            count += 1
+            i += 1
+        if shown_for != stay:
+            raise GifError("the picture from %d/100 s is shown for %d/100 s; the frames dump "
+                           "gives %d/100 s" % (tick * tick_cs, shown_for, stay))
+        if count != -(-stay // GIF_MAX_DELAY):
+            raise GifError("the picture from %d/100 s stays %d/100 s and is written as %d "
+                           "frames; that fits %d" % (tick * tick_cs, stay, count,
+                                                     -(-stay // GIF_MAX_DELAY)))
+    if i != len(gif):
+        raise GifError("the GIF has %d frames after the run's last picture" % (len(gif) - i))
+    return len(gif), total_cs / 100.0
+
+
+def read_png(path):
+    """Returns (width, height, (r, g, b) planes) of an 8-bit RGB PNG with unfiltered lines."""
+    data = open(path, "rb").read()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise GifError("%s is not a PNG" % path)
+    pos, header, packed, ended = 8, None, b"", False
+    while pos + 12 <= len(data):
+        n, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + n]
+        if len(body) != n or len(data) < pos + 12 + n or \
+                struct.unpack(">I", data[pos + 8 + n:pos + 12 + n])[0] != zlib.crc32(kind + body):
+            raise GifError("%s: damaged %s chunk" % (path, kind.decode("latin-1")))
+        if kind == b"IHDR":
+            header = struct.unpack(">IIBBBBB", body)
+        elif kind == b"IDAT":
+            packed += body
+        elif kind == b"IEND":
+            ended = True
+        pos += 12 + n
+    if header is None or not ended or pos != len(data):
+        raise GifError("%s is not a whole PNG" % path)
+    width, height = header[0], header[1]
+    if header[2:] != (8, 2, 0, 0, 0):
+        raise GifError("%s is not 8-bit RGB" % path)
+    raw = zlib.decompress(packed)
+    stride = width * 3 + 1
+    if len(raw) != stride * height or any(raw[y * stride] for y in range(height)):
+        raise GifError("%s: picture data of the wrong size or with filtered lines" % path)
+    pixels = b"".join(raw[y * stride + 1:(y + 1) * stride] for y in range(height))
+    return width, height, tuple(pixels[c::3] for c in range(3))
+
+
+def compare_pngs(directory, dump_path):
+    """index.tsv and its pictures against the frames dump. Returns the number of pictures."""
+    render, frames, end_cycle = read_dump(dump_path)
+    tick_cs = render["tick_cs"]
+    picture = Picture(render)
+    timeline, ticks = timeline_from_dump(render, frames, end_cycle, picture)
+    lines = open(os.path.join(directory, "index.tsv"), encoding="utf-8").read().splitlines()
+    if not lines or lines[0].split("\t") != ["file", "start_s", "shown_for_s"]:
+        raise GifError("index.tsv has no header line")
+    entries = [line.split("\t") for line in lines[1:]]
+    if len(entries) != len(timeline):
+        raise GifError("index.tsv lists %d pictures, the frames dump gives %d"
+                       % (len(entries), len(timeline)))
+    ends = [tick for tick, _ in timeline[1:]] + [ticks]
+    for (name, start_s, shown_s), (tick, rows), end in zip(entries, timeline, ends):
+        if Fraction(start_s) * 100 != tick * tick_cs or \
+                Fraction(shown_s) * 100 != (end - tick) * tick_cs:
+            raise GifError("%s is listed from %s s for %s s; the frames dump gives %d/100 s "
+                           "for %d/100 s" % (name, start_s, shown_s, tick * tick_cs,
+                                             (end - tick) * tick_cs))
+        width, height, planes = read_png(os.path.join(directory, name))
+        if (width, height) != (picture.width, picture.height):
+            raise GifError("%s is %d x %d, expected %d x %d"
+                           % (name, width, height, picture.width, picture.height))
+        want = picture.planes(rows, all_colours=True)
+        if planes != want:
+            raise GifError("%s does not show the frame the dump has for its moment (%s)"
+                           % (name, first_difference(planes, want, width)))
+    return len(entries)
 
 
 def main():
@@ -264,8 +413,8 @@ def main():
     except GifError as e:
         print("FAIL  %s: %s" % (sys.argv[1], e))
         sys.exit(1)
-    print("ok    %s: %d frames, %.2f s, every pixel and delay as the frames dump has them"
-          % (sys.argv[1], n, seconds))
+    print("ok    %s: %d frames, %.2f s: every pixel as the frames dump has it, every picture "
+          "at its moment, and the clip as long as the run" % (sys.argv[1], n, seconds))
 
 
 if __name__ == "__main__":
