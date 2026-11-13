@@ -889,6 +889,34 @@ static void escapedSixtyFourCharacterMessageArrivesWholeOnAPoll() {
     assert(expectPos > 30);
 }
 
+static void escapedTextHasTheChecksumOfItsDecodedBytes() {
+    // The app's Gson is html-safe: ' < > & = go out as \uXXXX, while its checksum is over the text
+    // itself. The two agree only if the sign stores the decoded bytes. If they did not, every
+    // report would differ and the sign would re-read the whole message at every poll.
+    // (1) the list-empty text, one of the contract's vectors
+    freshApp();
+    app.at(1500, BYE, false);
+    assert(runChooser(FakeApp::V2_APP, "\\u003cempty\\u003e", "1/0"));
+    assert(strcmp(chooser.text, "<empty>") == 0);
+    assert(chooser.crc == 7805);
+    assert(app.requests.size() > 5);
+    for (size_t i = 0; i + 1 < app.requests.size(); i++) {
+        assert(app.requests[i].byte == '?');          // never a '~': nothing is read again
+        assert(app.replies[i] == "{\"c\":7805}");
+    }
+    assert(panelOneIs(frames[0], expectedPanel("<empty>", "1/0", 0, GAMMA(145), false)));
+
+    // (2) a scrolling text with an apostrophe, an ampersand and an equals sign
+    freshApp();
+    app.at(3000, BYE, false);
+    assert(runChooser(FakeApp::V2_APP, "DON\\u0027T STOP \\u0026 DANCE, 1+1\\u003d2", "4/4"));
+    assert(strcmp(chooser.text, "DON'T STOP & DANCE, 1+1=2") == 0);
+    assert(chooser.crc == chooserCrc("DON'T STOP & DANCE, 1+1=2", "4/4"));
+    assert(app.requests.size() > 10);
+    for (size_t i = 0; i < app.requests.size(); i++) assert(app.requests[i].byte == '?');
+    for (size_t i = 1; i < frames.size(); i++) assert(!frames[i].afterClear);
+}
+
 static void appSlowerThanThePollTimeoutKeepsItsPlaceInTheScroll() {
     // Every answer comes 80 ms after the request: too late for a poll (60 ms), fine for the normal
     // read. The sign must not restart the scroll every time it falls back to the normal read.
@@ -1185,6 +1213,7 @@ int main(int argc, char** argv) {
     RUN(neverMoreThanSixtyColumnsWhateverTheCountAndText);
     RUN(textFromTheAppLongerThanSixtyFourCharactersIsCutNotOverrun);
     RUN(escapedSixtyFourCharacterMessageArrivesWholeOnAPoll);
+    RUN(escapedTextHasTheChecksumOfItsDecodedBytes);
     RUN(appSlowerThanThePollTimeoutKeepsItsPlaceInTheScroll);
     RUN(sameMessageAfterAnotherDisplayStartsFresh);
     RUN(bytesOutsideTheFontAreDrawnAsSpaces);
