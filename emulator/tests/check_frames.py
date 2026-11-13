@@ -11,6 +11,8 @@ import json
 import re
 import sys
 
+import gif_check
+
 COLS, PANEL, ROWS = 120, 60, 7
 failures = []
 
@@ -70,45 +72,13 @@ def find_on_both_sides(frame, cols):
     return None if a is None or b is None else (a, b)
 
 
-# ---- GIF: total duration from its frame delays ---------------------------------
-def gif_stats(path):
-    data = open(path, "rb").read()
-    assert data[:6] == b"GIF89a", "not a GIF89a file"
-    width, height = data[6] | data[7] << 8, data[8] | data[9] << 8
-    pos = 13
-    if data[10] & 0x80:
-        pos += 3 << ((data[10] & 7) + 1)
-    frames, centis = 0, 0
-
-    def skip_blocks(p):
-        while data[p]:
-            p += data[p] + 1
-        return p + 1
-
-    while data[pos] != 0x3B:
-        if data[pos] == 0x21:
-            if data[pos + 1] == 0xF9:
-                centis += data[pos + 4] | data[pos + 5] << 8
-            pos = skip_blocks(pos + 2)
-        elif data[pos] == 0x2C:
-            frames += 1
-            flags = data[pos + 9]
-            pos += 10
-            if flags & 0x80:
-                pos += 3 << ((flags & 7) + 1)
-            pos = skip_blocks(pos + 1)
-        else:
-            raise ValueError("bad GIF block 0x%02x at %d" % (data[pos], pos))
-    return width, height, frames, centis / 100.0
-
-
 def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
     font = load_font_std(sys.argv[1])
     frames, tx, replies, end_t = [], [], [], 0.0
     pending = bytearray()
-    for line in open(sys.argv[2], encoding="ascii"):
+    for line in open(sys.argv[2], encoding="utf-8"):
         d = json.loads(line)
         end_t = max(end_t, d.get("t", 0.0))
         if d["type"] == "frame":
@@ -227,10 +197,14 @@ def main():
 
     if len(sys.argv) > 3:
         print("recording")
-        width, height, n, seconds = gif_stats(sys.argv[3])
-        check(n > 10, "the GIF is a %d x %d animation with %d frames" % (width, height, n))
-        check(abs(seconds - end_t) <= 0.05,
-              "the GIF plays for %.2f s, the simulated time it covers (%.2f s)" % (seconds, end_t))
+        try:
+            n, seconds = gif_check.compare(sys.argv[3], sys.argv[2])
+            check(n > 10, "all %d GIF frames decode with a strict LZW decoder, and every pixel "
+                          "and frame delay is what the frames dump gives" % n)
+            check(abs(seconds - end_t) <= 0.05,
+                  "the GIF plays for %.2f s, the simulated time it covers (%.2f s)" % (seconds, end_t))
+        except gif_check.GifError as e:
+            check(False, "the GIF decodes and matches the frames dump: %s" % e)
 
     if failures:
         print("FAILED: %d check(s)" % len(failures))

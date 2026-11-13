@@ -198,8 +198,15 @@ static void gif_write_frame(int delay_cs)
         cur = next;
     }
     bits_put(cur, size);
-    bits_put(clear, size);
-    bits_put(clear + 1, min_code + 1);
+    // A decoder adds a dictionary entry for every code it reads after the
+    // first one since a clear, so it adds one for that last code too, and its
+    // code width grows if that entry is the last one the current width can
+    // number. Nothing was added here for the last code, so follow the decoder
+    // before writing the end code. (cur is the first code since a clear only
+    // when max_code is still clear + 1, far from a width boundary.)
+    if (max_code + 1 >= (1u << size) && size < 12)
+        size++;
+    bits_put(clear + 1, size);
     bits_end();
 }
 
@@ -309,12 +316,63 @@ int rec_png_open(const char *dir, int scale, int tick_cs)
 // ---- JSON-lines events -----------------------------------------------------
 static FILE *g_events;
 
-int rec_events_open(const char *path, const char *meta_json)
+// Writes s as a JSON string. Quotes, backslashes and control characters are
+// escaped. Bytes above 0x7f are kept only if the whole string is valid UTF-8;
+// otherwise each becomes U+FFFD, so the line always parses.
+static int utf8_valid(const unsigned char *s)
+{
+    while (*s) {
+        int extra;
+        if (*s < 0x80) extra = 0;
+        else if ((*s & 0xe0) == 0xc0 && *s >= 0xc2) extra = 1;
+        else if ((*s & 0xf0) == 0xe0) extra = 2;
+        else if ((*s & 0xf8) == 0xf0 && *s <= 0xf4) extra = 3;
+        else return 0;
+        unsigned char lead = *s++;
+        // No overlong forms, no surrogates, nothing above U+10FFFF.
+        if ((lead == 0xe0 && *s < 0xa0) || (lead == 0xed && *s > 0x9f) ||
+            (lead == 0xf0 && *s < 0x90) || (lead == 0xf4 && *s > 0x8f))
+            return 0;
+        while (extra--) {
+            if ((*s & 0xc0) != 0x80)
+                return 0;
+            s++;
+        }
+    }
+    return 1;
+}
+
+static void json_string(FILE *f, const char *text)
+{
+    const unsigned char *s = (const unsigned char *) text;
+    int utf8 = utf8_valid(s);
+    fputc('"', f);
+    for (; *s; s++) {
+        if (*s == '"' || *s == '\\')
+            fprintf(f, "\\%c", *s);
+        else if (*s < 0x20 || *s == 0x7f)
+            fprintf(f, "\\u%04x", *s);
+        else if (*s >= 0x80 && !utf8)
+            fputs("\\ufffd", f);
+        else
+            fputc(*s, f);
+    }
+    fputc('"', f);
+}
+
+// The first line of the dump. firmware is a file name and may hold any bytes;
+// settings_json is a comma-separated list of members built from numbers only.
+// The "render" member is what a reader needs to redraw the GIF and PNG
+// pictures from the frames (tests/gif_check.py does).
+int rec_events_open(const char *path, const char *firmware, const char *settings_json)
 {
     g_events = fopen(path, "w");
     if (!g_events)
         return -1;
-    fprintf(g_events, "{\"type\":\"meta\",%s}\n", meta_json);
+    fputs("{\"type\":\"meta\",\"firmware\":", g_events);
+    json_string(g_events, firmware);
+    fprintf(g_events, ",%s,\"render\":{\"scale\":%d,\"tick_cs\":%d,\"band\":%s,\"gamma\":%.17g}}\n",
+            settings_json, g_scale, g_tick_cs, g_band ? "true" : "false", view_get_gamma());
     return 0;
 }
 
@@ -380,6 +438,7 @@ void rec_close(uint64_t end_cycle)
         g_png_index = NULL;
     }
     if (g_events) {
+        rec_event("end", end_cycle, NULL);
         fclose(g_events);
         g_events = NULL;
     }

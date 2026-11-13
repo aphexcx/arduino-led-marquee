@@ -21,7 +21,7 @@ builds the firmware), plus `cmake`, `make`, the Xcode command-line compiler and
 
 ```sh
 make -C emulator          # firmware image + emulator (first run clones simavr v1.8)
-make -C emulator test     # smoke test, no human needed
+make -C emulator test     # all tests, about a minute, no human needed
 ```
 
 Watch it live, in two terminals:
@@ -103,13 +103,15 @@ One JSON object per line.
 
 | `type` | fields |
 | --- | --- |
-| `meta` | first line: firmware path, geometry, options used |
+| `meta` | first line: firmware path, geometry, options used; `render` holds what is needed to redraw the GIF and PNG pictures from the frames (scale, tick, layout, gamma) |
 | `frame` | `t` seconds and `cycle` (CPU cycles) when the LEDs latched; `rows`: 7 strings, `rows[0]` the top row, each 120 x `RRGGBB` raw LED values, column 0 first; `bits`: bits clocked into a strip for this frame (2880 = all 120 columns; fewer means the columns beyond kept their old colour, more means the extra fell off the end of the strip); `gap_us`: longest pause inside the frame; `t0h_cycles`, `t1h_cycles`: shortest and longest high time of 0 and 1 bits; `marginal`, `partial_bits`: timing trouble, both 0 for a healthy frame |
 | `tx` | a byte the sign sent: `t` of its start bit, `byte`, `char` |
 | `rx` | a byte sent to the sign, same fields |
 | `beat` | a rising edge on the beat input |
+| `end` | last line: `t` and `cycle` when the run stopped |
 
-`tests/check_frames.py` is a worked example of reading it.
+A reader should skip types it does not know. `tests/check_frames.py` is a
+worked example of reading it, and `tests/gif_check.py` redraws the GIF from it.
 
 ## The serial link
 
@@ -126,30 +128,98 @@ carries, nothing added:
 - the sign sends one request byte: `~` ("send the next message") or `?`
   (chooser poll)
 - the peer answers with one JSON object and no newline, for example
-  `{"type":"F","str":"HELLO"}`; to `?` it may answer `{}`
+  `{"type":"F","str":"HELLO"}`; to `?` it may answer with a checksum report,
+  `{"c":13345}` (chooser contract version 2; version 1 used `{}`)
 
 To connect another program, open a TCP connection to that port and do the
 same. One client at a time; a new connection replaces the old one. A quick
 look by hand: `nc 127.0.0.1 14400`, wait for `~`, type a JSON object.
 
-Timing of the answer: when a request byte goes out, the emulator holds the
-simulated clock for up to one real second (`--link-wait-ms`) while the client
-answers, then puts the answer's first bit on the wire 5 ms of simulated time
-after the request (`--link-latency-ms`). So how fast the client is on this Mac
-does not change what the firmware sees, and a run repeats exactly. A client
-that takes longer than that real second is late in simulated time too, and
-bytes sent without a request go on the wire when they arrive. Bytes that
-arrive while the firmware is not listening are lost, as on the real sign.
-
 There is no stdin/stdout mode for the link; use the TCP port.
+
+### When a reply reaches the sign
+
+The firmware runs in simulated time and the peer runs in real time, so the
+emulator has to decide at which simulated moment each reply goes on the wire.
+The rule is built so that the answer does not depend on this computer: not on
+how long the peer took, and not on how TCP cut its bytes into pieces.
+
+1. **A reply is one JSON object.** The emulator follows the brackets and
+   strings of the stream to see where each object closes. Whitespace after an
+   object (a newline, say) travels in front of the next reply.
+2. **The clock is held while a request is answered.** When the sign's request
+   byte (`~` or `?`, see `--request-chars`) has gone out, simulated time stops
+   until the whole reply has arrived, in however many pieces. It stops for at
+   most `--link-wait-ms` of real time (default 1000).
+3. **The reply is placed relative to its request.** Its start bit begins
+   `--link-latency-ms` (default 5) of simulated time after the end of the
+   request's stop bit. That number stands in for the app's reaction time, and
+   it is the same for every reply.
+4. **Replies leave in the order they came, one at a time,** as from one UART.
+   A reply's bytes go out back to back at 14400 baud. A reply whose moment
+   comes while an earlier one is still going out starts when that one's last
+   stop bit ends. A reply that is due later waits for its own moment; it does
+   not ride out behind an earlier one.
+5. **Every byte is put on the wire at its moment, whether or not the firmware
+   is listening.** The emulator never drops, repairs or re-times them. What
+   becomes of them is the firmware's own code running. Two cases the link
+   tests show with the current firmware: a late reply that lands inside a
+   later request's window is read as that request's answer; and a late reply
+   that lands after a read timed out with nothing received, while stars are
+   showing, is half received (`readSerialData()` returns without
+   `stopSerial()` there, and interrupts are off while pixels go out), stays in
+   the receive buffer, and makes the next read fail with `InvalidInput`.
+
+So a late reply is modelled by its delay alone. `--link-latency-ms 80` makes
+every reply 80 ms late, which is past a 60 ms poll timeout and inside the next
+request's window.
+
+For a different delay per reply, start the emulator with `--link-directives`.
+The peer may then put a line in front of a reply, which the emulator consumes
+and does not put on the wire:
+
+| the peer sends | effect |
+| --- | --- |
+| `@250` newline, then the reply | this reply's start bit begins 250 ms (simulated, fractions allowed) after its request, instead of `--link-latency-ms` |
+| `@none` newline | this request gets no reply, and the clock is not held waiting for one |
+
+A reply can be delayed past the firmware's timeout and into a later request's
+window; rule 4 then decides the order on the wire. Without
+`--link-directives` an `@` is an ordinary byte and goes to the sign.
+
+What is **not** repeatable, and how to tell:
+
+- A reply that is not complete within `--link-wait-ms` of real time. What has
+  arrived of it is placed as in rule 3, and the rest goes on the wire at
+  whatever simulated moment it arrives. The run's summary then says
+  `NOTE: n request(s) had no complete reply ...`.
+- Bytes the peer sends when no request is waiting (a second object for the
+  same request, for example). They go on the wire at the simulated moment they
+  arrive, plus their directive's delay if they have one.
+- `--link-wait-ms 0`: the clock is never held, and everything is placed by
+  arrival.
+
+`tests/link_test.py` checks rules 1 to 4 and the directives against the real
+firmware, and is a worked example of a peer.
 
 ## Playlists
 
 A playlist is a text file with one JSON object per line. Blank lines and lines
 starting with `#` are skipped. `fake_app.py` sends them in order and loops.
 Keys starting with `_` are for the fake app and are not sent: `"_polls": n` on
-a chooser message answers the next n `?` polls with `{}` before moving on
+a chooser message says how long it stays selected before the playlist moves on
 (default 40, `--chooser-polls`).
+
+The fake app speaks both versions of the chooser contract:
+
+- `--contract 1` (default): the next n `?` polls are answered with `{}`.
+- `--contract 2`: the next n requests are answered about the selected
+  message: `?` with `{"c":N}`, where N is the CRC-16/CCITT-FALSE of its `str`,
+  a zero byte and its `flashy`; `~` with the message itself again. When the
+  playlist moves on to another chooser message, `?` reports the new checksum;
+  when it moves on to anything else, `?` is answered like `~`. Use it with
+  firmware that polls with `?`: firmware that only sends `~` gets the chooser
+  message n times.
 
 To add one, copy `playlists/demo.jsonl`, edit, and pass the new file to
 `fake_app.py`. `playlists/all_types.jsonl` has one of every message type the
@@ -253,10 +323,15 @@ Seen while building this; the firmware is not changed by this directory.
 | `Makefile` | `make`, `make firmware`, `make run`, `make test`, `make clean` |
 | `firmware/` | CMake wrapper that builds the unmodified sketch (no upload target) |
 | `fetch_simavr.sh` | clones simavr at the pinned commit into `third_party/` |
-| `src/` | the emulator: `main.c`, `ws2812.c` (LED decoder), `softuart.c` (serial pins), `link.c` (TCP), `view.c` (terminal), `record.c` (GIF, PNG, frames dump) |
+| `src/` | the emulator: `main.c`, `ihex.c` (firmware image reader), `ws2812.c` (LED decoder), `softuart.c` (serial pins and the queue of replies), `reply.c` (cuts the app's bytes into replies), `link.c` (TCP), `view.c` (terminal), `record.c` (GIF, PNG, frames dump) |
 | `fake_app.py` | the app's side of the link |
 | `playlists/` | `all_types.jsonl`, `demo.jsonl` |
-| `test.sh`, `tests/check_frames.py` | the smoke test |
+| `test.sh` | runs every test below |
+| `tests/check_frames.py` | the smoke run's frames against `Fonts.h`, and its GIF against its frames |
+| `tests/gif_check.py`, `tests/gif_cases.py`, `tests/gif_case.c` | a strict GIF decoder; chosen and random pictures through the GIF encoder |
+| `tests/link_test.py` | the serial link's timing model against the real firmware |
+| `tests/test_ihex.c` | the firmware image reader, built with the address and undefined-behaviour sanitizers |
+| `tests/test_fake_app.py`, `tests/check_meta.py` | the fake app's checksum and answers; the dump's first line |
 | `docs/demo.gif` | `demo.jsonl` recorded with `--bpm 128 --scale 4 --tick-cs 4` |
 
 Build notes:

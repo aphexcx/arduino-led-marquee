@@ -57,9 +57,20 @@ static void tx_notify(struct avr_irq_t *irq, uint32_t value, void *param)
 }
 
 // ---- RX drive -------------------------------------------------------------
+// A queue of replies. Each keeps the cycle before which its first bit must
+// not start, so a reply that is due later does not ride out on the tail of an
+// earlier one, and a reply that is due while another is still going out waits
+// its turn, as bytes do in a real UART's transmit buffer.
 #define RXQ_SIZE 65536
+#define RX_REPLIES 1024
 static uint8_t g_rxq[RXQ_SIZE];
-static size_t g_rx_head, g_rx_tail;     // head = next to send
+static size_t g_rx_head, g_rx_tail;     // head = next byte to send
+static struct {
+    size_t left;                        // bytes of this reply still to send
+    uint64_t not_before;
+} g_reply[RX_REPLIES];
+static size_t g_reply_head, g_reply_tail;
+static size_t g_rx_dropped;
 static int g_rx_active, g_rx_phase;
 static uint8_t g_rx_byte;
 static uint64_t g_rx_start;
@@ -76,18 +87,27 @@ static void rx_set(int level)
 
 size_t uart_rx_pending(void)
 {
-    return (g_rx_tail + RXQ_SIZE - g_rx_head) % RXQ_SIZE + (g_rx_active ? 1 : 0);
+    return (g_rx_tail + RXQ_SIZE - g_rx_head) % RXQ_SIZE + (g_rx_active && g_rx_phase ? 1 : 0);
+}
+
+size_t uart_rx_dropped(void)
+{
+    return g_rx_dropped;
 }
 
 static avr_cycle_count_t rx_step(avr_t *avr, avr_cycle_count_t when, void *param)
 {
     if (g_rx_phase == 0) {
-        if (g_rx_head == g_rx_tail) {
+        if (g_reply_head == g_reply_tail) {
             g_rx_active = 0;
             return 0;
         }
+        if (when < g_reply[g_reply_head].not_before)
+            return g_reply[g_reply_head].not_before;   // the line idles until then
         g_rx_byte = g_rxq[g_rx_head];
         g_rx_head = (g_rx_head + 1) % RXQ_SIZE;
+        if (--g_reply[g_reply_head].left == 0)
+            g_reply_head = (g_reply_head + 1) % RX_REPLIES;
         g_rx_start = when;
         rx_set(0);                                   // start bit
     } else if (g_rx_phase <= 8) {
@@ -98,7 +118,7 @@ static avr_cycle_count_t rx_step(avr_t *avr, avr_cycle_count_t when, void *param
         if (g_on_rx)
             g_on_rx(g_rx_byte, g_rx_start);
         g_rx_phase = 0;
-        return rx_step(avr, when, param);            // next byte, back to back
+        return rx_step(avr, when, param);            // next byte, or wait for the next reply
     }
     g_rx_phase++;
     return g_rx_start + (uint64_t) (g_rx_phase * g_bit_cycles + 0.5);
@@ -106,19 +126,31 @@ static avr_cycle_count_t rx_step(avr_t *avr, avr_cycle_count_t when, void *param
 
 void uart_rx_enqueue(const uint8_t *buf, size_t n, uint64_t not_before_cycle)
 {
-    for (size_t i = 0; i < n; i++) {
+    size_t stored = 0;
+    size_t next_reply = (g_reply_tail + 1) % RX_REPLIES;
+    if (next_reply == g_reply_head) {
+        g_rx_dropped += n;                           // too many replies waiting
+        return;
+    }
+    for (; stored < n; stored++) {
         size_t next = (g_rx_tail + 1) % RXQ_SIZE;
         if (next == g_rx_head)
-            break;                                   // queue full: drop the rest
-        g_rxq[g_rx_tail] = buf[i];
+            break;                                   // queue full: the rest is lost
+        g_rxq[g_rx_tail] = buf[stored];
         g_rx_tail = next;
     }
-    if (!g_rx_active && g_rx_head != g_rx_tail) {
+    g_rx_dropped += n - stored;
+    if (!stored)
+        return;
+    g_reply[g_reply_tail].left = stored;
+    g_reply[g_reply_tail].not_before = not_before_cycle;
+    g_reply_tail = next_reply;
+    if (!g_rx_active) {
         g_rx_active = 1;
         g_rx_phase = 0;
         uint64_t now = g_avr->cycle;
-        uint64_t delay = not_before_cycle > now ? not_before_cycle - now : 1;
-        avr_cycle_timer_register(g_avr, delay, rx_step, NULL);
+        avr_cycle_timer_register(g_avr, not_before_cycle > now ? not_before_cycle - now : 1,
+                                 rx_step, NULL);
     }
 }
 

@@ -3,8 +3,9 @@
 
 The sign PULLS: it sends one request byte and reads one JSON object back.
   ~   "send the next message"
-  ?   "chooser poll": answered with the two bytes {} while the chooser message
-      on the sign is still the right one, otherwise like ~
+  ?   "chooser poll": while a chooser message is selected, answered with
+      {} (--contract 1, the default) or with {"c":N}, the checksum of the
+      selected chooser message (--contract 2); otherwise like ~
 
 This script connects to the emulator's TCP port (the UART), and answers each
 request with the next message from a playlist file, looping. With --interactive
@@ -12,8 +13,13 @@ it also sends what you type.
 
 Playlist file: one JSON object per line. Blank lines and lines starting with
 # are skipped. Keys starting with "_" are for this script and are not sent:
-  "_polls": n   (chooser messages) answer the next n "?" polls with {} before
-                moving on to the next playlist entry. Default: --chooser-polls.
+  "_polls": n   (chooser messages) how long the message stays selected before
+                the playlist moves on. Default: --chooser-polls.
+                --contract 1: the next n "?" polls are answered with {}.
+                --contract 2: the next n requests of either kind are answered
+                about this message: "?" with its checksum, "~" with the message
+                again (in chooser mode the app's next message is the selected
+                one, and asking for it does not use it up).
 
 Python 3 standard library only.
 """
@@ -26,6 +32,23 @@ import time
 
 REQUEST_NEXT = ord("~")
 REQUEST_POLL = ord("?")
+
+
+def crc16_ccitt_false(data):
+    """CRC-16/CCITT-FALSE: polynomial 0x1021, initial value 0xFFFF, no reflection, no final xor."""
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
+def chooser_checksum(message):
+    """Contract version 2: the bytes of str, one zero byte, the bytes of flashy."""
+    text = str(message.get("str", "")).encode("utf-8")
+    count = str(message.get("flashy", "")).encode("utf-8")
+    return crc16_ccitt_false(text + b"\0" + count)
 
 
 def load_playlist(path):
@@ -74,6 +97,8 @@ class App:
         self.typed = []                  # messages typed in interactive mode
         self.lock = threading.Lock()
         self.chooser_polls_left = 0      # {} answers still owed for the chooser on the sign
+        self.chooser = None              # contract 2: the selected chooser message
+        self.chooser_left = 0            # contract 2: requests it stays selected for
         self.last_sent = None
         self.start = time.monotonic()
         self.finished = False
@@ -98,7 +123,39 @@ class App:
             return message
         return json.loads(self.args.idle)
 
+    def answer_v2(self, request):
+        """Contract version 2: a poll is answered with a report of the app's state."""
+        with self.lock:
+            typed = bool(self.typed)
+        if self.chooser is not None and self.chooser_left > 0 and not typed:
+            self.chooser_left -= 1
+            if request == REQUEST_POLL:
+                data = b'{"c":%d}' % chooser_checksum(self.chooser)
+                return data, "%s (checksum of the selected chooser message, %d more)" % (
+                    data.decode("ascii"), self.chooser_left)
+            data = encode(self.chooser)
+            return data, "%s (still selected, %d more)" % (data.decode("ascii"), self.chooser_left)
+        was_choosing = self.chooser is not None
+        message = self.next_message()
+        if message is None:
+            return None, None
+        if message.get("type") != "H":
+            self.chooser = None
+            data = encode(message)
+            return data, data.decode("ascii")
+        self.chooser = message
+        self.chooser_left = int(message.get("_polls", self.args.chooser_polls))
+        if request == REQUEST_POLL and was_choosing:
+            # Still in chooser mode, with a new selection: the poll gets the
+            # new checksum, and the sign asks for the message itself with ~.
+            data = b'{"c":%d}' % chooser_checksum(message)
+            return data, "%s (checksum of the newly selected chooser message)" % data.decode("ascii")
+        data = encode(message)
+        return data, data.decode("ascii")
+
     def answer(self, request):
+        if self.args.contract == 2:
+            return self.answer_v2(request)
         if request == REQUEST_POLL and self.chooser_polls_left > 0 and not self.typed:
             self.chooser_polls_left -= 1
             return b"{}", "{} (chooser unchanged, %d more)" % self.chooser_polls_left
@@ -179,8 +236,11 @@ def main():
     p.add_argument("--connect-timeout", type=float, default=15,
                    help="seconds to keep trying to reach the emulator")
     p.add_argument("--once", action="store_true", help="play the playlist once, then hang up")
+    p.add_argument("--contract", type=int, choices=(1, 2), default=1,
+                   help='chooser contract version: 1 answers a "?" poll with {}, '
+                        '2 with {"c":N}, the CRC-16/CCITT-FALSE of the selected chooser message')
     p.add_argument("--chooser-polls", type=int, default=40,
-                   help='how many "?" polls a chooser message answers with {} (default 40)')
+                   help="how long a chooser message stays selected, in polls (default 40)")
     p.add_argument("--idle", default='{"type":"S","str":"","stars":20}',
                    help="what to answer when there is no playlist and nothing typed")
     p.add_argument("-q", "--quiet", action="store_true")

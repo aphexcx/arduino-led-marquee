@@ -17,10 +17,18 @@
 static uint8_t g_lut[256];
 static const uint8_t OFF_COLOUR[3] = { 14, 14, 16 };
 
+static double g_gamma = 2.2;
+
+double view_get_gamma(void)
+{
+    return g_gamma;
+}
+
 void view_set_gamma(double gamma)
 {
     if (gamma <= 0)
         gamma = 1;
+    g_gamma = gamma;
     for (int v = 0; v < 256; v++)
         g_lut[v] = (uint8_t) lround(255.0 * pow(v / 255.0, 1.0 / gamma));
 }

@@ -29,6 +29,7 @@ static struct {
     double latency_ms;
     int wait_ms;
     int wait_client_s;
+    int directives;
     const char *request_chars;
     int verbose;
 } opt = {
@@ -60,10 +61,13 @@ static void usage(FILE *f)
 "  serial link (the UART to the app)\n"
 "    --port <n>             TCP port on 127.0.0.1 (default 14400, 0 = off)\n"
 "    --wait-client <s>      before booting, wait up to s seconds for an app to connect\n"
-"    --link-latency-ms <n>  simulated time between a request and the reply's first\n"
-"                           bit, when the app answers in time (default 5)\n"
-"    --link-wait-ms <n>     real time to hold the simulation for that answer\n"
-"                           (default 1000, 0 = never hold: replies land when they land)\n"
+"    --link-latency-ms <n>  simulated time from the end of a request to the first bit\n"
+"                           of its reply (default 5)\n"
+"    --link-wait-ms <n>     real time the simulated clock is held, at most, for the\n"
+"                           whole reply (one JSON object) to arrive (default 1000,\n"
+"                           0 = never hold: replies go on the wire as they arrive)\n"
+"    --link-directives      let the app place a reply itself: \"@<ms>\\n\" before a reply\n"
+"                           replaces --link-latency-ms for it, \"@none\\n\" sends none\n"
 "    --request-chars <s>    bytes that count as a request (default \"~?\")\n"
 "  inputs\n"
 "    --bpm <n>              pulse the beat input (A0) n times a minute\n"
@@ -138,6 +142,28 @@ static void on_frame(const image_t *img, uint64_t latch_cycle, const ws_frame_in
                 info->gap_max / 16.0);
 }
 
+// ---- replies from the app ----------------------------------------------------
+// While a request is being answered (g_hold.active), a reply is placed
+// relative to the end of that request's stop bit. Anything else the app sends
+// is placed relative to the moment it arrives.
+static struct {
+    int active, done;
+    uint64_t base;
+} g_hold;
+static uint64_t g_unfinished_replies;
+
+static void deliver(const uint8_t *data, size_t n, int has_delay, double delay_ms, int complete,
+                    void *param)
+{
+    int answering = g_hold.active && !g_hold.done;
+    uint64_t base = answering ? g_hold.base : avr->cycle;
+    double ms = has_delay ? delay_ms : answering ? opt.latency_ms : 0;
+    if (n)
+        uart_rx_enqueue(data, n, base + (uint64_t) (ms * F_CPU_HZ / 1000.0));
+    if (answering && complete)
+        g_hold.done = 1;
+}
+
 static void json_byte(char *out, size_t cap, uint8_t byte)
 {
     if (byte >= 0x20 && byte < 0x7f && byte != '"' && byte != '\\')
@@ -169,16 +195,32 @@ static void on_tx(uint8_t byte, int framing_ok, uint64_t start_cycle, uint64_t e
     }
     link_send(byte);
     if (is_request && opt.wait_ms > 0 && link_connected()) {
-        // Hold the simulated clock while the app works out its answer, then
-        // put the answer on the wire a fixed simulated time after the request.
-        // The app's thinking time on this Mac therefore does not leak into
-        // the simulation, and runs repeat exactly.
+        // Hold the simulated clock until the app's whole reply (one JSON
+        // object) is here, however many pieces it comes in, then put it on
+        // the wire a fixed simulated time after the request. How long the app
+        // took on this Mac, and how TCP cut its reply up, therefore do not
+        // reach the firmware, and runs repeat exactly.
         uint8_t buf[4096];
-        double t0 = wall_now();
-        size_t n = link_read(buf, sizeof(buf), opt.wait_ms);
+        double t0 = wall_now(), deadline = t0 + opt.wait_ms / 1000.0;
+        g_hold.active = 1;
+        g_hold.done = 0;
+        g_hold.base = end_cycle;
+        while (!g_hold.done && !g_stop && link_connected()) {
+            double left = deadline - wall_now();
+            if (left <= 0)
+                break;
+            size_t n = link_read(buf, sizeof(buf), (int) (left * 1000.0) + 1);
+            if (n)
+                reply_feed(buf, n, deliver, NULL);
+        }
+        if (!g_hold.done) {
+            // The reply did not finish in time. What has arrived of it goes
+            // where a reply goes; the rest goes on the wire when it comes.
+            g_unfinished_replies++;
+            reply_flush(deliver, NULL);
+        }
+        g_hold.active = 0;
         g_wall_blocked += wall_now() - t0;
-        if (n)
-            uart_rx_enqueue(buf, n, end_cycle + (uint64_t) (opt.latency_ms * F_CPU_HZ / 1000.0));
     }
 }
 
@@ -217,63 +259,6 @@ static avr_cycle_count_t beat_timer(avr_t *a, avr_cycle_count_t when, void *para
     }
     beat_set(0);
     return when + g_beat_period - high;
-}
-
-// ---- firmware image ---------------------------------------------------------
-static int hexval(int c)
-{
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-// Minimal Intel HEX reader (data, EOF and extended-address records).
-static long load_ihex(const char *path, uint8_t *mem, size_t cap)
-{
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return -1;
-    char line[600];
-    uint32_t base = 0;
-    long top = 0;
-    while (fgets(line, sizeof(line), f)) {
-        if (line[0] != ':')
-            continue;
-        uint8_t b[300];
-        int n = 0;
-        for (char *p = line + 1; hexval(p[0]) >= 0 && hexval(p[1]) >= 0 && n < 300; p += 2)
-            b[n++] = (uint8_t) (hexval(p[0]) << 4 | hexval(p[1]));
-        if (n < 5 || n != b[0] + 5) {
-            fclose(f);
-            return -1;
-        }
-        uint8_t sum = 0;
-        for (int i = 0; i < n; i++)
-            sum += b[i];
-        if (sum) {
-            fclose(f);
-            return -1;
-        }
-        uint32_t addr = base + ((uint32_t) b[1] << 8 | b[2]);
-        if (b[3] == 0) {
-            if (addr + b[0] > cap) {
-                fclose(f);
-                return -1;
-            }
-            memcpy(mem + addr, b + 4, b[0]);
-            if ((long) (addr + b[0]) > top)
-                top = addr + b[0];
-        } else if (b[3] == 1) {
-            break;
-        } else if (b[3] == 2) {
-            base = ((uint32_t) b[4] << 8 | b[5]) << 4;
-        } else if (b[3] == 4) {
-            base = ((uint32_t) b[4] << 8 | b[5]) << 16;
-        }
-    }
-    fclose(f);
-    return top;
 }
 
 static void no_sleep(avr_t *a, avr_cycle_count_t how_long)
@@ -320,6 +305,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--wait-client")) opt.wait_client_s = (int) arg_num(argc, argv, &i);
         else if (!strcmp(a, "--link-latency-ms")) opt.latency_ms = arg_num(argc, argv, &i);
         else if (!strcmp(a, "--link-wait-ms")) opt.wait_ms = (int) arg_num(argc, argv, &i);
+        else if (!strcmp(a, "--link-directives")) opt.directives = 1;
         else if (!strcmp(a, "--request-chars")) opt.request_chars = arg_str(argc, argv, &i);
         else if (!strcmp(a, "--bpm")) opt.bpm = arg_num(argc, argv, &i);
         else if (!strcmp(a, "--reset-us")) opt.reset_us = arg_num(argc, argv, &i);
@@ -362,6 +348,7 @@ int main(int argc, char **argv)
     view_set_band(opt.band);
     ws_init(avr, (uint32_t) (opt.reset_us * F_CPU_HZ / 1e6), on_frame);
     uart_init(avr, 14400.0, on_tx, on_rx);
+    reply_init(opt.directives);
     if (opt.bpm > 0) {
         g_beat_period = (uint64_t) (60.0 / opt.bpm * F_CPU_HZ);
         beat_set(0);
@@ -377,14 +364,18 @@ int main(int argc, char **argv)
         return 1;
     }
     if (opt.events) {
-        char meta[512];
-        snprintf(meta, sizeof(meta),
-                 "\"firmware\":\"%s\",\"f_cpu\":16000000,\"rows\":%d,\"cols\":%d,"
+        char settings[512];
+        int n = snprintf(settings, sizeof(settings),
+                 "\"f_cpu\":16000000,\"rows\":%d,\"cols\":%d,"
                  "\"panel_cols\":%d,\"reset_us\":%g,\"baud\":14400,\"link_latency_ms\":%g,"
                  "\"bpm\":%g,\"row_order\":\"rows[0] is the top row\","
                  "\"pixel_format\":\"6 hex digits RRGGBB per column, raw LED values\"",
-                 opt.hex, ROWS, COLS, PANEL_COLS, opt.reset_us, opt.latency_ms, opt.bpm);
-        if (rec_events_open(opt.events, meta)) {
+                 ROWS, COLS, PANEL_COLS, opt.reset_us, opt.latency_ms, opt.bpm);
+        if (n < 0 || n >= (int) sizeof(settings)) {
+            fprintf(stderr, "sign-emu: internal error: settings do not fit the meta line\n");
+            return 1;
+        }
+        if (rec_events_open(opt.events, opt.hex, settings)) {
             fprintf(stderr, "sign-emu: cannot write %s: %s\n", opt.events, strerror(errno));
             return 1;
         }
@@ -439,8 +430,10 @@ int main(int argc, char **argv)
         // Bytes the app sent on its own (not as a held answer) go on the wire now.
         if (opt.port > 0) {
             size_t n = link_read(buf, sizeof(buf), 0);
-            if (n)
-                uart_rx_enqueue(buf, n, avr->cycle);
+            if (n) {
+                reply_feed(buf, n, deliver, NULL);
+                reply_flush(deliver, NULL);
+            }
         }
 
         double sim = cycles_to_s(avr->cycle);
@@ -505,6 +498,13 @@ int main(int argc, char **argv)
     fprintf(out, "sign-emu: serial: sign sent %llu bytes (%llu requests), app sent %llu bytes\n",
             (unsigned long long) g_tx_bytes, (unsigned long long) g_requests,
             (unsigned long long) g_rx_bytes);
+    if (g_unfinished_replies)
+        fprintf(out, "sign-emu: NOTE: %llu request(s) had no complete reply within %d ms of real "
+                     "time; from there this run's timing depends on this computer\n",
+                (unsigned long long) g_unfinished_replies, opt.wait_ms);
+    if (uart_rx_dropped())
+        fprintf(out, "sign-emu: WARNING: %zu bytes from the app were dropped: the queue to the "
+                     "sign was full\n", uart_rx_dropped());
     if (g_marginal || g_partial || g_framing_errors)
         fprintf(out, "sign-emu: WARNING: %llu marginal WS2812 pulses, %llu frames with a partial "
                      "pixel, %llu serial framing errors\n",

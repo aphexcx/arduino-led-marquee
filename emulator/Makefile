@@ -24,7 +24,7 @@ OBJ     := $(BUILD)/obj
 
 CC      ?= cc
 CFLAGS  ?= -O2 -g
-WARN    := -Wall -Wextra -Wno-unused-parameter
+WARN    := -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations
 
 # simavr: every sim/ source except its own command-line program, and the one
 # core the sign uses. The lists are fixed so a build never depends on what
@@ -38,7 +38,7 @@ SIM_OBJS  := $(SIM_NAMES:%=$(OBJ)/simavr/%.o) $(CORE_NAMES:%=$(OBJ)/simavr/core/
 SIM_INC   := -Isrc/simavr_config -I$(SIMAVR)/sim -I$(SIMAVR)
 SIM_WARN  := -w
 
-EMU_NAMES := main ws2812 softuart link view record
+EMU_NAMES := main ihex reply ws2812 softuart link view record
 EMU_OBJS  := $(EMU_NAMES:%=$(OBJ)/%.o)
 
 .PHONY: all firmware emu run test clean
@@ -76,6 +76,25 @@ $(OBJ)/%.o: src/%.c src/emu.h $(SIMAVR)/sim/sim_avr.h
 
 $(EMU): $(EMU_OBJS) $(SIM_OBJS)
 	$(CC) $(CFLAGS) $^ -lz -lm -lpthread -o $@
+
+# ---- test programs ----------------------------------------------------------
+# Small programs that drive one source file directly. They are built with the
+# address and undefined-behaviour sanitizers, so a stray read or write stops
+# the test instead of passing by luck.
+TESTS    := $(BUILD)/tests
+SANITIZE := -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined
+
+.PHONY: test-programs
+test-programs: $(TESTS)/test_ihex $(TESTS)/gif_case
+
+$(TESTS)/test_ihex: tests/test_ihex.c src/ihex.c src/emu.h $(SIMAVR)/sim/sim_avr.h
+	@mkdir -p $(TESTS)
+	$(CC) $(SANITIZE) $(WARN) -std=gnu11 -Isrc $(SIM_INC) tests/test_ihex.c src/ihex.c -o $@
+
+$(TESTS)/gif_case: tests/gif_case.c src/record.c src/view.c src/emu.h $(SIMAVR)/sim/sim_avr.h
+	@mkdir -p $(TESTS)
+	$(CC) $(SANITIZE) $(WARN) -std=gnu11 -Isrc $(SIM_INC) tests/gif_case.c src/record.c src/view.c \
+	      -lz -lm -o $@
 
 # ---- use --------------------------------------------------------------------
 run: all

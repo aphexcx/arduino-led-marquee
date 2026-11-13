@@ -26,6 +26,12 @@ typedef struct {
 
 static inline double cycles_to_s(uint64_t c) { return (double) c / F_CPU_HZ; }
 
+// ---- ihex.c ---------------------------------------------------------------
+// Reads an Intel HEX file into mem[0..cap). Returns the address one past the
+// highest byte loaded, or -1 if the file cannot be read, is malformed, or
+// places data outside mem.
+long load_ihex(const char *path, uint8_t *mem, size_t cap);
+
 // ---- ws2812.c -------------------------------------------------------------
 typedef struct {
     uint32_t bits;          // most bits clocked into any one strip since the last latch
@@ -50,10 +56,24 @@ typedef void (*uart_tx_cb_t)(uint8_t byte, int framing_ok, uint64_t start_cycle,
 typedef void (*uart_rx_cb_t)(uint8_t byte, uint64_t start_cycle);
 
 void uart_init(avr_t *avr, double baud, uart_tx_cb_t on_tx, uart_rx_cb_t on_rx);
-// Queue bytes for the firmware's RX pin. They go out back to back, 8N1, the
-// first start bit no earlier than not_before_cycle.
+// Queue one reply for the firmware's RX pin. Replies go out in the order they
+// were queued, as from one UART: each one's bytes back to back, 8N1, its first
+// start bit no earlier than not_before_cycle and not before the reply ahead of
+// it has finished.
 void uart_rx_enqueue(const uint8_t *buf, size_t n, uint64_t not_before_cycle);
 size_t uart_rx_pending(void);
+size_t uart_rx_dropped(void);                 // bytes lost because the queue was full
+
+// ---- reply.c --------------------------------------------------------------
+// Cuts the app's byte stream into replies (one JSON object each).
+#define REPLY_MAX 8192
+// data[0..n) is one reply, or a piece of one when complete is 0. has_delay:
+// a directive gave this reply its own delay. n can be 0 (directive "none").
+typedef void (*reply_cb_t)(const uint8_t *data, size_t n, int has_delay, double delay_ms,
+                           int complete, void *param);
+void reply_init(int directives);
+void reply_feed(const uint8_t *buf, size_t len, reply_cb_t cb, void *param);
+void reply_flush(reply_cb_t cb, void *param);
 
 // ---- link.c ---------------------------------------------------------------
 int link_listen(int port);                    // 127.0.0.1:port; 0 on success
@@ -84,6 +104,7 @@ typedef struct {
 } view_status_t;
 
 void view_set_gamma(double gamma);
+double view_get_gamma(void);
 void view_map(const uint8_t led[3], uint8_t screen[3]);   // LED value -> screen colour
 void view_set_band(int band);
 void view_open(void);
@@ -94,7 +115,7 @@ void view_close(void);
 void rec_set_layout(int band);   // 1 = one 120 x 7 band, 0 = two stacked sides
 int rec_gif_open(const char *path, int scale, int tick_cs);
 int rec_png_open(const char *dir, int scale, int tick_cs);
-int rec_events_open(const char *path, const char *meta_json);
+int rec_events_open(const char *path, const char *firmware, const char *settings_json);
 void rec_frame(const image_t *img, uint64_t latch_cycle, const ws_frame_info_t *info);
 void rec_event(const char *type, uint64_t cycle, const char *extra_json);
 void rec_close(uint64_t end_cycle);

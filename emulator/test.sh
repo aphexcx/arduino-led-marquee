@@ -1,13 +1,18 @@
 #!/bin/sh
-# Smoke test for the sign emulator. Needs no human and no hardware.
+# Tests for the sign emulator. Needs no human and no hardware.
 #
-# Builds the firmware and the emulator, boots the firmware, lets the startup
-# animation play, serves playlists/all_types.jsonl once through the serial
-# link, records a GIF and a frames dump under build/test/, and checks the
-# frames against Fonts.h (tests/check_frames.py).
+#   1. unit tests: the HEX loader (built with the address and undefined-
+#      behaviour sanitizers), the GIF encoder against a strict decoder, the
+#      fake app's checksum and answers
+#   2. the smoke run: boots the firmware, lets the startup animation play,
+#      serves playlists/all_types.jsonl once through the serial link, records a
+#      GIF and a frames dump under build/test/, and checks the frames against
+#      Fonts.h and the GIF against the frames (tests/check_frames.py)
+#   3. the serial link's timing model against the real firmware
+#      (tests/link_test.py)
 #
-# The TCP port can be moved with SIGN_EMU_TEST_PORT (default 14417) so two
-# lanes can run the test at once.
+# The TCP ports can be moved with SIGN_EMU_TEST_PORT (default 14417; the link
+# tests use the next one) so two lanes can run the tests at once.
 set -eu
 cd "$(dirname "$0")"
 
@@ -17,12 +22,23 @@ HEX=build/firmware/LED_Marquee.hex
 PLAYLIST=playlists/all_types.jsonl
 
 echo "== build"
-make --no-print-directory all
+make --no-print-directory all test-programs
 
 mkdir -p "$OUT"
+
+echo "== unit: HEX loader (sanitizers on)"
+mkdir -p build/tests/ihex
+build/tests/test_ihex build/tests/ihex
+
+echo "== unit: GIF encoder against a strict decoder"
+python3 tests/gif_cases.py build/tests/gif_case build/tests/gif
+
+echo "== unit: fake app"
+python3 tests/test_fake_app.py build/tests/fake_app
+
 messages=$(grep -c '^{' "$PLAYLIST")
 
-echo "== run: boot, startup animation, then $messages messages from $PLAYLIST"
+echo "== smoke run: boot, startup animation, then $messages messages from $PLAYLIST"
 # The run ends when the sign asks for message number messages + 1, that is
 # when it has finished drawing the last one. --duration is only a safety net.
 build/sign-emu --headless --port "$PORT" --wait-client 30 \
@@ -44,6 +60,18 @@ if [ "$status" -ne 0 ]; then
     exit 1
 fi
 
-echo "== check"
+echo "== check the smoke run"
 python3 tests/check_frames.py ../Fonts.h "$OUT/all_types.jsonl" "$OUT/all_types.gif"
 ls -l "$OUT/all_types.gif" "$OUT/all_types.jsonl"
+
+echo "== a firmware path with a quote and a backslash in it"
+mkdir -p "$OUT/path"
+odd="$OUT/path/a\"b\\c.hex"
+cp "$HEX" "$odd"
+build/sign-emu --headless --port 0 --duration 0.2 --frames "$OUT/path/out.jsonl" "$odd" 2> /dev/null
+python3 tests/check_meta.py "$OUT/path/out.jsonl" "$odd"
+
+echo "== serial link timing"
+python3 tests/link_test.py build/sign-emu "$HEX" build/tests/link $((PORT + 1))
+
+echo "ALL TESTS PASSED"
