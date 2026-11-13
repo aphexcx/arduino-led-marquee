@@ -12,6 +12,9 @@
 
 #include "Icons.h"
 
+// Scroll geometry of the chooser preview (pure functions, unit-tested on the host: see test/)
+#include "ChooserScroll.h"
+
 #include "PixelBitBanging.h"
 
 #include "ArduinoJson-v6.18.3.h"
@@ -95,6 +98,26 @@ PROGMEM = "                    ";
 //Speed (delay between frames) of flashy countdown animation, lower is faster
 #define COUNTDOWN_DELAY 500
 
+// ---- Chooser preview (MSGTYPE_CHOOSER): a message too wide for the space beside the count scrolls.
+// ---- These five values are the ones to tune:
+//How long the start of a scrolling message stands still before it moves (and again every time round), in ms
+#define CHOOSER_HOLD_MS 600
+//Time per scrolled LED column in ms, lower is faster. 35 is about 4.8 characters a second
+#define CHOOSER_SCROLL_DELAY_MS 35
+//Blank columns between the end of the message and its start coming round again. 18 is three spaces. 1 to 240
+#define CHOOSER_GAP_COLS 18
+//Brightness of scrolling text, 0-255 before gamma correction. 145 is where the fade blink of a short message starts
+#define CHOOSER_TEXT_BRIGHTNESS 145
+//While scrolling, ask the app "anything changed?" ('?') every this many columns. Lower reacts faster to !next
+#define CHOOSER_POLL_EVERY_COLS 6
+// ---- The rest rarely needs touching:
+//Ask the app at least every this many ms, whatever the scroll is doing (the app lane counts on 250 at most)
+#define CHOOSER_POLL_EVERY_MS 200
+//How long to wait for each byte of the app's answer to a chooser poll, in ms. A late answer costs one visible hitch
+#define CHOOSER_POLL_TIMEOUT_MS 60
+//After this many unanswered polls in a row, leave the chooser display and ask normally ('~') again
+#define CHOOSER_MAX_FAILED_POLLS 20
+
 // Change this to be at least as long as your pixel string (too long will work fine, just be a little slower)
 #define NUM_PANELS 2  // Number of panels. There are 2.
 #define COLUMNS_PER_PANEL 60  // Number of columns per panel, in my case, the # of pixels in each LED string. I am using 60LED/M
@@ -133,6 +156,14 @@ const char KEYBOARD_MODE_WARNING = 'W';
 //vertical tab or \v; single column
 const char VT = '\u000B';
 const char HEART = '\u007F';
+
+// ChooserScroll.h keeps its own copies of these numbers so that it compiles without the sketch
+static_assert(CHOOSER_PANEL_COLS == COLUMNS_PER_PANEL, "ChooserScroll.h: panel width");
+static_assert(CHOOSER_GLYPH_COLS == FONTSTD_WIDTH && CHOOSER_HEART_COLS == HEART_WIDTH && INTERCHAR_SPACE == 1,
+              "ChooserScroll.h: font widths");
+static_assert(CHOOSER_CHAR_VT == VT && CHOOSER_CHAR_HEART == HEART, "ChooserScroll.h: special characters");
+static_assert(CHOOSER_GAP_COLS >= 1 && CHOOSER_GAP_COLS <= 240, "CHOOSER_GAP_COLS must be 1 to 240");
+static_assert(CHOOSER_POLL_EVERY_MS <= 250, "the app expects a chooser poll at least every 250 ms");
 
 /* Calculates how many empty columns to pad this string on its start and on its end,
  * and stores the results in startPad and endPad. Helps get it to be in the middle of the panel.
@@ -404,51 +435,6 @@ void showAsInputStyle(const char* str, int idxToBlink, const char mode) {
         sendColumnRGB(0x00, 0, 0, 0xff);
 
         sei();
-        show();
-    }
-}
-
-void showAsChooser(const char* blinkyStr, const char* countyStr) {
-
-//    int maxStrLen = 10; // max number of chars to show //TODO or, could scroll the whole thing
-//    blinkyStr[maxStrLen] = 0x00; //chop here
-
-    int blinkyLen = strlen(blinkyStr);
-    int shiftBy = constrain(blinkyLen - MAX_CHARS_PER_PANEL - strlen(countyStr), 0, blinkyLen);
-    // Shift string from the start if it is longer than the max chars we can show,
-    // so that last MAX_CHARS_PER_PANEL chars are always visible (plus _)
-//    blinkyStr = blinkyStr + shiftBy;
-
-    unsigned int count = 58;
-
-    clear();
-    while (count > 0) {
-        count--;
-        uint brightness = GAMMA(((count % 100) * 256) / 100);
-
-        cli();
-
-        // County part
-        sendString(countyStr, fontStd, 0, 0x80, 0, 0);
-        sendColumnRGB(0x00, 0, 0, 0xff);
-
-        // Blinky part
-//        while (*blinkyStr) {
-//        for (int s = 0; s <= shiftBy; s++) {
-//            if (s == blinkyLen) {
-//                break;
-//            }
-//            for (uint step = 0; step < FONTSTD_WIDTH +
-//                                       INTERCHAR_SPACE; step++) {
-//                // step though each column of the 1st char for smooth scrolling
-//                sendString(blinkyStr, step, brightness, brightness, brightness);
-        sendString(blinkyStr, fontStd, 0, brightness, brightness, brightness);
-//            }
-//            blinkyStr = blinkyStr + s;
-//        }
-        sei();
-//        delay(MARQUEE_DELAY); // speed. higher = slower
-
         show();
     }
 }
@@ -923,6 +909,10 @@ bool readSerialData() {
     }
 }
 
+// The chooser display (MSGTYPE_CHOOSER): showAsChooser() and its scrolling and polling.
+// It is in its own file so that the host test can run it against a fake sign and a fake app.
+#include "ChooserDisplay.h"
+
 int loopcount = 0;
 
 void setup() {
@@ -960,6 +950,16 @@ void loop() {
     bool readSuccessful = readSerialData();
     diagnosticLedOff();
 
+    if (readSuccessful && json["type"].as<const char*>()[0] == MSGTYPE_CHOOSER) {
+        // Stays in the chooser display (asking '?' between frames) until a message of another type
+        // arrives, which is then in `json` and shown below, or until the app stops answering.
+        readSuccessful = showAsChooser(json["str"], json["flashy"]);
+        if (!readSuccessful) {
+            loopcount++;
+            return; // ask again with a normal '~'
+        }
+    }
+
     if (readSuccessful) {
         const char* str = json["str"];
         const char msgType = json["type"].as<const char*>()[0];
@@ -970,10 +970,6 @@ void loop() {
             }
             case MSGTYPE_CHONKY_SLIDE: {
                 showChonkySlideStyleOnBothPanels(str, json["dly"], {json["r"], json["g"], json["b"]}, json["scroll"]);
-                break;
-            }
-            case MSGTYPE_CHOOSER: {
-                showAsChooser(str, json["flashy"]);
                 break;
             }
             case MSGTYPE_UTILITY: { // Utility messages
