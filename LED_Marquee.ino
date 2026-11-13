@@ -103,6 +103,7 @@ PROGMEM = "                    ";
 //How long the start of a scrolling message stands still before it moves (and again every time round), in ms
 #define CHOOSER_HOLD_MS 600
 //Time per scrolled LED column in ms, lower is faster. 35 is about 4.8 characters a second
+//(on the sign a step measures 36 to 37 ms: the millisecond clock stands still while a frame is sent)
 #define CHOOSER_SCROLL_DELAY_MS 35
 //Blank columns between the end of the message and its start coming round again. 18 is three spaces. 1 to 240
 #define CHOOSER_GAP_COLS 18
@@ -115,8 +116,9 @@ PROGMEM = "                    ";
 #define CHOOSER_POLL_EVERY_MS 200
 //How long to wait for each byte of the app's answer to a chooser poll, in ms. A late answer costs one visible hitch
 #define CHOOSER_POLL_TIMEOUT_MS 60
-//After this many unanswered polls in a row, leave the chooser display and ask normally ('~') again
-#define CHOOSER_MAX_FAILED_POLLS 20
+//After this many requests in a row without a usable answer, ask the normal way (which waits up to a second).
+//If the same chooser message comes back the scroll carries on from where it was
+#define CHOOSER_MAX_FAILED_POLLS 3
 
 // Change this to be at least as long as your pixel string (too long will work fine, just be a little slower)
 #define NUM_PANELS 2  // Number of panels. There are 2.
@@ -959,6 +961,7 @@ void loop() {
             return; // ask again with a normal '~'
         }
     }
+    chooserLeft(); // whatever is drawn below replaces the chooser picture
 
     if (readSuccessful) {
         const char* str = json["str"];

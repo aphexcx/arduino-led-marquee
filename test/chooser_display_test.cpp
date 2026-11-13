@@ -48,7 +48,7 @@
 #define CHOOSER_POLL_EVERY_COLS 6
 #define CHOOSER_POLL_EVERY_MS 200
 #define CHOOSER_POLL_TIMEOUT_MS 60
-#define CHOOSER_MAX_FAILED_POLLS 20
+#define CHOOSER_MAX_FAILED_POLLS 3
 
 const char MSGTYPE_CHOOSER = 'H';
 const char HEART = '\x7F';
@@ -278,6 +278,7 @@ static std::string repeat(const char* unit, size_t length) {
 
 // Starts from a clean sign, lets loop()'s '~' read deliver the first message, and runs the display.
 static bool runChooser(FakeApp::Kind kind, const std::string& text, const std::string& count) {
+    chooserLeft(); // loop() drew something else before this
     nowUs = 0;
     frames.clear();
     sending.clear();
@@ -302,6 +303,26 @@ static bool runChooser(FakeApp::Kind kind, const std::string& text, const std::s
     assert(!softSerial.listening);
     assert(timeoutLeftBehind == 1000); // the normal '~' read gets its usual timeout back
     return result;
+}
+
+// The same, with what loop() does when showAsChooser() gives up: ask with a normal '~' (the usual
+// one second timeout) and go back in if that brings a chooser message.
+static bool runChooserLikeLoop(FakeApp::Kind kind, const std::string& text, const std::string& count) {
+    bool other = runChooser(kind, text, count);
+    while (!other) {
+        startSerial();
+        softSerial.print('~');
+        DeserializationError err = deserializeJson(json, softSerial);
+        stopSerial();
+        if (err != DeserializationError::Ok) return false; // loop() shows the starfield
+        const char* type = json["type"];
+        if (type[0] != MSGTYPE_CHOOSER) {
+            chooserLeft();
+            return true;
+        }
+        other = showAsChooser(json["str"], json["flashy"]);
+    }
+    return true;
 }
 
 static void freshApp() {
@@ -632,7 +653,7 @@ static void silentAppKeepsScrollingAndIsGivenUpOnAfterTwentyFailedRequests() {
         moved++;
         if (a != 0) assert(ms(frames[i + 1].tUs - frames[i].tUs) < CHOOSER_POLL_TIMEOUT_MS + 5);
     }
-    assert(moved >= 60); // about five columns per failed poll
+    assert(moved >= 2 * 4); // about five columns per failed request
     assert(ms(nowUs) < 1000 + 6000); // gives up within a few seconds
 }
 
@@ -746,6 +767,52 @@ static void escapedSixtyFourCharacterMessageArrivesWholeOnAPoll() {
     assert(expectPos > 30);
 }
 
+static void appSlowerThanThePollTimeoutKeepsItsPlaceInTheScroll() {
+    // Every answer comes 80 ms after the request: too late for a poll (60 ms), fine for the normal
+    // read. The sign must not restart the scroll every time it falls back to the normal read.
+    std::string first = "PLUR IS NOT DEAD";
+    std::string second = "SECOND MESSAGE, ALSO LONG";
+    const int cycle = 95 + CHOOSER_GAP_COLS;
+    freshApp();
+    app.latencyUs = 80000;
+    app.at(9000, chooserJson(second, "4/9"), true);
+    app.at(13000, BYE, false);
+    assert(runChooserLikeLoop(FakeApp::NEW_APP, first, "3/9"));
+    assert(strcmp(json["str"], "bye") == 0);
+    assert(ms(nowUs) < 13000 + 1500);
+
+    size_t change = 1;
+    while (change < frames.size() && !frames[change].afterClear) change++;
+    assert(change < frames.size());
+    // the first message scrolled on without ever jumping back, all the way round
+    int expectPos = 0;
+    for (size_t i = 0; i < change; i++) {
+        assert(positionOf(frames[i], first, "3/9", cycle) == expectPos);
+        expectPos = (expectPos + 1) % cycle;
+    }
+    assert(change > (size_t) cycle);
+    // the new message was picked up by a normal read within about a second
+    assert(positionOf(frames[change], second, "4/9", 25 * 6 - 1 + CHOOSER_GAP_COLS) == 0);
+    assert(ms(frames[change].tUs) > 9000 && ms(frames[change].tUs) < 9000 + 1200);
+    int tildes = (int) app.requests.size() - questionMarks();
+    assert(tildes > 20);
+}
+
+static void sameMessageAfterAnotherDisplayStartsFresh() {
+    // chooser, then something else on the LEDs, then the same chooser message again
+    std::string text = "PLUR IS NOT DEAD";
+    freshApp();
+    app.at(3000, BYE, false);
+    assert(runChooser(FakeApp::NEW_APP, text, "3/9"));
+    assert(positionOf(frames.back(), text, "3/9", 95 + CHOOSER_GAP_COLS) > 30);
+    freshApp();
+    app.at(3000, BYE, false);
+    assert(runChooser(FakeApp::NEW_APP, text, "3/9")); // runChooser() scribbles over the LEDs first
+    assert(frames[0].afterClear);
+    assert(positionOf(frames[0], text, "3/9", 95 + CHOOSER_GAP_COLS) == 0);
+    assert(panelTwoDark(frames[0]));
+}
+
 static void bytesOutsideTheFontAreDrawnAsSpaces() {
     // a control character and a UTF-8 pair must not read font data from somewhere else
     std::string text = "A\x01\xC3\xA9" "B";
@@ -789,6 +856,8 @@ int main(int argc, char** argv) {
     RUN(neverMoreThanSixtyColumnsWhateverTheCountAndText);
     RUN(textFromTheAppLongerThanSixtyFourCharactersIsCutNotOverrun);
     RUN(escapedSixtyFourCharacterMessageArrivesWholeOnAPoll);
+    RUN(appSlowerThanThePollTimeoutKeepsItsPlaceInTheScroll);
+    RUN(sameMessageAfterAnotherDisplayStartsFresh);
     RUN(bytesOutsideTheFontAreDrawnAsSpaces);
     RUN(failedRequestsOfAnEarlierVisitAreForgotten);
     printf("chooser_display_test: all %d tests passed\n", tests);

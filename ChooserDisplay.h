@@ -25,9 +25,15 @@ struct ChooserState {
     uint16_t pos;             // scroll position in columns; 0 = the start of the text at the left edge
     uint16_t holdLeftMs;      // how much longer the text stands still before it scrolls
     uint failedPolls;         // unanswered polls in a row
+    bool onScreen;            // the picture on the LEDs is still ours (nothing else was drawn since)
 };
 
 static ChooserState chooser;
+
+// loop() calls this before it draws anything that is not the chooser.
+static void chooserLeft() {
+    chooser.onScreen = false;
+}
 
 // What the app's answer to a poll means
 #define CHOOSER_REPLY_SAME 0    // nothing changed (or nothing usable arrived): carry on from where we are
@@ -150,13 +156,19 @@ static uint chooserPoll() {
 
 // Shows a chooser message and stays here, polling the app between frames, for as long as the
 // chooser is on screen. Returns true when `json` holds a message of another type for loop() to
-// show, false when the app stopped answering (loop() then asks with a normal '~').
+// show, false when the app's answers stopped arriving in time (loop() then asks with a normal '~',
+// which waits longer; if that brings the same chooser message, we carry on from where we were).
 bool showAsChooser(const char* blinkyStr, const char* countyStr) {
     uint colsSincePoll = 0;
     unsigned long lastPollMs = millis();
 
     chooser.failedPolls = 0;
-    chooserStore(blinkyStr, countyStr);
+    if (!(chooser.onScreen &&
+          chooserSame(chooser.text, blinkyStr, CHOOSER_MAX_CHARS) &&
+          chooserSame(chooser.count, countyStr, CHOOSER_COUNT_MAX_CHARS))) {
+        chooserStore(blinkyStr, countyStr);
+    }
+    chooser.onScreen = true;
 
     for (;;) {
         unsigned long sliceStart = millis();
