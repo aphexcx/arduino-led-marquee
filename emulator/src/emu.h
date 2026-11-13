@@ -1,0 +1,101 @@
+// Shared declarations for the sign emulator. See ../README.md.
+#ifndef SIGN_EMU_H
+#define SIGN_EMU_H
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+
+#include "sim_avr.h"
+
+// ---- The sign -------------------------------------------------------------
+// 7 WS2812 strips, one per LED row, on PORTD bits 1..7. Fonts.h: "Bit #7 is
+// top line of char, Bit #1 is bottom", so PD7 drives the top row.
+// Each strip is 120 pixels long: panel A is pixels 0..59 (nearest the
+// Arduino), panel B is pixels 60..119.
+#define ROWS 7
+#define COLS 120
+#define PANEL_COLS 60
+#define ROW_TO_PORT_BIT(row) (7 - (row))   // row 0 = top = PD7
+
+#define F_CPU_HZ 16000000.0
+
+typedef struct {
+    uint8_t px[ROWS][COLS][3];   // [row][column] = {R, G, B} as the LED holds it
+} image_t;
+
+static inline double cycles_to_s(uint64_t c) { return (double) c / F_CPU_HZ; }
+
+// ---- ws2812.c -------------------------------------------------------------
+typedef struct {
+    uint32_t bits;          // most bits clocked into any one strip since the last latch
+    uint32_t partial_bits;  // bits left over that did not make a whole 24-bit pixel
+    uint32_t t0h_min, t0h_max, t1h_min, t1h_max;   // high times seen, in CPU cycles
+    uint32_t marginal;      // pulses whose width is between a clean 0 and a clean 1
+    uint32_t gap_max;       // longest low gap between two bits of this frame, in cycles
+} ws_frame_info_t;
+
+typedef void (*ws_frame_cb_t)(const image_t *img, uint64_t latch_cycle,
+                              const ws_frame_info_t *info);
+
+void ws_init(avr_t *avr, uint32_t reset_cycles, ws_frame_cb_t cb);
+void ws_poll(uint64_t now);          // latch on a quiet line; call regularly
+const image_t *ws_image(void);       // what the LEDs show right now
+
+// ---- softuart.c -----------------------------------------------------------
+// The firmware's SoftwareSerial: TX on Arduino pin 11 (PB3), RX on pin 10 (PB2).
+typedef void (*uart_tx_cb_t)(uint8_t byte, int framing_ok, uint64_t start_cycle,
+                             uint64_t end_cycle);
+typedef void (*uart_rx_cb_t)(uint8_t byte, uint64_t start_cycle);
+
+void uart_init(avr_t *avr, double baud, uart_tx_cb_t on_tx, uart_rx_cb_t on_rx);
+// Queue bytes for the firmware's RX pin. They go out back to back, 8N1, the
+// first start bit no earlier than not_before_cycle.
+void uart_rx_enqueue(const uint8_t *buf, size_t n, uint64_t not_before_cycle);
+size_t uart_rx_pending(void);
+
+// ---- link.c ---------------------------------------------------------------
+int link_listen(int port);                    // 127.0.0.1:port; 0 on success
+int link_connected(void);
+int link_wait_client(int timeout_ms);         // 1 if a client is connected
+void link_send(uint8_t byte);
+// Non-blocking (timeout_ms == 0) or blocking read of whatever the client sent.
+// Returns the number of bytes placed in buf.
+size_t link_read(uint8_t *buf, size_t cap, int timeout_ms);
+void link_close(void);
+
+// ---- view.c ---------------------------------------------------------------
+typedef struct {
+    double sim_s;
+    double speed_now;        // simulated seconds per wall second, last interval
+    double speed_target;     // 0 = unpaced
+    uint64_t frames;
+    uint64_t requests;
+    uint64_t rx_bytes;
+    int port;
+    int client;
+    const char *last_tx;     // short printable tail of what the sign sent
+    const char *last_rx;     // short printable tail of what was sent to the sign
+    double bpm;
+    int beat_on;
+    uint64_t marginal;
+    uint64_t partial;
+} view_status_t;
+
+void view_set_gamma(double gamma);
+void view_map(const uint8_t led[3], uint8_t screen[3]);   // LED value -> screen colour
+void view_set_band(int band);
+void view_open(void);
+void view_draw(const image_t *img, const view_status_t *st);
+void view_close(void);
+
+// ---- record.c -------------------------------------------------------------
+void rec_set_layout(int band);   // 1 = one 120 x 7 band, 0 = two stacked sides
+int rec_gif_open(const char *path, int scale, int tick_cs);
+int rec_png_open(const char *dir, int scale, int tick_cs);
+int rec_events_open(const char *path, const char *meta_json);
+void rec_frame(const image_t *img, uint64_t latch_cycle, const ws_frame_info_t *info);
+void rec_event(const char *type, uint64_t cycle, const char *extra_json);
+void rec_close(uint64_t end_cycle);
+
+#endif
