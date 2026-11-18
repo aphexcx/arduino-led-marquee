@@ -134,9 +134,16 @@ PROGMEM = "                    ";
 #define CHOOSER_LINE_QUIET_MS 3
 //After a message has been read, wait at most this long for whatever the app writes behind it (a newline) to end
 #define CHOOSER_TRAILER_WAIT_MS 100
-//Before any '~' is sent (in every mode), the line from the app must be quiet, or the answer would be read
-//starting in the middle of whatever the app is sending. Wait at most this long for that, in ms
+//Before any '~' is sent (in every mode), the line from the app must have been quiet for this long, in ms, or
+//the answer would be read starting in the middle of whatever the app is sending. (The app wants about 10 ms of
+//silence between a message it pushed and the next request.) Every request in every mode is this much later
+#define REQUEST_QUIET_MS 10
+//A line that stays LOW without a gap for this long (ms) is dead (nothing drives it, or it is held): the request
+//is not sent and counts as unanswered
 #define REQUEST_QUIET_WAIT_MS 500
+//... and this is how long (ms) the app may go on sending before the sign gives up waiting for it to finish.
+//The longest message, 600 characters all written as \uXXXX escapes, is 2.5 s on the wire
+#define REQUEST_BUSY_WAIT_MS 4000
 //How long any '~' read waits for the first byte of its answer, in ms (the same as for every later byte)
 #define ANSWER_FIRST_BYTE_MS 1000
 //... and how much longer than that it may wait, once, when the app raised its hand late in that wait
@@ -919,8 +926,11 @@ bool readSerialData() {
 //            }
 
     // send special symbol so IMX knows to respond with custom message data
-    // (once the line is quiet: not into the middle of a message the app is pushing)
-    chooserRequest();
+    // (once the line is quiet: not into a message the app is pushing. If it never is, nothing was
+    // sent: a request without an answer)
+    if (!chooserRequest()) {
+        return false;
+    }
 //    int firstByte = softSerial.read();
 //
 //    switch (firstByte) {
