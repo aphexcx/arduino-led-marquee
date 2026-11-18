@@ -439,8 +439,12 @@ def check_nudge(env, message, start, end, frames):
     appear = [f.t for f, before in zip(frames, [None] + frames[:-1])
               if before is None or f.mask[:PANEL] != before.mask[:PANEL]] + [end]
     shown = [(b - a) * 1000 for a, b in zip(appear, appear[1:])]
-    worst = max([abs(s - message["dly"]) for s in shown] or [0])
-    check(log, len(shown) == positions and worst <= 1, "each column is shown for dly (%s ms for dly %d)"
+    # one position to the next is the firmware's own pacing; the last one ends with the sign's next
+    # request, which is held to the same tolerance as every hold (2 percent or 10 ms)
+    dly = message["dly"]
+    worst = max([abs(s - dly) for s in shown[:-1]] or [0])
+    last_ok = bool(shown) and abs(shown[-1] - dly) <= max(dly * 0.02, 10)
+    check(log, len(shown) == positions and worst <= 1 and last_ok, "each column is shown for dly (%s ms for dly %d)"
           % (" ".join("%.2f" % s for s in shown), message["dly"]))
     return log
 
