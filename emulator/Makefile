@@ -61,11 +61,20 @@ firmware: $(FW_DIR)/Makefile
 FW_DEBUG_FLAGS ?= -DCHOOSER_DEBUG_PANEL_B=1
 FW_DEBUG_DIR   := $(BUILD)/firmware-debug
 
-$(FW_DEBUG_DIR)/Makefile: firmware/CMakeLists.txt firmware/toolchain.cmake
-	cmake -S firmware -B $(FW_DEBUG_DIR) -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Debug \
-	      -DARDUINO_SDK_PATH=$(ARDUINO_SDK) "-DSIGN_FLAGS=$(FW_DEBUG_FLAGS)"
+# The flags reach the compiler through CMake's cache, which a later run would
+# otherwise reuse whatever FW_DEBUG_FLAGS says. So the flags the tree was
+# built with are kept beside it, and when they are not the ones asked for the
+# tree is thrown away and built afresh. (Reconfiguring alone is not enough:
+# this Mac's make compares file times in whole seconds, and does not rebuild
+# objects made in the same second as the new flags file.)
+FW_DEBUG_BUILT_WITH := $(FW_DEBUG_DIR)/built-with-flags.txt
 
-firmware-debug: $(FW_DEBUG_DIR)/Makefile
+firmware-debug:
+	@if [ "$$(cat $(FW_DEBUG_BUILT_WITH) 2>/dev/null)" != "$(FW_DEBUG_FLAGS)" ]; then \
+	    cmake -E remove_directory $(FW_DEBUG_DIR); fi
+	@[ -f $(FW_DEBUG_DIR)/Makefile ] || cmake -S firmware -B $(FW_DEBUG_DIR) -G "Unix Makefiles" \
+	      -DCMAKE_BUILD_TYPE=Debug -DARDUINO_SDK_PATH=$(ARDUINO_SDK) "-DSIGN_FLAGS=$(FW_DEBUG_FLAGS)" > /dev/null
+	@printf '%s' "$(FW_DEBUG_FLAGS)" > $(FW_DEBUG_BUILT_WITH)
 	$(MAKE) --no-print-directory -C $(FW_DEBUG_DIR) LED_Marquee
 	@$(AVR_SIZE) $(FW_DEBUG_DIR)/LED_Marquee.elf
 	@shasum -a 256 $(FW_DEBUG_DIR)/LED_Marquee.hex

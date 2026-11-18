@@ -13,6 +13,16 @@ measured on the real firmware.
       The same checks on the frames dump of any run (for example one driven by
       fake_app.py --contract 3). What the app sent is read from the dump.
 
+  push_test.py idle <sign-emu> <firmware.hex> <Fonts.h> <work dir> [port]
+      The sign is idle (nobody answers, it shows stars and asks every 3.5 s)
+      when the app enters chooser mode and pushes. Many runs, the push moved
+      through the sign's next request in steps of 6 ms: so that the request is
+      due while the line is LOW, in the wait between the break and the
+      message, during the message, and after it. In every run the sign must
+      show the pushed message, soon, and never send anything but '~' (a
+      message read from its middle makes it send "InvalidInput" and flash that
+      for seven seconds).
+
 The checks, all from the dump (sign-emu --frames):
   - a push is on the LEDs within 150 ms of the end of its break
   - between pushes, the time from one scrolled frame to the next varies by no
@@ -526,6 +536,87 @@ def run(emu, hexfile, font_path, work, port, record):
              "guard_ms": 20})
 
 
+def idle(emu, hexfile, font_path, work, port):
+    os.makedirs(work, exist_ok=True)
+    font = load_font_std(font_path)
+    obj = {"type": "H", "str": "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG AND KEEPS ON RUNNING",
+           "flashy": "1/4"}
+    frame = json.dumps(obj, separators=(",", ":")).encode("ascii")
+    message = Message(font, obj)
+    worst, where, bad = 0.0, {}, []
+    offsets = list(range(3340, 3520, 6))
+    for x in offsets:
+        dump = os.path.join(work, "idle%d.jsonl" % x)
+        with open(os.path.join(work, "idle%d.log" % x), "w") as err:
+            proc = subprocess.Popen([emu, "--headless", "--port", str(port), "--wait-client", "30",
+                                     "--link-directives", "--duration", "15", "--frames", dump,
+                                     hexfile], stderr=err)
+        try:
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+                    break
+                except OSError:
+                    if time.monotonic() > deadline or proc.poll() is not None:
+                        raise
+                    time.sleep(0.05)
+            sock.settimeout(120)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            seen = 0
+            try:
+                while True:
+                    data = sock.recv(4096)
+                    if not data:
+                        break
+                    for byte in data:
+                        if byte != ord("~"):
+                            continue
+                        seen += 1
+                        if seen == 1:
+                            # no answer to this request; x ms after it, the push
+                            sock.sendall(b"@%d\n@break50\n@after20\n" % x + frame)
+                        else:
+                            # the app holds the same chooser message for every later request
+                            sock.sendall(frame)
+            except (ConnectionResetError, BrokenPipeError):
+                pass
+            sock.close()
+            proc.wait(timeout=180)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        d = Dump(dump)
+        b = d.breaks[0]
+        frame_end = [e for e in d.rx if e["byte"] == ord("}")][0]["cycle"] + 11112
+        second = [e for e in d.all_tx if e["cycle"] > d.all_tx[0]["cycle"] + 16000000]
+        said = "".join(e.get("char", "?") for e in d.all_tx)
+        shown = [f.t for f in d.frames if f.t > b["t"] and f.d["bits"] == PANEL * 24
+                 and tuple(f.mask[:PANEL]) in message.pictures]
+        late = (shown[0] * 16e6 - frame_end) / CYCLES_PER_MS if shown else None
+        if second:
+            at = second[0]["cycle"]
+            place = ("before the line fell" if at < b["cycle"] else
+                     "while the line was LOW" if at < b["end"] else
+                     "between the break and the message" if b["end"] <= at < b["end"] + 20 * 16000 else
+                     "during the message" if at < frame_end else "after the message")
+        else:
+            place = "not at all (it saw the line LOW and listened)"
+        where[place] = where.get(place, 0) + 1
+        if set(said) != {"~"} or late is None or late > 400:
+            bad.append("push %d ms after the idle request: the sign's next request went out %s; it "
+                       "sent %r; pushed message on the LEDs %s"
+                       % (x, place, said[:40], "never" if late is None else "%.0f ms after its end" % late))
+        elif late > worst:
+            worst = late
+    print("%d runs; the sign's next request went out: %s"
+          % (len(offsets), ", ".join("%s %d" % kv for kv in sorted(where.items()))))
+    for line in bad[:6]:
+        print("        " + line)
+    check(not bad, "in every run the sign sent only '~' and showed the pushed message (at the "
+                   "latest %.0f ms after the message's last byte); %d runs did not" % (worst, len(bad)))
+
+
 def main():
     args = sys.argv[1:]
     record = None
@@ -535,6 +626,8 @@ def main():
         del args[at:at + 2]
     if len(args) >= 5 and args[0] == "run":
         run(args[1], args[2], args[3], args[4], int(args[5]) if len(args) > 5 else 14430, record)
+    elif len(args) >= 5 and args[0] == "idle":
+        idle(args[1], args[2], args[3], args[4], int(args[5]) if len(args) > 5 else 14430)
     elif len(args) == 3 and args[0] == "check":
         analyse(Dump(args[2]), load_font_std(args[1]))
     else:
