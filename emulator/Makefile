@@ -5,6 +5,10 @@
 #   make run        live terminal view (start ./fake_app.py in another terminal)
 #   make test       the smoke test (no human needed)
 #   make test-ads   only the ads' test: the O and C styles on the real firmware (half a minute)
+#   make test-ads-budget   the same test on images built with a current limit and a ramp (the
+#                   sketch has neither): build/firmware-budget/ and build/firmware-budget-side/
+#   make sign-images   the images for trying the supply's settings on the sign: ramp only, a limit
+#                   only, both, and a limit per side (build/firmware-<name>/)
 #   make clean      delete build/ (third_party/ is kept)
 #
 # Everything is written under build/ and third_party/, both gitignored.
@@ -42,7 +46,7 @@ SIM_WARN  := -w
 EMU_NAMES := main ihex reply ws2812 softuart link view record
 EMU_OBJS  := $(EMU_NAMES:%=$(OBJ)/%.o)
 
-.PHONY: all firmware emu run test test-ads clean
+.PHONY: all firmware firmware-budget sign-images emu run test test-ads test-ads-budget clean
 all: firmware emu
 
 # ---- firmware ---------------------------------------------------------------
@@ -106,6 +110,42 @@ test:
 
 test-ads: all
 	python3 tests/ads_test.py $(EMU) $(FW_HEX) .. $(BUILD)/tests/ads
+
+# The same sketch with the supply's settings on (in the sketch they are all 0 = off), each in its
+# own build tree: build/firmware-<name>/. $(1) = name, $(2) = the settings, separated by ;
+define SIGN_IMAGE
+$(BUILD)/firmware-$(1)/Makefile: firmware/CMakeLists.txt firmware/toolchain.cmake Makefile
+	cmake -S firmware -B $(BUILD)/firmware-$(1) -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Debug \
+	      -DARDUINO_SDK_PATH=$(ARDUINO_SDK) "-DSIGN_FLAGS=$(2)"
+
+.PHONY: firmware-$(1)
+firmware-$(1): $(BUILD)/firmware-$(1)/Makefile
+	$(MAKE) --no-print-directory -C $(BUILD)/firmware-$(1) LED_Marquee
+	@$(AVR_SIZE) $(BUILD)/firmware-$(1)/LED_Marquee.elf
+	@shasum -a 256 $(BUILD)/firmware-$(1)/LED_Marquee.hex
+endef
+
+# Two images for the tests: a limit for the two sides together with a ramp, and a limit per side.
+# The numbers are low so that most of the test's texts are dimmed; they are not a recommendation.
+FW_BUDGET_LIMIT_MA ?= 3000
+FW_BUDGET_RAMP_MS  ?= 100
+FW_BUDGET_SIDE_MA  ?= 1200
+$(eval $(call SIGN_IMAGE,budget,-DLED_CURRENT_LIMIT_MA=$(FW_BUDGET_LIMIT_MA);-DAD_RAMP_MS=$(FW_BUDGET_RAMP_MS)))
+$(eval $(call SIGN_IMAGE,budget-side,-DLED_CURRENT_LIMIT_SIDE_MA=$(FW_BUDGET_SIDE_MA)))
+
+test-ads-budget: emu firmware-budget firmware-budget-side
+	python3 tests/ads_test.py $(EMU) $(BUILD)/firmware-budget/LED_Marquee.hex .. $(BUILD)/tests/ads-budget 14445 \
+	    --limit-ma $(FW_BUDGET_LIMIT_MA) --ramp-ms $(FW_BUDGET_RAMP_MS)
+	python3 tests/ads_test.py $(EMU) $(BUILD)/firmware-budget-side/LED_Marquee.hex .. $(BUILD)/tests/ads-budget-side \
+	    14450 --limit-side-ma $(FW_BUDGET_SIDE_MA)
+
+# Images for trying the settings on the sign. What a setting should be has to be found there.
+$(eval $(call SIGN_IMAGE,ramp100,-DAD_RAMP_MS=100))
+$(eval $(call SIGN_IMAGE,cap6000,-DLED_CURRENT_LIMIT_MA=6000))
+$(eval $(call SIGN_IMAGE,cap6000-ramp100,-DLED_CURRENT_LIMIT_MA=6000;-DAD_RAMP_MS=100))
+$(eval $(call SIGN_IMAGE,side5500,-DLED_CURRENT_LIMIT_SIDE_MA=5500))
+
+sign-images: firmware-ramp100 firmware-cap6000 firmware-cap6000-ramp100 firmware-side5500
 
 clean:
 	cmake -E remove_directory $(BUILD)

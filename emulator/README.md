@@ -310,6 +310,23 @@ type the firmware's `loop()` understands, with a comment on each:
 | `N` | chonky marquee, then stars | `str` |
 | `D` | default marquee, then stars | `str` |
 
+## What a message asks of the supply
+
+`make test-ads` ends with a table: for every message it ran, the most current
+one frame asks for (both sides together, and one side), and the biggest rise
+from one frame to the next. It is an estimate from the LED values the firmware
+sent: 20 mA per colour channel at 255, in proportion to the value. Real LEDs
+draw less at full white, so read it as an upper bound and for comparing
+messages. `tests/ads_test.py --also file.jsonl` adds the messages of another
+list to the run and to the table.
+
+The sketch can hold the `O` and `C` styles under a limit and let a `C` text
+come on over a ramp (`LED_CURRENT_LIMIT_MA`, `LED_CURRENT_LIMIT_SIDE_MA`,
+`AD_RAMP_MS` in `AdDisplay.h`; all 0, off, unless given at build time).
+`make test-ads-budget` builds two images with low limits and runs the same
+test on them with the limits asserted. `make sign-images` builds four images
+for trying on the sign: `ramp100`, `cap6000`, `cap6000-ramp100`, `side5500`.
+
 ## Beat input
 
 The firmware flashes the marquee white on a rising edge of A0 (pin-change
@@ -398,7 +415,7 @@ Seen while building this; the firmware is not changed by this directory.
 
 | | |
 | --- | --- |
-| `Makefile` | `make`, `make firmware`, `make run`, `make test`, `make test-ads`, `make clean` |
+| `Makefile` | `make`, `make firmware`, `make run`, `make test`, `make test-ads`, `make test-ads-budget`, `make sign-images`, `make clean` |
 | `firmware/` | CMake wrapper that builds the unmodified sketch (no upload target) |
 | `fetch_simavr.sh` | clones simavr at the pinned commit into `third_party/` |
 | `src/` | the emulator: `main.c`, `ihex.c` (firmware image reader), `ws2812.c` (LED decoder), `softuart.c` (serial pins and the queue of replies), `reply.c` (cuts the app's bytes into replies), `link.c` (TCP), `view.c` (terminal), `record.c` (GIF, PNG, frames dump) |
@@ -409,7 +426,7 @@ Seen while building this; the firmware is not changed by this directory.
 | `tests/gif_check.py` | what a recording must be, stated from the rules above in exact arithmetic: a strict GIF decoder, and the GIF and PNG pictures and their times against the frames dump |
 | `tests/gif_cases.py`, `tests/gif_case.c` | chosen, random and very long-held pictures through the GIF encoder |
 | `tests/link_test.py` | the serial link's timing model against the real firmware, with clients that come and go |
-| `tests/ads_test.py` | the ads (`O` and `C`) on the real firmware: every frame against `Fonts.h`, both sides equal, 120 columns, the scroll of a text wider than a panel, and `dly` as real time |
+| `tests/ads_test.py` | the ads (`O` and `C`) on the real firmware: every frame against `Fonts.h`, both sides equal, 120 columns, the scroll of a text wider than a panel, `dly` as real time, and what each message asks of the supply (with a limit or a ramp built in: that it is kept) |
 | `tests/record_fail_test.py` | recordings that cannot be created, written or closed |
 | `tests/cli_test.py` | command line values that are refused |
 | `tests/test_ihex.c` | the firmware image reader, built with the address and undefined-behaviour sanitizers |

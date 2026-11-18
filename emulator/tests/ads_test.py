@@ -21,8 +21,21 @@ For every 'O' and 'C' message:
   - from the first frame that shows the complete text (for a long text: its end) to the sign's
     next request is `dly`, within 2 percent or 10 ms, whichever is larger
 
+The supply. For every message the test adds up what each frame asks of the supply, by the model in
+LedBudget.h (20 mA per colour channel at 255, in proportion to the value sent), and prints a table:
+the peak of the two sides together, the peak of one side, and the biggest rise from one frame to
+the next. With the sketch's settings (no limit, no ramp) that table is all; nothing is asserted.
+For an image built with limits or a ramp, say so with the options below, and the test also holds:
+no frame above a limit, a text under the limits untouched LED for LED, a dimmed text at one
+brightness from its first frame to its last (worked out here the slow way, not copied from the
+firmware), and with a ramp no rise between two frames of a chonky text larger than a frame's share
+of its peak plus the wave's own flicker.
+
 usage: ads_test.py <sign-emu> <firmware.hex> <repo root> <work dir> [port]
-Python 3 standard library only. Uses three TCP ports from `port` (default 14440).
+                   [--limit-ma N] [--limit-side-ma N] [--ramp-ms N] [--also playlist.jsonl]
+--also: more messages (one JSON object per line) to run and put in the table, for example the
+sign's own ad list; O and C messages in it get all the checks.
+Python 3 standard library only. Uses five TCP ports from `port` (default 14440).
 """
 import json
 import os
@@ -41,6 +54,8 @@ HEART, VT = 0x7F, 0x0B
 MAX_PAUSE_US = 26
 failures = []
 measured = []            # (style, text, dly asked, hold measured in ms, time on the sign in s)
+supply = []              # (order, label, peak both sides, peak one side, biggest rise both, biggest rise one side) in A
+AMPS = 20.0 / 255 / 1000 # what one unit of load (a value of 1 on one channel of one LED) is in A
 print_lock = threading.Lock()
 
 
@@ -113,7 +128,7 @@ def carried(v):
 # ---- running the emulator ---------------------------------------------------------------------
 class Frame:
     """One latched frame, kept small: a run of the long texts is tens of thousands of them."""
-    __slots__ = ("t", "bits", "clean", "pause", "mask", "colours", "equal")
+    __slots__ = ("t", "bits", "clean", "pause", "mask", "colours", "equal", "load")
 
     def __init__(self, d, cache):
         self.t = d["t"]
@@ -125,6 +140,7 @@ class Frame:
         # One byte per column, bit 7 = top row, like the font data; and each column's colour
         self.mask = mask = [0] * COLS
         self.colours = colours = [None] * COLS
+        load = [0, 0]                             # the values sent, added up, side A and side B
         for r, row in enumerate(rows):
             if row.count("0") == COLS * 6:
                 continue
@@ -133,11 +149,13 @@ class Frame:
                 px = row[c * 6:c * 6 + 6]
                 if px != "000000":
                     mask[c] |= bit
-                    px = cache.setdefault(px, px)
+                    px, value = cache.setdefault(px, (px, int(px[0:2], 16) + int(px[2:4], 16) + int(px[4:6], 16)))
+                    load[c >= PANEL] += value
                     if colours[c] is None:
                         colours[c] = px
                     elif colours[c] is not px:
                         colours[c] = "mixed"
+        self.load = load
 
     def colour(self, c):
         """The colours of the lit LEDs of column c: a set of one 'rrggbb', or of 'mixed'."""
@@ -147,7 +165,7 @@ class Frame:
         return self.equal
 
 
-def run_group(env, name, messages, port):
+def run_group(env, name, messages, port, flags=()):
     """Serves `messages` once. Returns for each message (request time, next request time, frames)."""
     dump = os.path.join(env["work"], name + ".jsonl")
     log = os.path.join(env["work"], name + ".log")
@@ -155,7 +173,7 @@ def run_group(env, name, messages, port):
         emu = subprocess.Popen(
             [env["emu"], "--headless", "--port", str(port), "--wait-client", "30",
              "--until-requests", str(len(messages) + 1), "--duration", "900", "--frames", dump,
-             env["hex"]], stderr=err)
+             *flags, env["hex"]], stderr=err)
     try:
         deadline = time.monotonic() + 30
         while True:
@@ -218,7 +236,73 @@ def text_bytes(message):
 def label(message):
     text = message.get("str", "")
     shown = text if len(text) <= 24 else text[:10] + "..." + text[-8:] + " (%d characters)" % len(text)
-    return "%s %s dly %s" % (message["type"], json.dumps(shown), message.get("dly", "missing"))
+    return "%s %s dly %s%s" % (message["type"], json.dumps(shown), message.get("dly", "missing"),
+                               " " + message["_note"] if "_note" in message else "")
+
+
+def check_table_only(env, message, start, end, frames):
+    """A message that is only run for the table of what it asks of the supply."""
+    supply_row(message, frames)
+    return [label(message), "  ok    ran to its end (%d frames, %.2f s)" % (len(frames), end - start)]
+
+
+# ---- the supply -------------------------------------------------------------------------------------
+def supply_row(message, frames):
+    """Puts a message's row into the table. Returns (peak both sides, peak one side) as loads."""
+    both = [f.load[0] + f.load[1] for f in frames] or [0]
+    one = [max(f.load) for f in frames] or [0]
+    rise_both = max([b - a for a, b in zip([0] + both, both)])
+    rise_one = max([max(g.load[0] - f.load[0], g.load[1] - f.load[1]) for f, g in zip(frames, frames[1:])]
+                   + [one[0]])
+    supply.append((message["_order"], label(message), max(both) * AMPS, max(one) * AMPS, rise_both * AMPS,
+                   rise_one * AMPS))
+    return max(both), max(one)
+
+
+def limit_check(log, env, message, frames):
+    """Every style: the table. O and C on an image with limits: no frame above them."""
+    both, one = supply_row(message, frames)
+    if env["limit_both"]:
+        check(log, both <= env["limit_both"], "no frame asks more than %d mA of the supply, both sides together "
+              "(most: %.0f mA)" % (env["limit_ma"], both * AMPS * 1000))
+    if env["limit_side"]:
+        check(log, one <= env["limit_side"], "no frame asks more than %d mA on one side (most: %.0f mA)"
+              % (env["limit_side_ma"], one * AMPS * 1000))
+
+
+def dimmed(v, scale):
+    return v * (scale + 1) // 256
+
+
+def model_scale(env, cols, r, g, b, wave):
+    """How far a text in this colour must be dimmed (255 = not at all), worked out the slow way:
+    the most LEDs any 60 columns of it light on a side, what each may then send under the limits,
+    and the brightest dimming that sends no more. wave: a chonky text, whose red can be any value
+    and whose green goes out carried."""
+    lit = [bin(v).count("1") for v in cols]
+    most = max([sum(lit[i:i + PANEL]) for i in range(len(lit))] or [0])
+    allowed = 765
+    if most and env["limit_both"]:
+        allowed = min(allowed, env["limit_both"] // (2 * most))
+    if most and env["limit_side"]:
+        allowed = min(allowed, env["limit_side"] // most)
+    best = 0
+    for scale in range(256):
+        red = max(carried(dimmed(v, scale)) for v in range(256)) if wave else carried(dimmed(r, scale))
+        green = carried(dimmed(g, scale)) if wave else dimmed(g, scale)
+        if red + green + carried(dimmed(b, scale)) <= allowed:
+            best = scale
+    return best
+
+
+def ramp_scale(env, scale, frame):
+    """The dimming of frame number `frame` of a chonky text that comes on over the ramp."""
+    n = env["ramp_frames"]
+    return scale if n < 2 or frame + 1 >= n else scale * (frame + 1) // n
+
+
+def dim_note(scale):
+    return "not dimmed" if scale == 255 else "dimmed to %d/256 for the supply's limit" % (scale + 1)
 
 
 def common_checks(log, frames):
@@ -285,9 +369,13 @@ def check_one_by_one(env, message, start, end, frames):
           % (", centred (%d blank columns before)" % pad if width < PANEL else
              ", moved left one column at a time once the next letter does not fit"))
     g = env["gamma"]
-    colour = "%02x%02x%02x" % (carried(g[message["r"]]), g[message["g"]], carried(g[message["b"]]))
+    dim = model_scale(env, whole, g[message["r"]], g[message["g"]], g[message["b"]], False)
+    colour = "%02x%02x%02x" % (carried(dimmed(g[message["r"]], dim)), dimmed(g[message["g"]], dim),
+                               carried(dimmed(g[message["b"]], dim)))
     check(log, all(f.colour(c) <= {colour} for f in frames for c in range(COLS)),
-          "every lit LED is %s: the message's colour as this style has always sent it" % colour)
+          "every lit LED is %s in every frame: the message's colour as this style has always sent it, %s"
+          % (colour, dim_note(dim)))
+    limit_check(log, env, message, frames)
     if width > PANEL:
         # A frame in which the text has moved is the frame before, one column further left: every
         # lit column of that one is found again at its left neighbour. (What may be new is to the
@@ -323,12 +411,14 @@ def check_one_by_one(env, message, start, end, frames):
 
 
 # ---- 'C' ----------------------------------------------------------------------------------------
-def wave_colours_ok(frame, k, dly, green, blue):
-    """Frame k of a position: red is the low byte of dly, less 10 per frame, plus 10 per column."""
+def wave_colours_ok(frame, k, dly, green, blue, dim=255):
+    """Frame k of a position: red is the low byte of dly, less 10 per frame, plus 10 per column.
+    dim: how far this frame is dimmed (255 = not at all)."""
+    green, blue = carried(dimmed(green, dim)), carried(dimmed(blue, dim))
     for c in range(COLS):
         if frame.mask[c]:
-            red = (dly - 10 * k + 10 * (c % PANEL)) & 0xFF
-            if frame.colour(c) != {"%02x%02x%02x" % (carried(red), carried(green), carried(blue))}:
+            red = carried(dimmed((dly - 10 * k + 10 * (c % PANEL)) & 0xFF, dim))
+            if frame.colour(c) != {"%02x%02x%02x" % (red, green, blue)}:
                 return False
     return True
 
@@ -343,24 +433,48 @@ def check_chonky(env, message, start, end, frames):
     if not frames:
         return log
     offset, at_end, moves, pictures, colours = 0, 0, [], True, True
+    dim = model_scale(env, cols, 0, message["g"], message["b"], True)
+    def seen(k, at):
+        """What can be seen of the text at `at` in frame k: a column whose colour comes to nothing
+        (a dimmed text where the wave's red is at 0, the first frame of a ramp) is dark."""
+        d = ramp_scale(env, dim, k)
+        rest = carried(dimmed(message["g"], d)) + carried(dimmed(message["b"], d))
+        return [v if rest or dimmed((dly - 10 * k + 10 * c) & 0xFF, d) else 0 for c, v in enumerate(side(cols, at))]
+
     for k, f in enumerate(frames):
-        if offset < last and f.mask[:PANEL] == side(cols, offset + 1) and f.mask[:PANEL] != side(cols, offset):
+        if offset < last and f.mask[:PANEL] == seen(k, offset + 1) and f.mask[:PANEL] != seen(k, offset):
             offset += 1
             moves.append(f.t)
             if offset == last:
                 at_end = k
-        pictures = pictures and f.mask[:PANEL] == side(cols, offset)
-        colours = colours and wave_colours_ok(f, k, dly, message["g"], message["b"])
+        pictures = pictures and f.mask[:PANEL] == seen(k, offset)
+        colours = colours and wave_colours_ok(f, k, dly, message["g"], message["b"], ramp_scale(env, dim, k))
     check(log, pictures, "every frame is the text as Fonts.h has it, from column 0%s"
           % (", then moved left one column at a time, never back" if last else ""))
     check(log, colours, "the wave: red starts at the low byte of dly, less 10 per frame, plus 10 per "
-          "column; green and blue are the message's; all as this style has always sent them")
+          "column; green and blue are the message's; all as this style has always sent them, %s%s"
+          % (dim_note(dim), ", coming on over %d frames" % env["ramp_frames"] if env["ramp_frames"] > 1 else ""))
+    limit_check(log, env, message, frames)
+    n = env["ramp_frames"]
+    if n > 1 and len(frames) > 2 * n:
+        # Coming on. The steps of the dimming are even, but what is SENT is not: a value that
+        # crosses a power of two goes out half as large again (127 as 127, 128 as 192), so one
+        # step can be a frame's share of the level plus up to a third of the level. On top comes
+        # what the wave itself moves from one frame to the next once the text is fully on.
+        both = [f.load[0] + f.load[1] for f in frames]
+        rises = [b - a for a, b in zip([0] + both, both)]
+        flicker = max(rises[n:] + [0])
+        bound = max(both) / n + max(both) / 3 + flicker
+        check(log, max(rises[:n]) <= bound,
+              "it comes on over %d frames: largest rise between two frames %.2f A of a peak of %.2f A (an even "
+              "ramp would be %.2f A a frame; the carry quirk allows up to %.2f A)"
+              % (n, max(rises[:n]) * AMPS, max(both) * AMPS, max(both) / n * AMPS, bound * AMPS))
     gaps = [(b.t - a.t) * 1000 for a, b in zip(frames, frames[1:])]
     check(log, max(gaps or [0]) <= env["wave"] + 0.5,
           "the wave never stops: no gap between two frames longer than %d ms (longest %.2f ms)"
           % (env["wave"], max(gaps or [0])))
     if last:
-        check(log, offset == last and frames[-1].mask[PANEL - 1] != 0,
+        check(log, offset == last and side(cols, last)[PANEL - 1] != 0,
               "the text moved %d columns and its last lit column is the panel's last" % last)
         held = (moves[0] - frames[0].t) * 1000
         check(log, abs(held - env["hold"]) <= 1, "its start stood still for %.2f ms (AD_SCROLL_HOLD_MS %d)"
@@ -386,6 +500,7 @@ def find(haystack, needle):
 def check_marquee(env, message, start, end, frames, font_name, what, probe):
     """`probe`: how many bytes from the start of the text to look for in one frame."""
     log = [label(message)]
+    supply_row(message, frames)
     font = env[font_name]
     cols = font.columns(text_bytes(message)[:probe])[:-1]
     check(log, any(find(f.mask, [0] + cols + [0]) for f in frames),
@@ -406,6 +521,7 @@ def check_marquee(env, message, start, end, frames, font_name, what, probe):
 
 def check_flashy(env, message, start, end, frames, what):
     log = [label(message)]
+    supply_row(message, frames)
     font, text = env["std"], text_bytes(message)
     cols = font.columns(text)[:-1]
     pad = (PANEL - len(cols)) // 2 if len(cols) < PANEL else 0
@@ -421,6 +537,7 @@ def check_nudge(env, message, start, end, frames):
     log = [label(message)]
     cols = env["chonk"].columns(text_bytes(message))
     common_checks(log, frames)
+    limit_check(log, env, message, frames)
     seen = []
     for f in frames:
         for skip in range(10):
@@ -463,7 +580,24 @@ def long_text(n):
     return out[:-1] + "!" if out.endswith(" ") else out
 
 
+def options(argv):
+    """Takes the --name value pairs out of argv. Returns (the other arguments, {name: value})."""
+    known = {"--limit-ma": 0, "--limit-side-ma": 0, "--ramp-ms": 0, "--also": None}
+    rest, i = [], 0
+    while i < len(argv):
+        if argv[i] in known and i + 1 < len(argv):
+            known[argv[i]] = argv[i + 1] if argv[i] == "--also" else int(argv[i + 1])
+            i += 2
+        elif argv[i].startswith("--"):
+            sys.exit("ads_test.py: unknown option %s\n%s" % (argv[i], __doc__))
+        else:
+            rest.append(argv[i])
+            i += 1
+    return rest, known
+
+
 def main():
+    sys.argv, opts = options(sys.argv)
     if len(sys.argv) < 5:
         sys.exit(__doc__)
     root = sys.argv[3]
@@ -479,7 +613,11 @@ def main():
         "std": Font(std, 5, 7), "chonk": Font(chonk, 8, 8), "gamma": gamma,
         "letter": setting(sketch, "CHARS_ONEBYONE_DELAY"), "step": setting(sketch, "AD_SCROLL_STEP_MS"),
         "hold": setting(sketch, "AD_SCROLL_HOLD_MS"), "wave": setting(sketch, "AD_WAVE_FRAME_MS"),
+        # what the image under test was built with (the sketch itself has no limit and no ramp)
+        "limit_ma": opts["--limit-ma"], "limit_side_ma": opts["--limit-side-ma"],
+        "limit_both": opts["--limit-ma"] * 255 // 20, "limit_side": opts["--limit-side-ma"] * 255 // 20,
     }
+    env["ramp_frames"] = opts["--ramp-ms"] // env["wave"]
     port = int(sys.argv[5]) if len(sys.argv) > 5 else 14440
     os.makedirs(env["work"], exist_ok=True)
 
@@ -529,18 +667,44 @@ def main():
         ({"type": "F", "str": "TEN CHARS!"},
          lambda e, m, s, t, f: check_flashy(e, m, s, t, f, "flashy text as wide as a panel, the same on both sides")),
     ]
-    groups = [("one_by_one", one_by_one), ("chonky", chonky), ("rest", rest)]
+    # The app's own notices (texts and colours from the app's source), for the table of what they
+    # ask of the supply, with all the checks of a chonky text
+    green, red, pink = {"r": 4, "g": 255, "b": 25}, {"r": 239, "g": 12, "b": 29}, {"r": 255, "g": 0, "b": 128}
+    n = lambda s, dly, colour: dict({"type": "C", "str": s, "dly": dly, "scroll": False, "_note": "(app notice)"},
+                                    **colour)
+    notices = [(m, check_chonky) for m in (
+        n("RAVEGPT", 750, green), n("SAYS.", 250, green), n("SAYS..", 250, green), n("SAYS...", 250, green),
+        n(".|    ", 250, pink), n("...|  ", 250, pink), n("......", 150, pink),
+        n("NO", 650, red), n("NO BARS", 650, red), n("TRYING", 400, red), n("AGAIN", 400, red), n("LATER!", 400, red))]
+    # The beat input flashing a marquee white: the largest steps the firmware makes. Table only.
+    beat = [(dict(m, _note="(beat at 128 a minute)"), check_table_only) for m in (
+        {"type": "D", "str": "I LIVE FOR THAT ENERGY"}, {"type": "N", "str": "CHONKY MARQUEE"},
+        {"type": "T", "str": "TRACK ID GOES HERE"})]
+    quiet = [(dict(m, _note="(no beat)"), check_table_only) for m in (
+        {"type": "D", "str": "I LIVE FOR THAT ENERGY"}, {"type": "N", "str": "CHONKY MARQUEE"},
+        {"type": "W", "str": "NEW MSG"}, {"type": "F", "str": "MIC ON"},
+        {"type": "I", "str": "1", "r": 79, "g": 98, "b": 210}, {"type": "I", "str": "2", "r": 79, "g": 98, "b": 210})]
+    groups = [("one_by_one", one_by_one, ()), ("chonky", chonky, ()), ("rest", rest + quiet, ()),
+              ("notices", notices, ()), ("beat", beat, ("--bpm", "128"))]
+    if opts["--also"]:
+        also = []
+        for line in open(opts["--also"], encoding="utf-8"):
+            if line.strip().startswith("{"):
+                m = dict(json.loads(line), _note="(from %s)" % os.path.basename(opts["--also"]))
+                also.append((m, {"O": check_one_by_one, "C": check_chonky}.get(m["type"], check_table_only)
+                             if not m.get("scroll") else check_nudge))
+        groups.append(("also", also, ()))
     results = [None] * len(groups)
     order = 0
-    for _, cases in groups:
+    for _, cases, _ in groups:
         for message, _ in cases:
             message["_order"] = order   # keys starting with "_" are this script's and are not sent
             order += 1
 
     def work(i):
-        name, cases = groups[i]
+        name, cases, flags = groups[i]
         try:
-            runs = run_group(env, name, [m for m, _ in cases], port + i)
+            runs = run_group(env, name, [m for m, _ in cases], port + i, flags)
             logs = []
             for (message, checker), (start, end, frames) in zip(cases, runs):
                 logs += checker(env, message, start, end, frames)
@@ -554,7 +718,7 @@ def main():
         t.start()
     for t in threads:
         t.join()
-    for (name, _), logs in zip(groups, results):
+    for (name, _, _), logs in zip(groups, results):
         print("== %s" % name)
         print("\n".join(logs))
 
@@ -566,6 +730,17 @@ def main():
             shown = text if len(text) <= 30 else "%s... (%d characters)" % (text[:12], len(text))
             print("  %-5s %-34s %9d %12.2f %10.2f s" % (style, json.dumps(shown), dly, hold, total))
             out.write("%s\t%s\t%d\t%d\t%.3f\t%.3f\n" % (style, json.dumps(text), len(text), dly, hold, total))
+
+    print("== what each message asks of the supply (estimate: 20 mA per colour channel at 255; an upper bound)")
+    if env["limit_ma"] or env["limit_side_ma"] or env["ramp_frames"] > 1:
+        print("   this image: limit %d mA both sides, %d mA one side, ramp %d frames"
+              % (env["limit_ma"], env["limit_side_ma"], env["ramp_frames"]))
+    print("  %-52s %10s %10s %14s %14s" % ("message", "peak both", "peak side", "biggest rise", "rise, one side"))
+    with open(os.path.join(env["work"], "supply.tsv"), "w", encoding="utf-8") as out:
+        out.write("message\tpeak_both_A\tpeak_side_A\trise_both_A\trise_side_A\n")
+        for _, name, both, one, rise, rise_one in sorted(supply):
+            print("  %-52s %8.2f A %8.2f A %12.2f A %12.2f A" % (name[:52], both, one, rise, rise_one))
+            out.write("%s\t%.3f\t%.3f\t%.3f\t%.3f\n" % (name, both, one, rise, rise_one))
 
     if failures:
         print("FAILED: %d check(s)" % len(failures))

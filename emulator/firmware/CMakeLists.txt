@@ -26,4 +26,11 @@ set(${CMAKE_PROJECT_NAME}_BOARD uno)
 # CMakeLists.txt; this adds the repo root to that search.
 link_directories(${SIGN_REPO})
 
+# Extra compiler flags for a second image of the same sketch, for example
+# -DCHOOSER_DEBUG_PANEL_B=1 (make firmware-debug). Empty for the image that
+# gets flashed for a show.
+if(SIGN_FLAGS)
+    add_definitions(${SIGN_FLAGS})
+endif()
+
 generate_arduino_firmware(${CMAKE_PROJECT_NAME})
