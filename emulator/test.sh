@@ -11,11 +11,14 @@
 #   3. the command line, and recordings that cannot be written
 #      (tests/cli_test.py, tests/record_fail_test.py)
 #   4. the serial link's timing model against the real firmware, with clients
-#      that come and go (tests/link_test.py)
+#      that come and go (tests/link_test.py); and what fake_app.py --contract 3
+#      writes when it leaves chooser mode, as a listener on the sign's receive
+#      pin decodes it (tests/fake_app_wire_test.py)
 #   5. chooser contract version 3 on the real firmware, if this firmware has it:
 #      a scripted app that pushes (tests/push_test.py), the same against the
 #      bench image (make firmware-debug: its numbers on panel B and its line of
-#      numbers to the app are read and held against the wire), then fake_app.py
+#      numbers to the app are read and held against the wire; and a copy of that
+#      run with panel B left on an older attention must fail), then fake_app.py
 #      --contract 3 at real-time speed, checked the same way
 #
 # The TCP ports can be moved with SIGN_EMU_TEST_PORT (default 14417; the link
@@ -94,17 +97,32 @@ python3 tests/record_fail_test.py build/sign-emu "$HEX" build/tests/recfail
 echo "== serial link timing"
 python3 tests/link_test.py build/sign-emu "$HEX" build/tests/link $((PORT + 1))
 
+# (the link tests are over: their first port is free again)
+contract3=""
 if grep -q CHOOSER_ATTN_FIRST_BYTE_MS ../LED_Marquee.ino; then
+    contract3="--contract3"
+fi
+echo "== the fake app leaving chooser mode: its break and its answer, on the wire"
+python3 tests/fake_app_wire_test.py build/sign-emu "$HEX" build/tests/fake-wire $((PORT + 1)) $contract3
+
+if [ -n "$contract3" ]; then
     echo "== chooser contract 3: a scripted app that pushes"
     python3 tests/push_test.py run build/sign-emu "$HEX" ../Fonts.h build/tests/push $((PORT + 12))
 
     echo "== chooser contract 3: a push moved through an idle sign's own request"
     python3 tests/push_test.py idle build/sign-emu "$HEX" ../Fonts.h build/tests/push-idle $((PORT + 15))
 
+    echo "== chooser contract 3: a pushed message's first byte moved across the sign's request byte"
+    python3 tests/push_test.py cross build/sign-emu "$HEX" ../Fonts.h build/tests/push-cross $((PORT + 15))
+
     echo "== chooser contract 3: the same against the bench image (numbers on panel B and to the app)"
     make --no-print-directory firmware-debug
     python3 tests/push_test.py run --bench build/sign-emu build/firmware-debug/LED_Marquee.hex \
         ../Fonts.h build/tests/push-debug $((PORT + 14))
+
+    echo "== chooser contract 3: the bench check itself (panel B left on an older attention must fail)"
+    python3 tests/push_test.py stuck-panel ../Fonts.h build/tests/push-debug/push.jsonl \
+        build/tests/push-stuck
 
     echo "== chooser contract 3: fake_app.py --contract 3, at real-time speed"
     # The fake app counts this computer's seconds, so the run is paced. Request 1
@@ -125,6 +143,11 @@ if grep -q CHOOSER_ATTN_FIRST_BYTE_MS ../LED_Marquee.ino; then
     cat "$OUT/chooser_push.log"
     if [ "$status" -ne 0 ]; then
         echo "FAILED: sign-emu exited with status $status"
+        exit 1
+    fi
+    # (bytes glued to a break, or anything else the wire did not carry as it was sent)
+    if grep -q WARNING "$OUT/chooser_push.log"; then
+        echo "FAILED: sign-emu warned about this run"
         exit 1
     fi
     python3 tests/push_test.py check ../Fonts.h "$OUT/chooser_push.jsonl"

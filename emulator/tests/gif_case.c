@@ -43,7 +43,8 @@ int main(void)
         if (sscanf(line, "open %399s %399s %d %d %d %lf", gif, dump, &scale, &tick, &band, &gamma) == 6) {
             view_set_gamma(gamma);
             rec_configure(band, scale, tick);
-            if (rec_gif_open(gif) || rec_events_open(dump, "gif_case", "\"rows\":7,\"cols\":120")) {
+            if (rec_gif_open(gif) || rec_events_open(dump, "gif_case", "\"rows\":7,\"cols\":120") ||
+                rec_start()) {
                 fprintf(stderr, "gif_case: recording failed: %s\n", rec_error());
                 return 4;
             }

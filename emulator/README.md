@@ -96,9 +96,23 @@ time; the startup animation takes the first 5.5 s. `--until-disconnect` stops
 it when the app hangs up (`fake_app.py --once` does, at the request after its
 last message).
 
-Every output is created empty before the run, so the emulator refuses, with
-exit status 2 and before it opens anything, an output path that is the
-firmware file or the same file as another output.
+Every output replaces what was in its file, so no output may be the firmware
+file, and no two outputs the same file. Which file is which is decided by the
+file that was opened (its device and inode), never by its path: a link, a
+second name, another spelling, or another case on a volume that ignores case
+are all the same file. Every output is first opened without being emptied; if
+one of them is the firmware or another output the emulator stops with exit
+status 2, having emptied nothing, and removes what it had created. The file
+that standard error goes to counts as one the emulator holds (the report of
+the run is written there); a terminal or `/dev/null` is never a collision.
+Nothing is emptied until the run is about to begin, so a run that cannot start
+(no app connected, the port taken) leaves every file as it was.
+The pictures of `--png-dir` are the emulator's own files in the directory it
+opened. Each is checked as it is made: it is never written through a link,
+never onto a file that has a second name, and never onto a file the emulator
+holds; the run then stops with exit status 4 and that file is not touched.
+(An output that is the picture directory itself is no collision of files but
+an ordinary failure to create it: exit status 4.)
 
 **When each picture is shown.** A GIF cannot time frames finer than 1/100 s,
 and viewers slow down anything under 2/100 s. So the clip is cut into ticks of
@@ -242,7 +256,9 @@ and does not put on the wire:
 
 A push in chooser contract version 3.1 is therefore `@break50`, `@after20` and
 the message, each directive on its own line; leaving chooser mode is
-`@break50` alone. Written in one piece when no
+`@break50` alone, and whatever the peer sends next (the answer to the sign's
+request) gets `@after20` in front, so that nothing follows a break sooner
+than the guard, however soon that request comes. Written in one piece when no
 request is waiting, the break starts at the simulated moment the bytes arrive
 (put `@<ms>` in front to place it later), and the message starts exactly 20 ms
 after the line rises.
@@ -261,8 +277,10 @@ plain number of milliseconds with `break` or `after` or nothing in front of
 it, then a newline, where a reply would start. Anything else that
 starts with `@` (a missing newline, a stray letter) is passed to the sign as
 the bytes it is, from the first byte that shows it is not a directive. A
-mistyped directive is therefore visible on the wire (the sign answers
-`InvalidInput`) and never swallows the replies after it.
+mistyped directive is therefore visible on the wire (the sign does not take
+those bytes for a message: older firmware answers `InvalidInput`, firmware
+with chooser contract 3 lets them go by and asks again) and never swallows
+the replies after it.
 
 **When a client goes away.** A client's connection ends when it closes, when
 a read or write on it fails, or when another client connects (the new one
@@ -341,7 +359,9 @@ The fake app speaks three versions of the chooser contract:
   `--guard-ms` (20), the message. If it is of another type the app has left
   chooser mode: it holds the line LOW and sends nothing, and gives that
   message to the sign's next request (contract 3.1: a push never takes a
-  message from the list). It counts this computer's seconds, so pace the
+  message from the list), no sooner than `--guard-ms` after the line rose,
+  also when that request was already waiting (`--guard-ms` is at least 0.1:
+  with no wait the message is glued to the break). It counts this computer's seconds, so pace the
   emulator, and the break needs the directives:
 
   ```sh
@@ -471,7 +491,8 @@ Seen while building this; the firmware is not changed by this directory.
 | `tests/link_test.py` | the serial link's timing model against the real firmware, with clients that come and go; the line held LOW |
 | `tests/push_test.py` | chooser contract version 3.1 measured on the real firmware: how soon a push is on the LEDs (also one that falls into the sign's own read), how steady the scroll is between pushes, that nothing is sent while a text moves, that a change that was not pushed is found at the next stand-still, that the sign asks when the app leaves chooser mode. `run` plays a scripted app; `check` reads the dump of any run. For the bench image it also reads the numbers on panel B and the lines of numbers sent to the app, and holds them against what was on the wire. Skipped by `test.sh` for firmware without that contract |
 | `tests/record_fail_test.py` | recordings that cannot be created, written or closed |
-| `tests/cli_test.py` | command line values that are refused |
+| `tests/cli_test.py` | command line values that are refused; outputs that are the firmware, the report's file or one another under any name; and that nothing is emptied before the run begins |
+| `tests/fake_app_wire_test.py` | what `fake_app.py --contract 3` writes when it leaves chooser mode, as a listener on the sign's receive pin decodes it: nothing behind a break before the guard |
 | `tests/test_ihex.c` | the firmware image reader, built with the address and undefined-behaviour sanitizers |
 | `tests/test_fake_app.py`, `tests/check_meta.py` | the fake app's checksum and answers; the dump's first line |
 | `docs/demo.gif` | `demo.jsonl` recorded with `--bpm 128 --scale 4 --tick-cs 4` |

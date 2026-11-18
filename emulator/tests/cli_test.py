@@ -66,32 +66,166 @@ def main():
     check(status == 1 and "cannot read" in err,
           "a firmware file that places data outside the flash: exit status 1")
 
-    # Outputs are created empty, so none may be the firmware file and no two the same file.
+    # Which file is which is decided by the opened file (its device and inode), never by a
+    # path: no output may be the firmware, and no two outputs one file, under whatever names.
+    # Every output is opened without being emptied, and nothing is emptied before all are known.
     import shutil
-    copy = os.path.join(work, "same.hex")
-    shutil.copy(hexfile, copy)
-    status, err = run("--duration", "0.01", "--frames", copy, copy)
-    check(status == 2 and "same file" in err
-          and open(copy, "rb").read() == open(hexfile, "rb").read(),
+    ident = os.path.join(work, "ident")
+    shutil.rmtree(ident, ignore_errors=True)
+    os.makedirs(ident)
+    fw = os.path.join(ident, "fw.hex")
+    shutil.copy(hexfile, fw)
+    fw_bytes = open(hexfile, "rb").read()
+
+    def at(*names):
+        return os.path.join(ident, *names)
+
+    def firmware_whole():
+        return open(fw, "rb").read() == fw_bytes
+
+    def refused(status, err):
+        return status == 2 and "same file" in err and "nothing was written" in err
+
+    status, err = run("--duration", "0.01", "--frames", fw, fw)
+    check(refused(status, err) and firmware_whole(),
           "--frames given the firmware file: refused with exit status 2, the firmware untouched")
-    link = os.path.join(work, "link-to-same.hex")
-    if os.path.lexists(link):
-        os.remove(link)
-    os.symlink(os.path.abspath(copy), link)
-    status, err = run("--duration", "0.01", "--record", link, copy)
-    check(status == 2 and "same file" in err
-          and open(copy, "rb").read() == open(hexfile, "rb").read(),
+    os.symlink(os.path.abspath(fw), at("link-to-fw.hex"))
+    status, err = run("--duration", "0.01", "--record", at("link-to-fw.hex"), fw)
+    check(refused(status, err) and firmware_whole(),
           "--record given a link to the firmware file: refused, the firmware untouched")
-    one = os.path.join(work, "one.out")
-    if os.path.exists(one):
-        os.remove(one)
-    status, err = run("--duration", "0.01", "--record", one, "--frames",
-                      os.path.join(work, ".", "one.out"), hexfile)
-    check(status == 2 and "same file" in err and not os.path.exists(one),
+    os.link(fw, at("hard-link-to-fw.hex"))
+    status, err = run("--duration", "0.01", "--frames", at("hard-link-to-fw.hex"), fw)
+    check(refused(status, err) and firmware_whole(),
+          "--frames given a second name (a hard link) of the firmware file: refused, untouched")
+    status, err = run("--duration", "0.01", "--record", at("one.out"), "--frames",
+                      at(".", "one.out"), fw)
+    check(refused(status, err) and not os.path.exists(at("one.out")),
           "--record and --frames on one path (spelled two ways): refused, nothing written")
-    status, err = run("--duration", "0.01", "--record", os.path.join(work, "two.gif"), "--frames",
-                      os.path.join(work, "two.jsonl"), hexfile)
-    check(status == 0, "two different outputs are written as before (status %d)" % status)
+
+    # The gate's four.
+    status, err = run("--duration", "0.01", "--png-dir", at("out"), "--frames",
+                      at("out", "index.tsv"), fw)
+    check(refused(status, err) and not os.path.exists(at("out")),
+          "--png-dir out with --frames out/index.tsv (the file the picture recorder makes in "
+          "its directory): refused, and neither the file nor the directory is left behind "
+          "(status %d: %s)" % (status, err.strip()[:120]))
+    os.makedirs(at("out2"))
+    os.symlink(os.path.abspath(fw), at("out2", "index.tsv"))
+    with open(at("old.gif"), "wb") as f:
+        f.write(b"OLD")
+    status, err = run("--duration", "0.01", "--record", at("old.gif"), "--png-dir", at("out2"), fw)
+    check(refused(status, err) and firmware_whole() and os.path.islink(at("out2", "index.tsv")),
+          "--png-dir whose index.tsv is a link to the firmware: refused, the firmware untouched "
+          "(status %d: %s)" % (status, err.strip()[:120]))
+    check(open(at("old.gif"), "rb").read() == b"OLD",
+          "and the --record file of that command, which was there before and is no part of the "
+          "collision, was not emptied: nothing is emptied before every output is known")
+    with open(at("Probe"), "w"):
+        pass
+    if os.path.exists(at("probe")):
+        status, err = run("--duration", "0.01", "--record", at("Run.out"), "--frames",
+                          at("run.out"), fw)
+        check(refused(status, err) and not os.path.exists(at("Run.out")),
+              "--record Run.out --frames run.out on this volume, which ignores case: one file, "
+              "refused, nothing written (status %d: %s)" % (status, err.strip()[:120]))
+    else:
+        status, err = run("--duration", "0.01", "--record", at("Run.out"), "--frames",
+                          at("run.out"), fw)
+        check(status == 0 and os.path.exists(at("Run.out")) and os.path.exists(at("run.out")),
+              "--record Run.out --frames run.out on this volume, which keeps case apart: two "
+              "files, both written")
+    os.symlink("target.gif", at("dangling"))             # a link to a file that is not there
+    status, err = run("--duration", "0.01", "--record", at("target.gif"), "--frames",
+                      at("dangling"), fw)
+    check(refused(status, err) and not os.path.exists(at("target.gif"))
+          and os.path.islink(at("dangling")),
+          "--frames given a dangling link to the --record file: refused, nothing written "
+          "(status %d: %s)" % (status, err.strip()[:120]))
+    os.symlink("target2.jsonl", at("dangling2"))
+    status, err = run("--duration", "0.01", "--record", at("dangling2"), "--frames",
+                      at("target2.jsonl"), fw)
+    check(refused(status, err) and not os.path.exists(at("target2.jsonl"))
+          and os.path.islink(at("dangling2")),
+          "the same with the link first (the file is created through it): refused, and the "
+          "file it made is removed again (status %d: %s)" % (status, err.strip()[:120]))
+
+    # The pictures the PNG recorder makes are its own files in its own directory. Each is
+    # checked as it is made: never written through a link, never onto a file that has a second
+    # name, never onto a file the emulator holds.
+    os.makedirs(at("out3"))
+    os.symlink(os.path.abspath(fw), at("out3", "t00000.000.png"))
+    status, err = run("--duration", "0.05", "--png-dir", at("out3"), fw)
+    check(status == 4 and "is a link" in err and firmware_whole(),
+          "--png-dir where the first picture's name is a link to the firmware: the run stops "
+          "with exit status 4 and the firmware is untouched (status %d: %s)"
+          % (status, [l for l in err.splitlines() if "RECORDING" in l][:1]))
+    os.makedirs(at("out3h"))
+    os.link(fw, at("out3h", "t00000.000.png"))
+    status, err = run("--duration", "0.05", "--png-dir", at("out3h"), fw)
+    check(status == 4 and "same file" in err and firmware_whole(),
+          "the same with a second name (a hard link) of the firmware: exit status 4, the "
+          "firmware untouched (status %d: %s)"
+          % (status, [l for l in err.splitlines() if "RECORDING" in l][:1]))
+    os.makedirs(at("out4"))
+    with open(at("four.jsonl"), "w"):
+        pass
+    os.link(at("four.jsonl"), at("out4", "t00000.000.png"))
+    status, err = run("--duration", "0.05", "--png-dir", at("out4"), "--frames", at("four.jsonl"), fw)
+    try:
+        first = open(at("four.jsonl"), encoding="utf-8").readline()
+    except (OSError, UnicodeDecodeError):
+        first = ""
+    check(status == 4 and "same file" in err and first.startswith('{"type":"meta"'),
+          "--png-dir where the first picture's name is a second name of the --frames file: the "
+          "run stops with exit status 4 and the frames dump is still a frames dump")
+    os.makedirs(at("out5"))
+    os.symlink("../elsewhere.bin", at("out5", "t00000.000.png"))
+    status, err = run("--duration", "0.05", "--png-dir", at("out5"), fw)
+    check(status == 4 and "is a link" in err and not os.path.exists(at("elsewhere.bin"))
+          and os.path.islink(at("out5", "t00000.000.png")),
+          "--png-dir where the first picture's name is a link to a file that is not there: no "
+          "picture is made outside the directory; exit status 4 (status %d)" % status)
+
+    # The run's report goes to standard error. An output that is that file is refused too.
+    with open(at("report.jsonl"), "wb") as report:
+        p = subprocess.run([emu, "--headless", "--port", "0", "--duration", "0.01", "--frames",
+                            at("report.jsonl"), fw], stdout=subprocess.PIPE, stderr=report, timeout=60)
+    said = open(at("report.jsonl"), encoding="utf-8", errors="replace").read()
+    check(p.returncode == 2 and "same file" in said and '"type":"meta"' not in said,
+          "--frames given the file that standard error goes to: refused with exit status 2, "
+          "no dump written into the report (status %d)" % p.returncode)
+    status, err = run("--duration", "0.01", "--record", "/dev/null", "--frames", "/dev/null", fw)
+    check(status == 0, "two outputs on /dev/null are no collision: nothing there to mix up "
+                       "(status %d)" % status)
+
+    # Nothing is emptied before the run begins: an output that was there keeps its contents
+    # when the run cannot start for another reason (here: the TCP port is taken).
+    import socket
+    taken = socket.socket()
+    taken.bind(("127.0.0.1", 0))
+    taken.listen(1)
+    with open(at("kept.jsonl"), "wb") as f:
+        f.write(b"KEPT")
+    p = subprocess.run([emu, "--headless", "--port", str(taken.getsockname()[1]), "--duration", "0.01",
+                        "--frames", at("kept.jsonl"), "--record", at("never.gif"), fw],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    taken.close()
+    check(p.returncode == 1 and b"cannot listen" in p.stderr
+          and open(at("kept.jsonl"), "rb").read() == b"KEPT" and not os.path.exists(at("never.gif")),
+          "the TCP port is taken: exit status 1, the --frames file that was there keeps its "
+          "contents, and the --record file that was not there is not left behind (status %d)"
+          % p.returncode)
+
+    # And what is no collision works as before.
+    with open(at("two.jsonl"), "wb") as f:
+        f.write(b"x" * 300000)                        # longer than the dump that replaces it
+    status, err = run("--duration", "0.01", "--record", at("two.gif"), "--frames",
+                      at("two.jsonl"), "--png-dir", at("two"), fw)
+    lines = open(at("two.jsonl"), "rb").read().splitlines()
+    check(status == 0 and firmware_whole() and lines[0].startswith(b'{"type":"meta"')
+          and lines[-1].startswith(b'{"type":"end"') and os.path.exists(at("two", "index.tsv")),
+          "three different outputs are written (status %d), and a file that was there before "
+          "is replaced whole: nothing of its old contents is left behind the new" % status)
 
     # The largest values together. The latch time of a whole second means no
     # frame latches in this short run; the GIF must still be the right size

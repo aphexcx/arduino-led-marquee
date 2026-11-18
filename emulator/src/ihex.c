@@ -37,12 +37,10 @@ static int read_record(const char *line, uint8_t b[260])
 // linear address (04) records. Start-address records (03, 05) carry nothing
 // to load and are skipped. Anything that would land outside mem is an error,
 // and so is a file without an end-of-file record: a file cut short must not
-// load as a smaller firmware.
-long load_ihex(const char *path, uint8_t *mem, size_t cap)
+// load as a smaller firmware. Reads from f's position to its end record and
+// leaves f open.
+long load_ihex_file(FILE *f, uint8_t *mem, size_t cap)
 {
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return -1;
     char line[600];
     uint64_t base = 0;
     long top = 0;
@@ -83,6 +81,15 @@ long load_ihex(const char *path, uint8_t *mem, size_t cap)
     }
     if (ferror(f) || !ended)
         ok = 0;                          // a read error, or a file cut short: no end record
-    fclose(f);
     return ok ? top : -1;
+}
+
+long load_ihex(const char *path, uint8_t *mem, size_t cap)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return -1;
+    long top = load_ihex_file(f, mem, cap);
+    fclose(f);
+    return top;
 }

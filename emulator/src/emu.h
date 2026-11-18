@@ -31,6 +31,8 @@ static inline double cycles_to_s(uint64_t c) { return (double) c / F_CPU_HZ; }
 // highest byte loaded, or -1 if the file cannot be read, is malformed, or
 // places data outside mem.
 long load_ihex(const char *path, uint8_t *mem, size_t cap);
+// The same from a file that is already open (it is left open).
+long load_ihex_file(FILE *f, uint8_t *mem, size_t cap);
 
 // ---- ws2812.c -------------------------------------------------------------
 typedef struct {
@@ -99,7 +101,7 @@ void reply_init(int directives);
 void reply_reset(void);
 // A new request, or the wait for the last one's answer ran out: the next
 // reply starts from outside any JSON object. drop_delay also forgets a
-// directive's delay or gap that was waiting for a reply.
+// directive's delay that was waiting for a reply (not a gap, "@after").
 void reply_new_exchange(int drop_delay);
 void reply_feed(const uint8_t *buf, size_t len, reply_cb_t cb, void *param);
 void reply_flush(reply_cb_t cb, void *param);
@@ -152,10 +154,25 @@ void view_close(void);
 // Before any output is opened: layout (1 = one 120 x 7 band, 0 = two stacked
 // sides), screen pixels per LED, and the GIF/PNG tick in 1/100 s.
 void rec_configure(int band, int scale, int tick_cs);
-// The three opens return 0, or -1 with the reason in rec_error().
+// Which file is which is decided by the opened file, never by its path.
+// A file the emulator holds open that is not one of these outputs (the
+// firmware it reads, where its report goes), open on fd: no output may be it.
+// 0, or -1 if it cannot be identified.
+int rec_hold_input(int fd, const char *what);
+// The three opens only open: each output is opened without being emptied and
+// refused if it is a file already held (an input, or another output, under
+// whatever name). They return 0, or -1 with the reason in rec_error();
+// rec_same_file() says whether the reason is "the same file twice".
 int rec_gif_open(const char *path);
 int rec_png_open(const char *dir);
 int rec_events_open(const char *path, const char *firmware, const char *settings_json);
+int rec_same_file(void);
+// After the opens: rec_start() if all of them returned 0 (only now is
+// anything emptied and written; 0, or -1 with the reason in rec_error()),
+// rec_abandon() if one did not (closes them untouched and removes what this
+// run created for them).
+int rec_start(void);
+void rec_abandon(void);
 void rec_frame(const image_t *img, uint64_t latch_cycle, const ws_frame_info_t *info);
 void rec_event(const char *type, uint64_t cycle, const char *extra_json);
 int rec_close(uint64_t end_cycle);            // 0, or -1 if any output failed

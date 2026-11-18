@@ -1,7 +1,7 @@
 // sign-emu: runs the sign's real firmware image on a simulated ATmega328P
 // (simavr) and shows what the LEDs would show. See ../README.md.
 #include <errno.h>
-#include <limits.h>
+#include <fcntl.h>
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
@@ -9,7 +9,6 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include <sys/stat.h>
 
 #include "emu.h"
 #include "avr_ioport.h"
@@ -361,33 +360,6 @@ static void no_sleep(avr_t *a, avr_cycle_count_t how_long)
 }
 
 // ---- main -------------------------------------------------------------------
-// True when two paths name the same file: the same existing file (also by a
-// link), or, for one that does not exist yet, the same name in the same
-// directory.
-static int same_file(const char *a, const char *b)
-{
-    struct stat sa, sb;
-    int ea = stat(a, &sa) == 0, eb = stat(b, &sb) == 0;
-    if (ea && eb)
-        return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
-    if (ea != eb)
-        return 0;
-    char da[PATH_MAX], db[PATH_MAX], ra[PATH_MAX], rb[PATH_MAX];
-    snprintf(da, sizeof(da), "%s", a);
-    snprintf(db, sizeof(db), "%s", b);
-    char *sla = strrchr(da, '/'), *slb = strrchr(db, '/');
-    const char *na = sla ? sla + 1 : a, *nb = slb ? slb + 1 : b;
-    if (strcmp(sla ? sla + 1 : da, slb ? slb + 1 : db) != 0)
-        return 0;
-    (void) na;
-    (void) nb;
-    if (sla) *sla = 0;
-    if (slb) *slb = 0;
-    if (!realpath(sla ? (da[0] ? da : "/") : ".", ra) || !realpath(slb ? (db[0] ? db : "/") : ".", rb))
-        return !strcmp(a, b);
-    return !strcmp(ra, rb);
-}
-
 // A number option. Anything that is not a number in [min, max] is refused
 // here, with the range, so that no later conversion to an integer type, a
 // cycle count or a file field can overflow or be given nonsense.
@@ -471,20 +443,19 @@ int main(int argc, char **argv)
     if (!opt.speed_set)
         opt.speed = opt.headless ? 0 : 1;
 
-    // Outputs are created empty before the run. So none of them may be the
-    // firmware file, and no two of them the same file: checked before anything
-    // is opened.
-    {
-        const char *path[] = { opt.hex, opt.gif, opt.events, opt.png_dir };
-        const char *what[] = { "the firmware file", "--record", "--frames", "--png-dir" };
-        for (int i = 0; i < 4; i++)
-            for (int j = i + 1; j < 4; j++)
-                if (path[i] && path[j] && same_file(path[i], path[j])) {
-                    fprintf(stderr, "sign-emu: %s and %s are the same file (%s): nothing was "
-                                    "written\n", what[i], what[j], path[j]);
-                    return 2;
-                }
+    // The firmware is opened once and read from that descriptor, which stays
+    // open to the end of the run: the file the outputs are compared with
+    // (record.c, "whose file is whose") is the file that was loaded.
+    int hex_fd = open(opt.hex, O_RDONLY);
+    FILE *hex_file = hex_fd >= 0 ? fdopen(hex_fd, "r") : NULL;
+    if (!hex_file || rec_hold_input(hex_fd, "the firmware file") != 0) {
+        fprintf(stderr, "sign-emu: cannot read Intel HEX file %s\n", opt.hex);
+        return 1;
     }
+    // The report of the run goes to standard error: an output that is that
+    // very file would have the report written into it. (No matter if there
+    // is no standard error to identify.)
+    rec_hold_input(STDERR_FILENO, "standard error (this report)");
 
     // The simulated chip.
     avr = avr_make_mcu_by_name("atmega328p");
@@ -501,7 +472,7 @@ int main(int argc, char **argv)
     avr->sleep = no_sleep;
     static uint8_t flash[32768];
     memset(flash, 0xff, sizeof(flash));
-    long size = load_ihex(opt.hex, flash, sizeof(flash));
+    long size = load_ihex_file(hex_file, flash, sizeof(flash));
     if (size <= 0) {
         fprintf(stderr, "sign-emu: cannot read Intel HEX file %s\n", opt.hex);
         return 1;
@@ -534,11 +505,11 @@ int main(int argc, char **argv)
         avr_cycle_timer_register(avr, g_beat_period, beat_timer, NULL);
     }
 
-    if ((opt.gif && rec_gif_open(opt.gif)) || (opt.png_dir && rec_png_open(opt.png_dir))) {
-        fprintf(stderr, "sign-emu: recording failed: %s\n", rec_error());
-        return EXIT_RECORDING;
-    }
-    if (opt.events) {
+    // The outputs. Each is opened without being emptied and must be a file of
+    // its own: not the firmware, not another output, under whatever name.
+    // Only when all of them are open and all differ is anything emptied.
+    int refused = (opt.gif && rec_gif_open(opt.gif)) || (opt.png_dir && rec_png_open(opt.png_dir));
+    if (!refused && opt.events) {
         char settings[512];
         int n = snprintf(settings, sizeof(settings),
                  "\"f_cpu\":16000000,\"rows\":%d,\"cols\":%d,"
@@ -548,12 +519,19 @@ int main(int argc, char **argv)
                  ROWS, COLS, PANEL_COLS, opt.reset_us, opt.latency_ms, opt.bpm);
         if (n < 0 || n >= (int) sizeof(settings)) {
             fprintf(stderr, "sign-emu: internal error: settings do not fit the meta line\n");
+            rec_abandon();
             return 1;
         }
-        if (rec_events_open(opt.events, opt.hex, settings)) {
-            fprintf(stderr, "sign-emu: recording failed: %s\n", rec_error());
-            return EXIT_RECORDING;
+        refused = rec_events_open(opt.events, opt.hex, settings) != 0;
+    }
+    if (refused) {
+        rec_abandon();
+        if (rec_same_file()) {
+            fprintf(stderr, "sign-emu: %s: nothing was written\n", rec_error());
+            return 2;
         }
+        fprintf(stderr, "sign-emu: recording failed: %s\n", rec_error());
+        return EXIT_RECORDING;
     }
 
     signal(SIGINT, on_signal);
@@ -565,6 +543,7 @@ int main(int argc, char **argv)
         link_on_change(on_link_change);
         if (link_listen(opt.port)) {
             fprintf(stderr, "sign-emu: cannot listen on 127.0.0.1:%d: %s\n", opt.port, strerror(errno));
+            rec_abandon();
             return 1;
         }
         if (opt.wait_client_s > 0) {
@@ -574,9 +553,17 @@ int main(int argc, char **argv)
                 ;
             if (!link_connected()) {
                 fprintf(stderr, "sign-emu: no app connected within %d s\n", opt.wait_client_s);
+                rec_abandon();
                 return 1;
             }
         }
+    }
+
+    // The run begins: only now are the outputs emptied and begun. (Whatever
+    // stopped it before this left every file as it was.)
+    if (rec_start()) {
+        fprintf(stderr, "sign-emu: recording failed: %s\n", rec_error());
+        return EXIT_RECORDING;
     }
 
     if (!opt.headless)

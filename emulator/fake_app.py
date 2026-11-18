@@ -14,6 +14,11 @@ is up the playlist moves on and the app says so unasked:
     waits (--guard-ms) and sends the new message
   - to a message of any other type (it has left chooser mode): it holds the
     line LOW and sends nothing. The sign asks, and that request gets the message.
+Nothing ever leaves behind a break before the wait is over (contract 3.1, rule
+4): the answer to a request that is already waiting when the app leaves
+chooser mode, or that comes in while the line is still LOW, is held back by
+--guard-ms like a pushed message. (Glued to the break, its first byte would
+have no start edge and the sign could not find it.)
 The break is a link directive, so the emulator must run with
 --link-directives; and the time is this computer's, so run the emulator with
 --speed 1.
@@ -48,6 +53,7 @@ import time
 
 REQUEST_NEXT = ord("~")
 REQUEST_POLL = ord("?")
+MIN_GUARD_MS = 0.1      # --guard-ms: the least the line is HIGH between a break and what follows
 
 
 def crc16_ccitt_false(data):
@@ -136,6 +142,7 @@ class App:
         self.chooser_left = 0            # contract 2: requests it stays selected for
         self.chooser_until = 0.0         # contract 3: when (self.clock) the playlist moves on
         self.held = None                 # contract 3: the message it left chooser mode for, not sent yet
+        self.guard_owed = False          # contract 3: a break went out with nothing behind it yet
         self.clock = time.monotonic      # a test puts its own clock here
         self.last_sent = None
         self.start = time.monotonic()
@@ -243,8 +250,10 @@ class App:
         if message is None:
             return None, None
         self.select_v3(message)
+        self.guard_owed = False          # (a push begins with a break of its own)
         if self.chooser is None:
             self.held = message
+            self.guard_owed = True       # whatever is sent next waits out the guard
             data = ("@break%s\n" % directive_number(self.args.break_ms)).encode("ascii")
             return data, ("line LOW %s ms and nothing behind it: chooser mode is over, the sign "
                           "will ask" % directive_number(self.args.break_ms))
@@ -253,6 +262,16 @@ class App:
             directive_number(self.args.break_ms), directive_number(self.args.guard_ms),
             encode(message).decode("ascii"))
 
+    def behind_break(self, data):
+        """Contract version 3.1, rule 4: nothing leaves before break + guard. If the last thing
+        the app put on the line was a break with nothing behind it, these bytes are the first
+        behind it: they get the wait in front (for the emulator: no sooner than --guard-ms
+        after the item before ended, which costs nothing when that was long ago)."""
+        if not self.guard_owed:
+            return data
+        self.guard_owed = False
+        return ("@after%s\n" % directive_number(self.args.guard_ms)).encode("ascii") + data
+
     def on_request(self, request):
         """Everything the app writes when it reads a request byte, in order, as a list of
         (bytes, text for the log). None when the playlist is finished.
@@ -260,7 +279,8 @@ class App:
         (the app never answers with a message it no longer holds, and never pushes behind a
         stale answer). If that change pushed a chooser message, the push is the answer: a
         request gets at most one frame. If the app left chooser mode instead (the line LOW,
-        no frame), the request is answered with the message it left for."""
+        no frame), the request is answered with the message it left for, the guard after
+        the break first (behind_break)."""
         out = []
         if self.args.contract == 3:
             push, shown = self.push_due()
@@ -273,7 +293,10 @@ class App:
         reply, shown = self.answer(request)
         if reply is None:
             return out or None
-        out.append((reply, "sign asked %s  ->  %s" % (chr(request), shown)))
+        guarded = self.behind_break(reply)
+        if guarded is not reply:
+            shown += " (no sooner than %s ms after the line rose)" % directive_number(self.args.guard_ms)
+        out.append((guarded, "sign asked %s  ->  %s" % (chr(request), shown)))
         return out
 
     def answer(self, request):
@@ -337,7 +360,8 @@ class App:
             if not select.select([sock], [], [], wait)[0]:
                 push, shown = self.push_due()
                 if push is not None:
-                    sock.sendall(push)   # one write: break, wait and message arrive together
+                    sock.sendall(push)   # (the emulator places the wait behind the break itself,
+                                         # in however many pieces this arrives)
                     self.log("pushed unasked  ->  %s" % shown)
                 elif self.finished:
                     self.log("the chooser's time is up; playlist finished")
@@ -390,8 +414,9 @@ def main():
     p.add_argument("--break-ms", type=float, default=50,
                    help="--contract 3: how long a push holds the line LOW (default 50)")
     p.add_argument("--guard-ms", type=float, default=20,
-                   help="--contract 3: the wait between the end of the break and the message "
-                        "(default 20)")
+                   help="--contract 3: the wait between the end of a break and whatever the app "
+                        "sends next: the pushed message, or, after it left chooser mode, the "
+                        "answer to the sign's request (default 20)")
     p.add_argument("--idle", default='{"type":"S","str":"","stars":20}',
                    help="what to answer when there is no playlist and nothing typed")
     p.add_argument("-q", "--quiet", action="store_true")
@@ -400,8 +425,10 @@ def main():
         p.error("give a playlist file, or --interactive, or both")
     if not 0 < args.chooser_seconds <= 86400:
         p.error("--chooser-seconds is more than 0")
-    if not 0.001 <= args.break_ms <= 60000 or not 0 <= args.guard_ms <= 60000:
-        p.error("--break-ms is 0.001 to 60000 and --guard-ms 0 to 60000")
+    if not 0.001 <= args.break_ms <= 60000 or not MIN_GUARD_MS <= args.guard_ms <= 60000:
+        # (with no wait at all the message is glued to the break: the line does not rise in
+        # between, its first byte has no start edge and the sign cannot find it)
+        p.error("--break-ms is 0.001 to 60000 and --guard-ms %g to 60000" % MIN_GUARD_MS)
     try:
         json.loads(args.idle)
     except json.JSONDecodeError as e:

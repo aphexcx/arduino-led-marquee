@@ -8,6 +8,7 @@ Python 3 standard library only.
 """
 import argparse
 import os
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -113,11 +114,22 @@ def main():
     got = answers(a, "~~~")
     check(got == [b_msg, a_msg, pick1],
           "the message it left chooser mode for goes to the sign's next request, once")
-    a.args.break_ms, a.args.guard_ms = 12.5, 0
+    a.args.break_ms, a.args.guard_ms = 12.5, 0.25
     now[0] += 10
     push, _ = a.push_due()
-    check(push.startswith(b"@break12.5\n@after0\n{"),
-          "--break-ms and --guard-ms are written as plain decimal numbers (%r)" % push[:22])
+    check(push.startswith(b"@break12.5\n@after0.25\n{"),
+          "--break-ms and --guard-ms are written as plain decimal numbers (%r)" % push[:25])
+    refused = []
+    for guard in ("0", "0.0004", "-1"):
+        p = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(fake_app.__file__)),
+                                                         "fake_app.py"),
+                            "--contract", "3", "--guard-ms", guard, os.path.join(work, "playlist.jsonl")],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        if p.returncode == 2 and b"--guard-ms" in p.stderr:
+            refused.append(guard)
+    check(refused == ["0", "0.0004", "-1"],
+          "a guard of nothing (0, or too small to be written as more than 0) is refused on the "
+          "command line: the message would be glued to the break (%s)" % ", ".join(refused))
 
     print("contract version 3: a change that is overdue when a request is read")
     now = [500.0]
@@ -134,11 +146,41 @@ def main():
           "the next request is answered with the new selection")
     now[0] += 6.1                        # the app leaves chooser mode, a request is waiting
     got = a.on_request(ord("~"))
-    check([g[0] for g in got] == [b"@break50\n", b_msg.encode("ascii")],
-          "leaving chooser mode with a request waiting: the line LOW, then that request is "
-          "answered with the message it left for (%r)" % [g[0] for g in got])
+    check([g[0] for g in got] == [b"@break50\n", b"@after20\n" + b_msg.encode("ascii")],
+          "leaving chooser mode with a request waiting: the line LOW, then, no sooner than the "
+          "guard after it, that request is answered with the message it left for (%r)"
+          % [g[0] for g in got])
     got = a.on_request(ord("~"))
-    check([g[0] for g in got] == [a_msg.encode("ascii")], "and nothing is sent twice")
+    check([g[0] for g in got] == [a_msg.encode("ascii")],
+          "and nothing is sent twice; a later answer carries no guard")
+
+    print("contract version 3: nothing leaves behind a break before the guard")
+    now = [900.0]
+    a = app(work, [a_msg, pick1[:-1] + ',"_seconds":2.5}', b_msg, pick1, pick2], 3)
+    a.clock = lambda: now[0]
+    answers(a, "~~")
+    now[0] += 2.6                        # nothing to read: the run loop finds the change due
+    push, _ = a.push_due()
+    got = a.on_request(ord("~"))         # and the sign's request comes in right behind the break
+    check(push == b"@break50\n" and [g[0] for g in got] == [b"@after20\n" + b_msg.encode("ascii")],
+          "the app leaves chooser mode with no request waiting (the line LOW, nothing behind "
+          "it); the next request, whenever it comes, is answered behind the guard (%r)"
+          % [g[0] for g in got])
+    got = a.on_request(ord("~"))
+    check([g[0] for g in got] == [pick1.encode("ascii")], "the answer after that carries no guard")
+    now[0] += 6.1
+    push, _ = a.push_due()
+    got = a.on_request(ord("~"))
+    check(push == b"@break50\n@after20\n" + pick2.encode("ascii")
+          and [g[0] for g in got] == [pick2.encode("ascii")],
+          "a pushed message has its guard between its break and itself, and owes none to the "
+          "answer behind it")
+    got = []
+    for version in (1, 2):
+        a = app(work, [a_msg, pick1[:-1] + ',"_seconds":2.5,"_polls":1}', b_msg], version)
+        got += [a.on_request(ord(r)) for r in "~~?~?~"]
+    check(len(got) == 12 and all(len(g) == 1 and b"@" not in g[0][0] for g in got),
+          "contract versions 1 and 2 send no break and no directive at all (%d answers)" % len(got))
 
     if failures:
         print("FAILED: %d fake app check(s)" % len(failures))

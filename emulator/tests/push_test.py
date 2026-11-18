@@ -6,7 +6,13 @@ measured on the real firmware.
   and its digits on panel B are then REQUIRED; without --bench they must be absent.
 
   push_test.py font <Fonts.h>
-      The checker's own reading of the font (the 7-column heart, the vertical tab).
+      The checker's own reading of the font (the 7-column heart, the vertical tab) and of
+      a text that looks the same at many scroll positions.
+
+  push_test.py stuck-panel <Fonts.h> <frames.jsonl of a --bench run> <work dir>
+      The bench checker, checked: copies of that dump in which panel B stays on the
+      attention before (in every frame; in every frame but the last; and together with
+      the sign's own line of numbers) must each fail.
 
   push_test.py run <sign-emu> <firmware.hex> <Fonts.h> <work dir> [port] [--record out.gif]
       A scripted app: a 64-character chooser message pushed just as the sign
@@ -28,6 +34,21 @@ measured on the real firmware.
       show the pushed message, soon, and never send anything but '~' (a
       message read from its middle makes it send "InvalidInput" and flash that
       for seven seconds).
+
+  push_test.py cross <sign-emu> <firmware.hex> <Fonts.h> <work dir> [port]
+      The same, aimed at one moment: the pushed message's first bit is moved
+      across the sign's own request byte in steps of 0.1 ms, from 1 ms before
+      the request to 1 ms after it (the sign was drawing all through the break
+      and cannot know a message is coming). While the sign sends a byte it
+      cannot receive one. The sign must still end on the message without an
+      error; and when the message begins after the request has gone out, it
+      must be read as it comes, with no second request. When the message's
+      first byte overlaps the request byte, its start is lost. How the sign
+      then comes by the message is the firmware's choice (it may ask again
+      once the message has gone by; or let its request stand, find it
+      unanswered, and get the message with its next one), so those runs are
+      held to this only: no error text, and the message on the LEDs within
+      6 s of its end.
 
 The checks, all from the dump (sign-emu --frames):
   - a push is on the LEDs within 150 ms of the end of its break
@@ -85,17 +106,30 @@ class Message:
         self.scrolls = view > 0 and len(text_cols) > view
         self.cycle = len(text_cols) + GAP_COLS
         head = count_cols + [0]
-        self.pictures = {}
+        self.pictures = {}        # picture -> EVERY scroll position that looks like it, ascending
         if self.scrolls:
             strip = text_cols + [0] * GAP_COLS
             for pos in range(self.cycle):
                 picture = (head + [strip[(pos + v) % self.cycle] for v in range(view)])[:PANEL]
-                self.pictures.setdefault(tuple(picture), pos)
+                self.pictures.setdefault(tuple(picture), []).append(pos)
         else:
             # one that fits blinks: the text as it is, or faded to black
             for body in (text_cols, []):
                 picture = (head + body + [0] * PANEL)[:PANEL]
-                self.pictures.setdefault(tuple(picture), 0)
+                self.pictures[tuple(picture)] = [0]
+
+    def position(self, picture, after=None):
+        """Where the scroll is when the LEDs show this picture. A text that repeats itself (64
+        times 'A') looks the same at many positions, so the picture alone does not say; the
+        frame before does. `after` is the position that frame showed, given only when it
+        showed this same message and nothing came between the two (no other frame, no
+        attention). If the scroll's next step looks like this picture, that is where it is.
+        Otherwise the message was drawn afresh: from its start if the picture is the start's,
+        else at the first position that looks like it."""
+        places = self.pictures[picture]
+        if after is not None and (after + 1) % self.cycle in places:
+            return (after + 1) % self.cycle
+        return places[0]
 
     def name(self):
         return '"%s" %s' % (self.text if len(self.text) <= 24 else self.text[:21] + "...", self.count)
@@ -204,9 +238,13 @@ def analyse(dump, font, expect=None, bench=False):
         if any(f.mask[PANEL:]) and not (bench and panel_b_numbers(f)):
             continue               # something else on panel B: not the chooser
         picture = tuple(f.mask[:PANEL])
-        hits = [(m, m.pictures[picture]) for m in messages.values() if picture in m.pictures]
+        hits = [m for m in messages.values() if picture in m.pictures]
         if len(hits) == 1 and f.d["bits"] in ((PANEL * 24, BENCH_COLS) if bench else (PANEL * 24,)):
-            seen.append((i, hits[0][0], hits[0][1]))
+            m, after = hits[0], None
+            if seen and seen[-1][0] == i - 1 and seen[-1][1] is m and \
+                    not any(in_gap(dump, i - 1, i, b) for b in dump.breaks):
+                after = seen[-1][2]    # the frame just before: the same message, undisturbed
+            seen.append((i, m, m.position(picture, after)))
     check(len(seen) > 50, "frames that show a chooser message, as Fonts.h draws it: %d" % len(seen))
     if not seen:
         return
@@ -223,11 +261,13 @@ def analyse(dump, font, expect=None, bench=False):
              if i in shown and f.d["bits"] == PANEL * 24]
     if bench:
         longer = [f for i, f in enumerate(dump.frames) if i in shown and f.d["bits"] == BENCH_COLS]
-        check(bool(longer) and all(panel_b_numbers(f) for i, f in enumerate(dump.frames) if i in shown),
+        check(bool(longer) and bool(sixty)
+              and all(panel_b_numbers(f) for i, f in enumerate(dump.frames) if i in shown),
               "the bench build: chooser frames are 60 columns (%.3f to %.3f ms), but for %d of 119 "
               "that bring the four numbers on panel B up to date (%.3f ms); panel B shows "
               "numbers and nothing else"
-              % (min(sixty), max(sixty), len(longer), max(f.d["send_us"] for f in longer) / 1000.0))
+              % (min(sixty, default=0), max(sixty, default=0), len(longer),
+                 max((f.d["send_us"] for f in longer), default=0) / 1000.0))
     else:
         check(not any(any(f.mask[PANEL:]) for f in inside),
               "every chooser frame is panel A only: 1440 bits per strip (60 columns), clocked out "
@@ -301,6 +341,11 @@ def analyse(dump, font, expect=None, bench=False):
     check(bool(pushes),
           "%d of them are followed by a message unasked; its first start bit is due %s ms "
           "after the break ended" % (len(pushes), ", ".join("%g" % g for g in guards)))
+    behind = [min((e["due"] for e in dump.rx if e["due"] >= b["cycle"]), default=None) for b in dump.breaks]
+    glued = [b for b, due in zip(dump.breaks, behind) if due is not None and due < b["end"] + CYCLES_PER_MS // 10]
+    check(not glued, "whatever followed a break (a pushed message, or the answer to the sign's "
+                     "request) began no sooner than a tenth of a millisecond after the line rose: "
+                     "nothing is glued to a break (%d are)" % len(glued))
     # 10 bit times a byte, each edge at the nearest whole cycle
     check(all(abs((z["due"] - a["due"]) - round((dump.rx.index(z) - dump.rx.index(a)) * 100000 / 9))
               <= 1 for _, (a, z, _) in pushes),
@@ -359,6 +404,21 @@ def analyse(dump, font, expect=None, bench=False):
     # ---- the bench build's own account, against the wire ------------------------
     if bench:
         print("the bench build's numbers (ms as the sign counted them)")
+        def counted(b):
+            """True if the sign must have counted break b as an attention: the chooser was on
+            the LEDs when the line fell, and the sign was not in a read of its own (a break
+            that falls into a read is received as a 0x00 and stepped over, not counted)."""
+            last_frame = [i for i, f in enumerate(dump.frames) if began(f) <= b["t"] + 0.001]
+            if not last_frame or last_frame[-1] not in shown:
+                return False
+            asks = [d for d in dump.tx if d["cycle"] < b["cycle"]]
+            if asks:
+                answered = any(o[0]["cycle"] > asks[-1]["cycle"] and o[1]["cycle"] < b["cycle"]
+                               for o in objects)
+                if not answered and b["cycle"] - asks[-1]["cycle"] < 1000 * CYCLES_PER_MS:
+                    return False
+            return True
+
         numbered = [n[0] for _, n in dump.said]
         check(numbered == list(range(len(numbered))),
               "%d lines to the app, each 27 characters and the '~' that was due anyway, numbered "
@@ -371,9 +431,16 @@ def analyse(dump, font, expect=None, bench=False):
             if b is None:
                 check(False, "%s at t=%.3f s follows an attention" % (line, first_char["t"]))
                 continue
+            # The two counters, from the wire: the breaks so far that the sign must have counted
+            # as attentions (in these runs every attention is a break), and those of them with
+            # no message behind (each ends in a fallback to '~').
+            want_att = len([x for x in before if counted(x)])
+            want_falls = len([x for x in before if counted(x) and any(x is lb for lb, _, _ in leaves)])
             # The sign first sees the line LOW at most one step after it fell.
-            ok = b["ms"] - STEP_MS - 1 <= low_ms <= b["ms"] + 1 and falls <= att <= len(before)
-            told = "the line LOW for %g ms (seen for %d)" % (b["ms"], low_ms)
+            ok = b["ms"] - STEP_MS - 1 <= low_ms <= b["ms"] + 1 and \
+                att == want_att % 100 and falls == want_falls % 100
+            told = "attention number %d, %d of them with no message behind; the line LOW for %g " \
+                   "ms (seen for %d)" % (want_att, want_falls, b["ms"], low_ms)
             if frame:
                 to_first = (frame[0][0]["cycle"] + 1111 - b["cycle"]) / CYCLES_PER_MS
                 to_end = (frame[0][1]["cycle"] + 11112 - b["cycle"]) / CYCLES_PER_MS
@@ -385,11 +452,32 @@ def analyse(dump, font, expect=None, bench=False):
                 ok = ok and f_ms == 0 and e_ms == 0
                 told += ", no message behind it (000 and 000)"
             check(ok, "t=%.3f s  %s  on the wire: %s" % (first_char["t"], line, told))
-            shown_b = [panel_b_numbers(dump.frames[i]) for i, _, _ in seen
-                       if dump.frames[i].t < first_char["t"]]
-            if shown_b and shown_b[-1][2] == att:
-                check(shown_b[-1] == [f_ms, e_ms, att, falls],
-                      "            and panel B showed the same: %03d %03d %02d %02d" % tuple(shown_b[-1]))
+            # Panel B and this line must tell of the SAME break: the chooser frames the sign
+            # drew after it had seen this break (begun after the line fell) and before it sent
+            # the line. The first of them is the long frame that brings panel B up to date,
+            # and from it on EVERY one of them shows the line's four numbers, the count of
+            # attentions too: a panel left on an older attention, in any of those frames, is a
+            # failure, whatever its other numbers.
+            # (A read at a stand-still that went unanswered between that break and the line
+            # would put one fallback more into the line than into the frames before it. No
+            # run here has one.)
+            tied = [i for i, _, _ in seen if began(dump.frames[i]) > b["t"] + 0.001
+                    and dump.frames[i].t < first_char["t"]]
+            if not tied:
+                print("            (the sign drew no chooser frame between that break and this "
+                      "line: there was no frame to bring panel B up to date)")
+                continue
+            want = [f_ms, e_ms, att, falls]
+            wrong = [i for i in tied if panel_b_numbers(dump.frames[i]) != want]
+            shown_b = panel_b_numbers(dump.frames[wrong[0] if wrong else tied[-1]])
+            check(not wrong and dump.frames[tied[0]].d["bits"] == BENCH_COLS,
+                  "            and panel B tells of the same break: the first chooser frame "
+                  "after it is the long one that brings the numbers up to date, and all %d "
+                  "before this line show %03d %03d %02d %02d%s"
+                  % (len(tied), want[0], want[1], want[2], want[3],
+                     "" if not wrong else " (%d do not: at t=%.3f s panel B shows %s)"
+                     % (len(wrong), dump.frames[wrong[0]].t,
+                        "something else" if shown_b is None else "%03d %03d %02d %02d" % tuple(shown_b))))
 
     # ---- what the sign sent ---------------------------------------------------
     print("requests")
@@ -504,8 +592,11 @@ def run(emu, hexfile, font_path, work, port, record, bench):
         # the app is on a fourth message that it never pushed. 3 s later it leaves chooser
         # mode: the line LOW, and nothing behind it.
         b"@batch\n" + four + b"@3000\n@break50\n@end\n",
-        # request 3 (the sign asking, because no message followed that attention)
-        bye,
+        # request 3 (the sign asking, because no message followed that attention). It is the
+        # first thing the app sends behind that break, so the guard stands in front of it:
+        # nothing leaves behind a break sooner (here the break is long over, and it changes
+        # nothing).
+        b"@after20\n" + bye,
     ]
     flags = ["--headless", "--port", str(port), "--wait-client", "30", "--link-directives",
              "--until-requests", str(len(plan) + 1), "--duration", "120", "--frames", dump]
@@ -551,18 +642,31 @@ def run(emu, hexfile, font_path, work, port, record, bench):
              "guard_ms": 20}, bench)
 
 
-def idle(emu, hexfile, font_path, work, port):
+def idle(emu, hexfile, font_path, work, port, cross=False):
     os.makedirs(work, exist_ok=True)
     font = load_font_std(font_path)
     obj = {"type": "H", "str": "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG AND KEEPS ON RUNNING",
            "flashy": "1/4"}
     frame = json.dumps(obj, separators=(",", ":")).encode("ascii")
     message = Message(font, obj)
-    worst, where, bad = 0.0, {}, []
+    worst, worst_overlapping, where, bad = 0.0, 0.0, {}, []
     offsets = list(range(3340, 3520, 6))
+    crossed = {"overlapping it": 0, "before it": 0, "after it": 0}
+    period_ms = 0.0
+    again_after = []
+    if cross:
+        # When does an idle sign ask again? One run without a push tells (the run repeats exactly).
+        dump = os.path.join(work, "idle-alone.jsonl")
+        with open(os.path.join(work, "idle-alone.log"), "w") as err:
+            subprocess.run([emu, "--headless", "--port", "0", "--duration", "10", "--frames", dump,
+                            hexfile], stderr=err, check=True)
+        asks = Dump(dump).all_tx
+        period_ms = (asks[1]["cycle"] - asks[0]["cycle"]) / CYCLES_PER_MS
+        # the message's first start bit falls 70 ms after the break begins (50 + 20)
+        offsets = [round(period_ms - 70 + k / 10.0, 2) for k in range(-10, 11)]
     for x in offsets:
-        dump = os.path.join(work, "idle%d.jsonl" % x)
-        with open(os.path.join(work, "idle%d.log" % x), "w") as err:
+        dump = os.path.join(work, "idle%s.jsonl" % x)
+        with open(os.path.join(work, "idle%s.log" % x), "w") as err:
             proc = subprocess.Popen([emu, "--headless", "--port", str(port), "--wait-client", "30",
                                      "--link-directives", "--duration", "15", "--frames", dump,
                                      hexfile], stderr=err)
@@ -590,7 +694,14 @@ def idle(emu, hexfile, font_path, work, port):
                         seen += 1
                         if seen == 1:
                             # no answer to this request; x ms after it, the push
-                            sock.sendall(b"@%d\n@break50\n@after20\n" % x + frame)
+                            sock.sendall(("@%s\n@break50\n@after20\n" % x).encode("ascii") + frame)
+                        elif cross and seen == 2 and x + 70 > period_ms - 0.35:
+                            # This request was on the wire before the pushed message was
+                            # written out: the push is its answer, it gets no other
+                            # (one request, at most one frame). (When the message began
+                            # well before the sign was due to ask, the sign hears it going
+                            # by, waits, and asks after it: that request is answered.)
+                            sock.sendall(b"@none\n")
                         else:
                             # the app holds the same chooser message for every later request
                             sock.sendall(frame)
@@ -618,10 +729,24 @@ def idle(emu, hexfile, font_path, work, port):
         else:
             place = "not at all (it saw the line LOW and listened)"
         where[place] = where.get(place, 0) + 1
-        if set(said) != {"~"} or late is None or late > 400:
-            bad.append("push %d ms after the idle request: the sign's next request went out %s; it "
+        how = None
+        if cross and second:
+            first_bit = [e for e in d.rx if e["byte"] == ord("{")][0]["due"]
+            ask, byte_cycles = second[0]["cycle"], 11112
+            how = ("before it" if first_bit + byte_cycles <= ask else
+                   "after it" if first_bit >= ask + byte_cycles else "overlapping it")
+            crossed[how] += 1
+            asks_after = len([e for e in d.all_tx if e["cycle"] > ask])
+            if how == "after it" and asks_after:
+                again_after.append("%s ms" % x)
+        # (a message whose first byte overlapped the sign's request has lost its start: see above)
+        limit = 6000 if how == "overlapping it" else 400
+        if set(said) != {"~"} or late is None or late > limit:
+            bad.append("push %s ms after the idle request: the sign's next request went out %s; it "
                        "sent %r; pushed message on the LEDs %s"
                        % (x, place, said[:40], "never" if late is None else "%.0f ms after its end" % late))
+        elif how == "overlapping it":
+            worst_overlapping = max(worst_overlapping, late)
         elif late > worst:
             worst = late
     print("%d runs; the sign's next request went out: %s"
@@ -629,7 +754,17 @@ def idle(emu, hexfile, font_path, work, port):
     for line in bad[:6]:
         print("        " + line)
     check(not bad, "in every run the sign sent only '~' and showed the pushed message (at the "
-                   "latest %.0f ms after the message's last byte); %d runs did not" % (worst, len(bad)))
+                   "latest %.0f ms after the message's last byte%s); %d runs did not"
+          % (worst, "; %.0f ms when its first byte overlapped the sign's request and was lost"
+             % worst_overlapping if crossed["overlapping it"] else "", len(bad)))
+    if cross:
+        check(crossed["overlapping it"] >= 5 and crossed["after it"] >= 3,
+              "the message's first byte fell %s of the sign's request byte"
+              % ", ".join("%s in %d runs" % (k, v) for k, v in crossed.items()))
+        check(not again_after,
+              "a message that began after the request had gone out was read as it came: no "
+              "second request (%d runs asked again%s)"
+              % (len(again_after), ": " + ", ".join(again_after[:5]) if again_after else ""))
 
 
 def font_check(font_path):
@@ -647,6 +782,91 @@ def font_check(font_path):
           "a chooser message with a heart in it has its pictures (%d)" % len(m.pictures))
     check(len(text_columns(font, "caf\xe9")) == 23, "a byte outside the font counts as a space")
 
+    # A text that repeats itself looks the same at many scroll positions.
+    m = Message(font, {"type": "H", "str": "A" * 64, "flashy": "1/4"})
+    at = {pos: picture for picture, places in m.pictures.items() for pos in places}
+    steady = list(range(m.cycle)) + [0, 1, 2]        # once round, and on
+    got, after = [], None
+    for pos in steady:
+        after = m.position(at[pos], after)
+        got.append(after)
+    wrong = [(want, g) for want, g in zip(steady, got) if want != g]
+    check(len(m.pictures[at[6]]) > 1 and len(at) == m.cycle and not wrong,
+          "64 times 'A': the picture at position 6 is also the picture at %d other positions, "
+          "and a steady scroll is still read as positions 0, 1, 2, ... once round and on "
+          "(%d of %d read wrong%s)"
+          % (len(m.pictures[at[6]]) - 1, len(wrong), len(steady),
+             ": position %d read as %d" % wrong[0] if wrong else ""))
+    check(m.position(at[12], None) == 0 and m.position(at[12], 3) == 0 and m.position(at[4], None) == 4,
+          "drawn afresh (after an attention, or as the first frame) such a picture is the "
+          "start of the text; one that is not the start's is where it first looks like that")
+
+
+def stuck_panel(font_path, bench_dump, work):
+    """The bench checker, checked. Three copies of the bench run's dump, each wrong in one way
+    about the last push that the sign's first line of numbers tells of:
+      1. panel B stays on the attention before, in every frame from that push to the line
+      2. the same in every frame but the last one before the line
+      3. panel B stays on the attention before AND the line itself counts one attention fewer
+         (a build whose counter is stuck: panel and line agree with each other, not with the wire)
+    The checker must fail each copy, on exactly the check that is meant to catch it."""
+    import contextlib
+    import io
+    os.makedirs(work, exist_ok=True)
+    font = load_font_std(font_path)
+    dump = Dump(bench_dump)
+    lines = open(bench_dump, encoding="utf-8").read().splitlines()
+    first_char, numbers = dump.said[0]
+    b = [x for x in dump.breaks if x["cycle"] < first_char["cycle"]][-1]
+    # the line's "aNN": the two digits 16 and 17 characters behind its '#'
+    at = dump.all_tx.index(first_char)
+    counter_digits = {dump.all_tx[at + 16]["cycle"]: "%02d" % (numbers[3] - 1),
+                      dump.all_tx[at + 17]["cycle"]: "%02d" % (numbers[3] - 1)}
+    counter_digits = {c: text[k] for k, (c, text) in enumerate(sorted(counter_digits.items()))}
+
+    def copy_of(name, keep_last, stale_line):
+        out, old_rows, changed = [], None, []
+        for line in lines:
+            d = json.loads(line)
+            if d["type"] == "frame":
+                started = d["t"] - d["send_us"] / 1e6 - 0.00005
+                if started <= b["t"] + 0.001:
+                    old_rows = d["rows"]
+                elif d["t"] < first_char["t"] and old_rows is not None and \
+                        d["bits"] in (PANEL * 24, BENCH_COLS):      # (not the blanking of the strip)
+                    d["rows"] = [new[:PANEL * 6] + old[PANEL * 6:] for new, old in zip(d["rows"], old_rows)]
+                    changed.append((len(out), line))
+                    line = json.dumps(d, separators=(",", ":"))
+            elif d["type"] == "tx" and stale_line and d["cycle"] in counter_digits:
+                d["char"] = counter_digits[d["cycle"]]
+                d["byte"] = ord(d["char"])
+                line = json.dumps(d, separators=(",", ":"))
+            out.append(line)
+        if keep_last and changed:
+            out[changed[-1][0]] = changed[-1][1]
+        path = os.path.join(work, name + ".jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(out) + "\n")
+        before = len(failures)
+        with contextlib.redirect_stdout(io.StringIO()):     # (its report is about the bad copy)
+            analyse(Dump(path), font, None, True)
+        found = failures[before:]
+        del failures[before:]
+        return len(changed), [t.strip() for t in found]
+
+    n, found = copy_of("stuck-panel", False, False)
+    check(n > 10 and len(found) == 1 and "panel B tells of the same break" in found[0],
+          "panel B left on the attention before (%d frames put back): fails the bench check, "
+          "on exactly that (%s)" % (n, [t[:60] for t in found]))
+    n, found = copy_of("stuck-panel-but-last", True, False)
+    check(n > 10 and len(found) == 1 and "panel B tells of the same break" in found[0],
+          "the same in every frame but the last before the line: fails, on exactly that (%s)"
+          % [t[:60] for t in found])
+    n, found = copy_of("stuck-counter", False, True)
+    check(n > 10 and len(found) == 1 and "on the wire: attention number" in found[0],
+          "panel B and the line both one attention behind the wire: fails, on the line's "
+          "count (%s)" % [t[:40] for t in found])
+
 
 def main():
     args = sys.argv[1:]
@@ -663,8 +883,11 @@ def main():
             bench)
     elif len(args) == 2 and args[0] == "font":
         font_check(args[1])
-    elif len(args) >= 5 and args[0] == "idle":
-        idle(args[1], args[2], args[3], args[4], int(args[5]) if len(args) > 5 else 14430)
+    elif len(args) == 4 and args[0] == "stuck-panel":
+        stuck_panel(args[1], args[2], args[3])
+    elif len(args) >= 5 and args[0] in ("idle", "cross"):
+        idle(args[1], args[2], args[3], args[4], int(args[5]) if len(args) > 5 else 14430,
+             args[0] == "cross")
     elif len(args) == 3 and args[0] == "check":
         analyse(Dump(args[2]), load_font_std(args[1]), None, bench)
     else:

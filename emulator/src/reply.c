@@ -17,7 +17,11 @@
 //                 break). It is an item of its own, in its place in the stream:
 //                 a "@<ms>" or "@after<ms>" line in front of it applies to it.
 //   @after<ms>\n  the next item (a reply or a break) starts no sooner than <ms>
-//                 milliseconds after the item before it ended
+//                 milliseconds after the item before it ended. It waits for that
+//                 item however long it takes to come: it is about the wire (the
+//                 guard behind a break), not about the request that was open
+//                 when it was sent, so it outlives that request's wait and a
+//                 "@none". Only the connection's end drops it.
 //   @batch\n      in front of a reply: the clock stays held for the request
 //   @end\n        after that reply, until this line has arrived. Everything in
 //                 between is then placed with the clock standing still, however
@@ -187,11 +191,15 @@ static void end_directive(reply_cb_t cb, void *param)
     g.in_directive = 0;
     g.directive_n = 0;
     if (kind == D_NONE) {
+        // A reply of no bytes. Waiting whitespace stays, and so does a gap
+        // that is waiting for the next item: this is no item.
+        int has_after = g.has_after;
+        double after_ms = g.after_ms;
         g.has_delay = 0;
         g.delay_ms = 0;
-        g.has_after = 0;
-        g.after_ms = 0;
-        hand_over(cb, param, 0, 1, 0);   // a reply of no bytes; waiting whitespace stays
+        hand_over(cb, param, 0, 1, 0);
+        g.has_after = has_after;
+        g.after_ms = after_ms;
     } else if (kind == D_BREAK) {
         // Not a reply: a request that is waiting for its answer goes on
         // waiting. Waiting whitespace stays for the reply that follows.
@@ -240,7 +248,9 @@ void reply_feed(const uint8_t *buf, size_t len, reply_cb_t cb, void *param)
 // the last one. Whatever JSON object was open is over as far as finding the
 // end of the next reply goes: without this, one reply cut short (inside a
 // string, say) would leave every later reply looking unfinished. A delay
-// given for a reply that then did not come in time is dropped with it.
+// given for a reply that then did not come in time is dropped with it. A gap
+// ("@after") is not: the item it was sent in front of may still come, while
+// the break it is the guard for is still on the wire.
 void reply_new_exchange(int drop_delay)
 {
     g.depth = 0;
@@ -249,8 +259,6 @@ void reply_new_exchange(int drop_delay)
     if (drop_delay) {
         g.has_delay = 0;
         g.delay_ms = 0;
-        g.has_after = 0;
-        g.after_ms = 0;
     }
 }
 
