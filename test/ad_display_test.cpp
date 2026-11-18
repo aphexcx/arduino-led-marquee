@@ -286,19 +286,28 @@ static int modelScale(const std::vector<uint8_t>& cols, int r, int g, int b, boo
             }
         }
         int green = wave ? modelCarried(modelDim(g, scale)) : modelDim(g, scale);
-        // the brightest dimming up to which everything fits: a ramp passes through all those below it
-        if (red + green + modelCarried(modelDim(b, scale)) > allowed) break;
+        if (red + green + modelCarried(modelDim(b, scale)) > allowed) {
+            // A chonky text with a ramp passes through all the dimmings below its own: it has to
+            // stay below the first that is too bright. Any other text is only shown at its own
+            // dimming: the brightest that fits is the one.
+            if (wave && RAMP_FRAMES > 1) break;
+            continue;
+        }
         best = scale;
     }
     (best < 255 ? dimmedRuns : undimmedRuns)++;
     return best;
 }
 
-// The dimming of frame number `frame` of a chonky text that comes on over the ramp
+// The dimming of a frame in part number `frame` of the ramp over which a chonky text comes on
 static int modelRamp(int scale, size_t frame) {
     if (RAMP_FRAMES < 2 || frame + 1 >= (size_t) RAMP_FRAMES) return scale;
     return scale * (int) (frame + 1) / RAMP_FRAMES;
 }
+
+// The ramp is a stretch of time, cut into parts as long as a frame of the wave: the part a frame
+// is in comes from when it is drawn, counted from the message's first frame.
+static size_t modelRampPart(uint64_t sinceStartUs) { return (size_t) (sinceStartUs / (AD_WAVE_FRAME_MS * 1000)); }
 
 // ---------------------------------------------------------------------------------------------
 // Running a message
@@ -529,16 +538,21 @@ static void testOneByOneLong() {
 // dly, less 10 per frame, plus 10 per column; green and blue are the message's; green starts with
 // the carry, as this style always sent it.
 // `dim` is how far this frame is dimmed (255 = not at all).
-static void checkWaveFrame(const Frame& f, const std::vector<uint8_t>& text, size_t offset, unsigned int dly, size_t k,
-                           int dim) {
-    assert(rowsOfSide(f, 0) == modelSide(text, offset, 0));
+static bool waveFrameIs(const Frame& f, const std::vector<uint8_t>& text, size_t offset, unsigned int dly, size_t k,
+                        int dim) {
+    if (rowsOfSide(f, 0) != modelSide(text, offset, 0)) return false;
     for (size_t c = 0; c < 120; c++) {
         const Led& led = f.cols[c];
         if (!led.row) continue;
-        assert(led.r == modelDim((uint8_t) (dly - 10 * k + 10 * (c % 60)), dim));
-        assert(led.g == modelDim(161, dim) && led.b == modelDim(242, dim));
-        assert(led.carry == 1);
+        if (led.r != modelDim((uint8_t) (dly - 10 * k + 10 * (c % 60)), dim)) return false;
+        if (led.g != modelDim(161, dim) || led.b != modelDim(242, dim) || led.carry != 1) return false;
     }
+    return true;
+}
+
+static void checkWaveFrame(const Frame& f, const std::vector<uint8_t>& text, size_t offset, unsigned int dly, size_t k,
+                           int dim) {
+    assert(waveFrameIs(f, text, offset, dly, k, dim));
 }
 
 static void checkChonky(const std::string& text, unsigned int dly) {
@@ -591,7 +605,10 @@ static void checkChonky(const std::string& text, unsigned int dly) {
         // a text that fits: a frame every 10 ms for as long as it stays (1000 ms: 100 frames, as before)
         size_t expected = dly < 6 ? 1 : (dly - 6) / 10 + 1;
         assert(r.frames.size() == expected || r.frames.size() == expected + 1);
-        if (dly == 1000) assert(r.frames.size() == 1000 / AD_WAVE_FRAME_MS);
+        // 1000 ms: the first frame is out FRAME_US after its start and the hold ends 1000 ms after
+        // that; a frame is drawn every AD_WAVE_FRAME_MS as long as 6 ms are left for it. At 10 ms
+        // that is frames at 0 to 990 ms: 100, as it always was. (At 12 ms: 0 to 996, 84.)
+        if (dly == 1000) assert(r.frames.size() == (1000 * 1000 + FRAME_US - 6000) / (AD_WAVE_FRAME_MS * 1000) + 1);
     }
 }
 
@@ -683,9 +700,14 @@ static void checkNudge(const std::string& text, unsigned int dly) {
         // position has no next one: every frame that is left must be its own)
         while (k < r.frames.size() &&
                (n == 0 || skip + 1 == positions || rowsOfSide(r.frames[k], 0) != modelSide(cols, skip + 1, 0))) {
-            // the wave starts again at every position; the text comes on once per message: the
-            // ramp counts the message's frames and goes on across positions
-            checkWaveFrame(r.frames[k], cols, skip, dly, n, modelRamp(dim, k));
+            // The wave starts again at every position. The text comes on once per message, over
+            // the ramp's TIME: the positions of a nudge neither start it again nor, when their
+            // frames come faster than the wave's (a dly of 0: one every 5 ms), hurry it. The frame
+            // is drawn FRAME_US before it is out; a frame right on the edge of two parts of the
+            // ramp may be in either.
+            const uint64_t drawn = r.frames[k].sentUs - FRAME_US - r.startUs;
+            assert(waveFrameIs(r.frames[k], cols, skip, dly, n, modelRamp(dim, modelRampPart(drawn > 100 ? drawn - 100 : 0))) ||
+                   waveFrameIs(r.frames[k], cols, skip, dly, n, modelRamp(dim, modelRampPart(drawn + 100))));
             k++;
             n++;
         }

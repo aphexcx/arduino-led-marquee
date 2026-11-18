@@ -43,6 +43,9 @@ static inline uint8_t ledScaled(uint8_t v, uint8_t scale) {
 
 // A value after the sign's brightness shift (the 'B' utility message: every value is shifted
 // right by it before it is sent).
+// The sketch never stores a shift above 8 (BRIGHTNESS_SHIFT_MAX): the handler of the message
+// brings the number into 0 to 8 before it stores it, and the sender and this estimate both read
+// that stored value. At 8 nothing is left of a value.
 static inline uint8_t ledShifted(uint8_t v, uint8_t shift) {
     return shift >= 8 ? 0 : (uint8_t) (v >> shift);
 }
@@ -83,15 +86,20 @@ static inline uint16_t ledAllowance(uint16_t litPerSide, uint32_t limitBoth, uin
 }
 
 // The brightest dimming (0 to 255, 255 = not dimmed) up to which an LED of this colour sends no
-// more than `allowed` (see ledAllowance): at the dimming returned AND AT EVERY DIMMING BELOW IT.
-// The second half matters because what is sent does not fall evenly with the dimming (12 goes out
-// as 14, 11 as 15): a text that comes on over a ramp passes through the dimmings below its own,
-// and none of those frames may be over the limit either. 255 when nothing has to be dimmed.
+// more than `allowed` (see ledAllowance). 255 when nothing has to be dimmed.
+// What is sent does not fall evenly with the dimming (12 goes out as 14, 11 as 15). A text that
+// comes on over a ramp passes through the dimmings below its own, and none of those frames may be
+// over the limit either: for such a text the answer is the brightest dimming at which it fits
+// AND AT EVERY DIMMING BELOW IT.
 // `shift` is the sign's brightness shift at the moment (0 = none): a text that the shift already
 // brings under the limit is not dimmed a second time.
+// `everyDimmingBelow`: true for a picture that passes through the dimmings below its own (a text
+// that comes on over a ramp, a fade). Then the answer is the brightest dimming BELOW WHICH EVERY
+// DIMMING FITS, see above. False for a picture that is only ever shown at its own dimming: then it
+// is simply the brightest dimming that fits.
 // Under 1 ms on the sign; call it before a message's first frame.
 static inline uint8_t ledBudgetScale(uint16_t allowed, uint8_t r, uint8_t g, uint8_t b, bool waveRed,
-                                     bool greenCarried, uint8_t shift) {
+                                     bool greenCarried, uint8_t shift, bool everyDimmingBelow) {
     if (allowed >= 765) {
         return 255; // no limit that an LED could reach: nothing to search for
     }
@@ -103,7 +111,10 @@ static inline uint8_t ledBudgetScale(uint16_t allowed, uint8_t r, uint8_t g, uin
             redMax = carried;
         }
         if (ledSent(r, g, b, (uint8_t) scale, waveRed, greenCarried, redMax, shift) > allowed) {
-            break; // the first dimming that is too bright: stay below it
+            if (everyDimmingBelow) {
+                break; // the first dimming that is too bright: stay below it
+            }
+            continue;  // this one does not fit; a brighter one still may (11 goes out as 15, 12 as 14)
         }
         best = (uint8_t) scale;
     }
@@ -112,12 +123,21 @@ static inline uint8_t ledBudgetScale(uint16_t allowed, uint8_t r, uint8_t g, uin
 
 // The dimming of frame number `frame` (0 = the first) of a text that comes up over `rampFrames`
 // frames to `scale`: frame 0 has one part in rampFrames, the last frame of the ramp and every
-// frame after it the whole. rampFrames 0 or 1: no ramp.
+// frame after it the whole. rampFrames 0 or 1: no ramp. ("Frame" is a place in time: the ramp's
+// time cut into as many parts. A text whose frames come faster or slower than that still comes on
+// over the ramp's time: see ledRampFrame.)
 static inline uint8_t ledRampScale(uint8_t scale, uint8_t frame, uint8_t rampFrames) {
     if (rampFrames == 0 || frame >= rampFrames - 1) {
         return scale;
     }
     return (uint8_t) (((uint16_t) scale * (uint16_t) (frame + 1)) / rampFrames);
+}
+
+// Which part of the ramp a frame belongs to that is drawn `elapsed` after the text first came on
+// (elapsed and partTicks in the same unit of time, partTicks > 0). From rampFrames on the ramp is over.
+static inline uint8_t ledRampFrame(uint32_t elapsed, uint32_t partTicks, uint8_t rampFrames) {
+    uint32_t frame = elapsed / partTicks;
+    return frame >= rampFrames ? rampFrames : (uint8_t) frame;
 }
 
 #endif //LED_MARQUEE_LEDBUDGET_H

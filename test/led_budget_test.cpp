@@ -103,24 +103,34 @@ static uint16_t slowSent(uint8_t r, uint8_t g, uint8_t b, uint8_t scale, bool wa
 
 static void checkScale(uint16_t allowed, uint8_t r, uint8_t g, uint8_t b, bool waveRed, bool greenCarried,
                        int shift = 0) {
-    uint8_t scale = ledBudgetScale(allowed, r, g, b, waveRed, greenCarried, (uint8_t) shift);
-    // it fits, and so does every dimming below it: a ramp passes through those ...
+    // For a picture that passes through the dimmings below its own (a ramp):
+    uint8_t scale = ledBudgetScale(allowed, r, g, b, waveRed, greenCarried, (uint8_t) shift, true);
+    // it fits, and so does every dimming below it ...
     for (int s = 0; s <= scale; s++) {
         assert(slowSent(r, g, b, (uint8_t) s, waveRed, greenCarried, shift) <= allowed);
     }
     // ... and the next brighter one does not
     if (scale < 255) assert(slowSent(r, g, b, (uint8_t) (scale + 1), waveRed, greenCarried, shift) > allowed);
+
+    // For a picture that is only ever shown at its own dimming:
+    uint8_t alone = ledBudgetScale(allowed, r, g, b, waveRed, greenCarried, (uint8_t) shift, false);
+    // it fits, and no brighter dimming does
+    assert(slowSent(r, g, b, alone, waveRed, greenCarried, shift) <= allowed);
+    for (int s = alone + 1; s <= 255; s++) {
+        assert(slowSent(r, g, b, (uint8_t) s, waveRed, greenCarried, shift) > allowed);
+    }
+    assert(alone >= scale); // never dimmer than the ramped answer
 }
 
 static void testBudgetScale() {
     // by hand: one-by-one text in full green (0, 255, 0), 153 allowed: green goes out as it is
-    assert(ledBudgetScale(153, 0, 255, 0, false, false, 0) == 153);
+    assert(ledBudgetScale(153, 0, 255, 0, false, false, 0, true) == 153);
     // within the limit as it is: not touched
-    assert(ledBudgetScale(255, 0, 255, 0, false, false, 0) == 255);
-    assert(ledBudgetScale(765, 255, 255, 255, false, false, 0) == 255);
-    assert(ledBudgetScale(765, 0, 255, 255, true, true, 0) == 255);
+    assert(ledBudgetScale(255, 0, 255, 0, false, false, 0, true) == 255);
+    assert(ledBudgetScale(765, 255, 255, 255, false, false, 0, true) == 255);
+    assert(ledBudgetScale(765, 0, 255, 255, true, true, 0, true) == 255);
     // nothing allowed: dark
-    assert(ledBudgetScale(0, 255, 255, 255, false, false, 0) == 0);
+    assert(ledBudgetScale(0, 255, 255, 255, false, false, 0, true) == 0);
     // the chonky heading that started this (wave, green 255, blue 25): undimmed it can send
     // 255 + 255 + 29 per LED
     assert(slowSent(0, 255, 25, 255, true, true) == 539);
@@ -133,24 +143,24 @@ static void testBudgetScale() {
             if (sent > most) most = sent;
         }
         assert(most > 539 && most <= 541);
-        assert(ledBudgetScale(most, 0, 255, 25, true, true, 0) == 255);
-        assert(ledBudgetScale(most - 1, 0, 255, 25, true, true, 0) < 255);
+        assert(ledBudgetScale(most, 0, 255, 25, true, true, 0, true) == 255);
+        assert(ledBudgetScale(most - 1, 0, 255, 25, true, true, 0, true) < 255);
     }
     // pure blue 128 is sent as 192: it needs dimming under a limit its plain value would pass
-    assert(ledBudgetScale(128, 0, 0, 128, false, false, 0) < 255);
+    assert(ledBudgetScale(128, 0, 0, 128, false, false, 0, true) < 255);
     // What is sent does not fall evenly with the dimming: a red of 12 goes out as 14, but dimmed
     // to 11 as 15. With 14 allowed the full colour would fit, and a ramp up to it would not: the
     // frame at 11 is over. So the answer stays below the first dimming that is too bright.
     assert(slowSent(12, 0, 0, 255, false, false) == 14);
     {
-        uint8_t scale = ledBudgetScale(14, 12, 0, 0, false, false, 0);
+        uint8_t scale = ledBudgetScale(14, 12, 0, 0, false, false, 0, true);
         assert(scale < 255);
         for (int s = 0; s <= scale; s++) assert(slowSent(12, 0, 0, (uint8_t) s, false, false) <= 14);
     }
     // the case the review found: a chonky text with green and blue 192. Every frame of a ramp of
     // any length stays within what the text is allowed
     for (uint16_t allowed = 0; allowed <= 765; allowed += 5) {
-        uint8_t scale = ledBudgetScale(allowed, 0, 192, 192, true, true, 0);
+        uint8_t scale = ledBudgetScale(allowed, 0, 192, 192, true, true, 0, true);
         for (int frames = 2; frames <= 255; frames += 11) {
             for (int frame = 0; frame < frames; frame++) {
                 uint8_t at = ledRampScale(scale, (uint8_t) frame, (uint8_t) frames);
@@ -158,6 +168,13 @@ static void testBudgetScale() {
             }
         }
     }
+
+    // A text without a ramp is only ever shown at its own dimming, so the dimmings below it do not
+    // count: a red of 12 (sent as 14) with 14 allowed fits as it is and is left alone, although
+    // dimmed to 11 it would go out as 15. (The gate's case was a one-by-one text dimmed for
+    // brightnesses it never shows.) With a ramp it has to stay below that 11.
+    assert(ledBudgetScale(14, 12, 0, 0, false, false, 0, false) == 255);
+    assert(ledBudgetScale(14, 12, 0, 0, false, false, 0, true) < 255);
 
     // against the slow way: every limit that matters, both styles, many colours
     srand(20261118);
@@ -181,23 +198,24 @@ static void testBudgetScale() {
 // The sign's brightness shift ('B' utility message): every value is shifted right before it goes out.
 static void testShift() {
     assert(ledShifted(200, 0) == 200 && ledShifted(200, 1) == 100 && ledShifted(200, 3) == 25);
-    assert(ledShifted(255, 7) == 1 && ledShifted(255, 8) == 0 && ledShifted(255, 200) == 0);
+    // 8 is the most the sketch ever stores, and it is dark
+    assert(ledShifted(255, 7) == 1 && ledShifted(255, 8) == 0);
 
     // A text that the shift already brings under the limit is not dimmed again. Full green, one by
     // one, 153 allowed: without a shift it has to come down to 153 ...
-    assert(ledBudgetScale(153, 0, 255, 0, false, false, 0) == 153);
+    assert(ledBudgetScale(153, 0, 255, 0, false, false, 0, true) == 153);
     // ... at shift 1 it goes out as 127 and is left alone (it was dimmed to 153 and then halved)
-    assert(ledBudgetScale(153, 0, 255, 0, false, false, 1) == 255);
+    assert(ledBudgetScale(153, 0, 255, 0, false, false, 1, true) == 255);
     // the chonky heading (wave, green 255, blue 25) at shift 1: at most 127 + 127 + 14 per LED (12 goes out as 14)
     assert(slowSent(0, 255, 25, 255, true, true, 1) == 127 + 127 + 14);
-    assert(ledBudgetScale(300, 0, 255, 25, true, true, 1) == 255);
-    assert(ledBudgetScale(300, 0, 255, 25, true, true, 0) < 255);
+    assert(ledBudgetScale(300, 0, 255, 25, true, true, 1, true) == 255);
+    assert(ledBudgetScale(300, 0, 255, 25, true, true, 0, true) < 255);
     // shifted to nothing: nothing is sent, nothing to dim
-    assert(ledBudgetScale(0, 255, 255, 255, false, false, 8) == 255);
+    assert(ledBudgetScale(0, 255, 255, 255, false, false, 8, true) == 255);
 
     // against the slow way, every shift
     srand(7);
-    for (int shift = 0; shift <= 9; shift++) {
+    for (int shift = 0; shift <= 8; shift++) {
         for (int round = 0; round < 60; round++) {
             uint8_t r = (uint8_t) (rand() % 256), g = (uint8_t) (rand() % 256), b = (uint8_t) (rand() % 256);
             for (uint16_t allowed = 0; allowed <= 765; allowed += (allowed < 40 ? 1 : 41)) {
@@ -205,6 +223,27 @@ static void testShift() {
                 checkScale(allowed, 0, g, b, true, true, shift);
             }
         }
+    }
+    tests++;
+}
+
+// A ramp is a stretch of TIME: which part of it a frame is in comes from when the frame is drawn.
+static void testRampInTime() {
+    // 10 ms parts (2500 ticks), a ramp of 6 parts
+    assert(ledRampFrame(0, 2500, 6) == 0 && ledRampFrame(2499, 2500, 6) == 0 && ledRampFrame(2500, 2500, 6) == 1);
+    assert(ledRampFrame(14999, 2500, 6) == 5 && ledRampFrame(15000, 2500, 6) == 6);
+    assert(ledRampFrame(0xFFFFFFFFUL, 2500, 6) == 6 && ledRampFrame(1000000, 2500, 255) == 255);
+    // Frames that come every 5 ms (a nudge with no hold) take the ramp's whole time to come on:
+    // 60 ms, not the 30 ms that six frames last. The gate's case.
+    int full = -1;
+    for (int k = 0; k < 40 && full < 0; k++) {
+        if (ledRampScale(200, ledRampFrame((uint32_t) k * 1250, 2500, 6), 6) == 200) full = k;
+    }
+    assert(full == 10); // the frame at 50 ms is the first in the ramp's last part
+    // and frames that come every 20 ms skip parts but are never brighter than their time allows
+    for (int k = 0; k < 10; k++) {
+        uint8_t part = ledRampFrame((uint32_t) k * 5000, 2500, 6);
+        assert(part == (k * 2 >= 6 ? 6 : k * 2));
     }
     tests++;
 }
@@ -237,6 +276,7 @@ int main() {
     testBudgetScale();
     testShift();
     testRamp();
+    testRampInTime();
     printf("led_budget_test: all %d tests passed\n", tests);
     return 0;
 }

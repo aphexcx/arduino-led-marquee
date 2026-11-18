@@ -203,6 +203,9 @@ void show() {
                       1);       // Round up since the delay must be _at_least_ this long (too short might not work, too long not a problem)
 }
 
+// Every colour value is shifted right by this before it is sent ('B' utility message). Never more
+// than BRIGHTNESS_SHIFT_MAX: the message's handler sees to that, where it stores the value.
+#define BRIGHTNESS_SHIFT_MAX 8
 uint BRIGHTNESS_SHIFT = 0;
 
 // Send 3 bytes of color data (R,G,B) for a signle pixel down all the connected stringsat the same time
@@ -876,11 +879,18 @@ void loop() {
                         break;
                     }
                     case 'B': { // Brightness shift
+                        // 0 = full brightness; every step halves it; 8 = dark (nothing is left of a
+                        // value). The number is brought into that range HERE, once, before it is
+                        // stored: everything that sends and everything that estimates what will be
+                        // sent reads the stored value. (A larger number used to be stored as it
+                        // came: "200" gave a shift the compiler does not define, and in the image
+                        // it built, full brightness.) Below 0 counts as 0.
                         uint shift;
                         if (strlen(str) == 0) {
                             shift = BRIGHTNESS_SHIFT;
                         } else {
-                            shift = atoi(str);
+                            const int asked = atoi(str);
+                            shift = asked < 0 ? 0 : asked > BRIGHTNESS_SHIFT_MAX ? BRIGHTNESS_SHIFT_MAX : asked;
                         }
                         BRIGHTNESS_SHIFT = shift;
                         char out[10];

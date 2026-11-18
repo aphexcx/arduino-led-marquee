@@ -145,12 +145,13 @@ static void adWaitUntil(uint32_t ticks) {
 #endif
 
 #if AD_DIMS
-// How far the supply's limit dims the chonky text being shown (255 = not at all), how many
-// frames of its ramp it has had (it comes on once per message, over AD_RAMP_MS, whatever
-// happens on the way: a nudge to the next position does not cut the ramp short), and what the
+// How far the supply's limit dims the chonky text being shown (255 = not at all); how long the
+// message's earlier positions lasted, in ticks of the clock (the text comes on once per message,
+// over AD_RAMP_MS of real time, whatever happens on the way: a nudge to the next position neither
+// cuts the ramp short nor, when its frames come faster than the wave's, hurries it); and what the
 // two make of the frame being sent
 static uint adTextScale = 255;
-static uint adRampFrame = 0;
+static uint32_t adRampBase = 0;
 static uint adWaveScale = 255;
 #endif
 
@@ -271,8 +272,9 @@ static uint16_t adMostLit(const Font& font, const TextMetrics& m, const char* s)
 static uint adBudgetScale(const Font& font, const TextMetrics& m, const char* s, uint r, uint g, uint b, bool wave) {
     const uint16_t allowed = ledAllowance(adMostLit(font, m, s), LED_LOAD_OF_MA(LED_CURRENT_LIMIT_MA),
                                           LED_LOAD_OF_MA(LED_CURRENT_LIMIT_SIDE_MA));
-    // BRIGHTNESS_SHIFT is the sketch's: what the 'B' utility message set
-    return ledBudgetScale(allowed, r, g, b, wave, wave, BRIGHTNESS_SHIFT);
+    // BRIGHTNESS_SHIFT is the sketch's own variable, the one sendColumnRGB() shifts by.
+    // Only a chonky text with a ramp is ever shown dimmer than its own dimming.
+    return ledBudgetScale(allowed, r, g, b, wave, wave, BRIGHTNESS_SHIFT, wave && AD_RAMP_FRAMES > 1);
 }
 #endif
 
@@ -347,7 +349,7 @@ void showCharsOneByOneOnBothPanels(const char* str, Color textColor, unsigned in
 // then). The return then comes delayMs after this call began, so that the next picture, which
 // takes as long to send as this one did, appears delayMs after this one appeared.
 // (With the supply's settings on: the text is dimmed by adTextScale and comes up to that over
-// AD_RAMP_MS, counted in adRampFrame. The caller sets both before a message's first call.)
+// AD_RAMP_MS, counted from adRampBase. The caller sets both before a message's first call.)
 static void adShowWave(const TextMetrics& m, const char* s, TextCursor left, uint16_t scrollCols,
                        unsigned int delayMs, uint g, uint b, bool another) {
     uint phase = (uint) delayMs; // where the wave starts, as it always has: the low byte of dly
@@ -381,12 +383,13 @@ static void adShowWave(const TextMetrics& m, const char* s, TextCursor left, uin
         }
 #if AD_DIMS
         // this frame's brightness, worked out before the frame, not in it
-        adWaveScale = ledRampScale(adTextScale, adRampFrame, AD_RAMP_FRAMES);
+        adWaveScale = adTextScale;
+#if AD_RAMP_FRAMES > 1
+        adWaveScale = ledRampScale(adTextScale, ledRampFrame(adRampBase + adNow(), AD_TICKS(AD_WAVE_FRAME_MS),
+                                                             AD_RAMP_FRAMES), AD_RAMP_FRAMES);
+#endif
         g = ledScaled(fullG, adWaveScale);
         b = ledScaled(fullB, adWaveScale);
-        if (adRampFrame < AD_RAMP_FRAMES) {
-            adRampFrame++;
-        }
 #endif
         uint32_t sent = adDrawFrame(fontChonk, m, s, left, AD_SHOW_ALL, 0, true, phase, g, b);
         phase -= 10;
@@ -431,12 +434,15 @@ void showChonkySlideStyleOnBothPanels(const char* str, unsigned int delayMs, Col
     adTextScale = adBudgetScale(fontChonk, m, str, 0, colorFrom.g, colorFrom.b, true);
 #endif
 #if AD_DIMS
-    adRampFrame = 0; // the text comes on once per message
+    adRampBase = 0; // the text comes on once per message
 #endif
     if (nudge) {
         const uint last = left.glyphCols; // the first character's own width, not the font's
         for (uint skip = 0; skip <= last; skip++) {
             adShowWave(m, str, left, 0, delayMs, colorFrom.g, colorFrom.b, skip < last);
+#if AD_DIMS
+            adRampBase += adNow(); // how long this position lasted: the ramp goes on from there
+#endif
             textCursorNext(m, str, left);
         }
     } else {

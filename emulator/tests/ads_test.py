@@ -165,14 +165,39 @@ class Frame:
         return self.equal
 
 
+class Replies:
+    """What the app answers, like fake_app.py with chooser contract 1: '~' gets the next message.
+    So does '?', the chooser's poll, except that the first `_polls` polls after a chooser message
+    (type H) are answered with {} ("nothing changed"). One of these per run, and one more to read
+    the dump the same way."""
+
+    def __init__(self, messages):
+        self.messages, self.sent, self.polls_left = messages, 0, 0
+
+    def answer(self, char):
+        """Returns (bytes to send or None, True if this request was answered with a message)."""
+        if char == "?" and self.polls_left > 0:
+            self.polls_left -= 1
+            return b"{}", False
+        if char not in "~?" or self.sent >= len(self.messages):
+            return None, False
+        message = self.messages[self.sent]
+        self.sent += 1
+        self.polls_left = message.get("_polls", 0) if message.get("type") == "H" else 0
+        wire = json.dumps({k: v for k, v in message.items() if not k.startswith("_")},
+                          separators=(",", ":"), ensure_ascii=True)
+        return wire.encode("ascii"), True
+
+
 def run_group(env, name, messages, port, flags=()):
     """Serves `messages` once. Returns for each message (request time, next request time, frames)."""
+    polls = sum(m.get("_polls", 0) for m in messages if m.get("type") == "H")
     dump = os.path.join(env["work"], name + ".jsonl")
     log = os.path.join(env["work"], name + ".log")
     with open(log, "w") as err:
         emu = subprocess.Popen(
             [env["emu"], "--headless", "--port", str(port), "--wait-client", "30",
-             "--until-requests", str(len(messages) + 1), "--duration", "900", "--frames", dump,
+             "--until-requests", str(len(messages) + polls + 1), "--duration", "900", "--frames", dump,
              *flags, env["hex"]], stderr=err)
     try:
         deadline = time.monotonic() + 30
@@ -186,17 +211,15 @@ def run_group(env, name, messages, port, flags=()):
                 time.sleep(0.05)
         sock.settimeout(None)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        sent = 0
-        while sent < len(messages):
+        app = Replies(messages)
+        while app.sent < len(messages):
             data = sock.recv(4096)
             if not data:
                 break
             for byte in data:
-                if byte == ord("~") and sent < len(messages):
-                    wire = json.dumps({k: v for k, v in messages[sent].items() if not k.startswith("_")},
-                                      separators=(",", ":"), ensure_ascii=True)
-                    sock.sendall(wire.encode("ascii"))
-                    sent += 1
+                reply, _ = app.answer(chr(byte))
+                if reply is not None:
+                    sock.sendall(reply)
         status = emu.wait(timeout=900)
         sock.close()
     finally:
@@ -206,14 +229,18 @@ def run_group(env, name, messages, port, flags=()):
         raise RuntimeError("%s: sign-emu exited with status %s: %s"
                            % (name, status, open(log).read().strip()[-300:]))
     requests, frames, cache = [], [], {}
+    app = Replies(messages)                               # the same answers again, to tell the requests apart
     for line in open(dump, encoding="utf-8"):
         d = json.loads(line)
         if d["type"] == "frame":
             frames.append(Frame(d, cache))
         elif d["type"] == "tx":
-            if d.get("char") != "~":
+            if d.get("char") not in ("~", "?"):
                 raise RuntimeError("%s: the sign sent %r: it could not read a message" % (name, d.get("char")))
-            requests.append(d["t"])
+            # a request that was answered with a message starts that message; the one after the
+            # last message ends the run; a poll answered with {} is neither
+            if app.sent >= len(messages) or app.answer(d["char"])[1]:
+                requests.append(d["t"])
     if len(requests) != len(messages) + 1:
         raise RuntimeError("%s: the sign asked %d times for %d messages: the run did not get to "
                            "its end" % (name, len(requests), len(messages)))
@@ -262,9 +289,10 @@ def check_shifted(env, message, start, end, frames):
     limit_check(log, env, message, frames)
     dim = model_scale(env, cols, r, g, b, wave, shift)
     plain = model_scale(env, cols, r, g, b, wave, 0)
-    if plain == 255:
-        # this image's limits are above this text even without the shift: nothing to tell apart
-        log.append("  note  this text is within the image's limits as it is; the shift makes no difference to them")
+    if plain == 255 or plain == dim:
+        # this image's limits are above this text even without the shift, or so far below it that
+        # the shift does not help either: nothing to tell apart
+        log.append("  note  the shift makes no difference to what this image's limits do to this text")
     else:
         check(log, plain < dim, "the test has teeth: without the shift this text would be dimmed to %d/256, "
               "with shift %d %s" % (plain + 1, shift, "it fits as it is" if dim == 255 else
@@ -286,6 +314,18 @@ def check_shifted(env, message, start, end, frames):
     check(log, ok, "at brightness shift %d it is sent as the shift alone makes it, not dimmed again: every "
           "frame's load on a side is between %.2f and %.2f A (most: %.2f A)"
           % (shift, low_seen * AMPS, high_seen * AMPS, max([f.load[0] for f in frames] or [0]) * AMPS))
+    return log
+
+
+def check_dark(env, message, start, end, frames):
+    """A message shown while the brightness shift is 8: nothing is left of any value. (A shift of
+    200 used to be stored as it came, and the image then sent everything at full brightness: on
+    the sign, and past the limits, whose estimate took such a shift for dark.)"""
+    log = [label(message)]
+    check(log, bool(frames) and not any(any(f.mask) for f in frames),
+          "the most the brightness shift can be is 8, and at 8 the sign is dark: no LED lit in %d frames"
+          % len(frames))
+    limit_check(log, env, message, frames)
     return log
 
 
@@ -344,9 +384,12 @@ def model_scale(env, cols, r, g, b, wave, shift=0):
         red = (max(carried(dimmed(v, scale) >> shift) for v in range(256)) if wave
                else carried(dimmed(r, scale) >> shift))
         green = carried(dimmed(g, scale) >> shift) if wave or shift else dimmed(g, scale)
-        # the brightest dimming up to which everything fits: a ramp passes through all those below it
         if red + green + carried(dimmed(b, scale) >> shift) > allowed:
-            break
+            # A chonky text with a ramp passes through all the dimmings below its own: it has to stay
+            # below the first that is too bright. Any other text is only shown at its own dimming.
+            if wave and env["ramp_frames"] > 1:
+                break
+            continue
         best = scale
     return best
 
@@ -419,6 +462,17 @@ def check_one_by_one(env, message, start, end, frames):
     check(log, len(frames) == len(steps), "one frame per letter and per scrolled column (%d, expected %d)"
           % (len(frames), len(steps)))
     if len(frames) != len(steps):
+        return log
+    # (a limit can be so low that the text is dimmed to nothing: then every frame is dark)
+    lit_colour = env["gamma"]
+    scale_now = model_scale(env, whole, lit_colour[message["r"]], lit_colour[message["g"]], lit_colour[message["b"]],
+                            False)
+    dark = not any(dimmed(lit_colour[message[k]], scale_now) for k in "rgb")
+    if dark:
+        check(log, not any(any(f.mask) for f in frames), "the limit leaves nothing of this text: every frame is dark")
+        limit_check(log, env, message, frames)
+        message["_long"] = width > PANEL
+        hold_check(log, env, message, "O", frames[-1].t, start, end)
         return log
     pictures = all(f.mask[:PANEL] == side(font.columns(text, shown), offset, pad)
                    for f, (shown, offset, _) in zip(frames, steps))
@@ -498,7 +552,24 @@ def check_chonky(env, message, start, end, frames):
         rest = carried(dimmed(message["g"], d)) + carried(dimmed(message["b"], d))
         return [v if rest or dimmed((dly - 10 * k + 10 * c) & 0xFF, d) else 0 for c, v in enumerate(side(cols, at))]
 
-    for k, f in enumerate(frames):
+    # A text dimmed nearly to nothing shows too little to follow its scroll by eye. Its frames are
+    # then compared with where the clock says the text is (one column either way), and the pace,
+    # which the other cases check, is not judged from the pictures.
+    faint = dim < 32
+    if faint and last:
+        t0, ok = frames[0].t, True
+        for k, f in enumerate(frames):
+            since = (f.t - t0) * 1000 - env["hold"]
+            at = 0 if since < -1 else min(last, 1 + int((since + 1) // env["step"]))
+            ok = ok and any(f.mask[:PANEL] == seen(k, o) for o in (at, max(0, at - 1), min(last, at + 1)))
+            if at >= last and not at_end:
+                at_end = k
+        check(log, ok, "dimmed to %d/256 the text is too faint to follow; every frame is the text as Fonts.h has "
+              "it where the clock says it is" % (dim + 1))
+        common_done = True
+    else:
+        common_done = False
+    for k, f in enumerate(frames if not common_done else []):
         if offset < last and f.mask[:PANEL] == seen(k, offset + 1) and f.mask[:PANEL] != seen(k, offset):
             offset += 1
             moves.append(f.t)
@@ -506,8 +577,12 @@ def check_chonky(env, message, start, end, frames):
                 at_end = k
         pictures = pictures and f.mask[:PANEL] == seen(k, offset)
         colours = colours and wave_colours_ok(f, k, dly, message["g"], message["b"], ramp_scale(env, dim, k))
-    check(log, pictures, "every frame is the text as Fonts.h has it, from column 0%s"
-          % (", then moved left one column at a time, never back" if last else ""))
+    if not common_done:
+        check(log, pictures, "every frame is the text as Fonts.h has it, from column 0%s"
+              % (", then moved left one column at a time, never back" if last else ""))
+    else:
+        colours = all(wave_colours_ok(f, k, dly, message["g"], message["b"], ramp_scale(env, dim, k))
+                      for k, f in enumerate(frames))
     check(log, colours, "the wave: red starts at the low byte of dly, less 10 per frame, plus 10 per "
           "column; green and blue are the message's; all as this style has always sent them, %s%s"
           % (dim_note(dim), ", coming on over %d frames" % env["ramp_frames"] if env["ramp_frames"] > 1 else ""))
@@ -521,7 +596,10 @@ def check_chonky(env, message, start, end, frames):
         both = [f.load[0] + f.load[1] for f in frames]
         rises = [b - a for a, b in zip([sum(message.get("_before", [0, 0]))] + both, both)]
         flicker = max(rises[n:] + [0])
-        bound = max(both) / n + max(both) / 3 + flicker
+        # (and no step can be finer than one unit of a channel of every lit LED: at a very low limit
+        # that is all there is)
+        grain = 3 * max(sum(bin(m).count("1") for m in f.mask) for f in frames)
+        bound = max(both) / n + max(both) / 3 + flicker + grain
         check(log, max(rises[:n]) <= bound,
               "it comes on over %d frames: largest rise between two frames %.2f A of a peak of %.2f A (an even "
               "ramp would be %.2f A a frame; the carry quirk allows up to %.2f A)"
@@ -530,7 +608,9 @@ def check_chonky(env, message, start, end, frames):
     check(log, max(gaps or [0]) <= env["wave"] + 0.5,
           "the wave never stops: no gap between two frames longer than %d ms (longest %.2f ms)"
           % (env["wave"], max(gaps or [0])))
-    if last:
+    if last and common_done:
+        pass                                              # too faint to judge the pace from the pictures
+    elif last:
         check(log, offset == last and side(cols, last)[PANEL - 1] != 0,
               "the text moved %d columns and its last lit column is the panel's last" % last)
         held = (moves[0] - frames[0].t) * 1000
@@ -540,9 +620,12 @@ def check_chonky(env, message, start, end, frames):
         worst = max([abs(s - env["step"]) for s in steps] or [0])
         check(log, worst <= 0.5, "then one column every %d ms (worst %.2f ms off)" % (env["step"], worst))
     elif dly == 1000:
-        # a frame every AD_WAVE_FRAME_MS for as long as the text stays (10 ms: 100 frames, as it always was)
-        check(log, len(frames) == 1000 // env["wave"], "dly 1000 is %d frames, one every %d ms (%d)"
-              % (1000 // env["wave"], env["wave"], len(frames)))
+        # The first frame is out 4.4 ms after its start and the hold ends 1000 ms after that; a
+        # frame is drawn every AD_WAVE_FRAME_MS as long as 6 ms are left for it. At 10 ms that is
+        # frames at 0 to 990 ms: 100, as it always was. At 12 ms: 0 to 996 ms, 84.
+        count = int((1000 + 4.4 - 6) // env["wave"]) + 1
+        check(log, len(frames) == count, "dly 1000 is %d frames, one every %d ms (%d)"
+              % (count, env["wave"], len(frames)))
     elif dly == 0:
         check(log, len(frames) == 1, "dly 0 or missing is one frame (%d)" % len(frames))
     message["_long"] = bool(last)
@@ -597,6 +680,15 @@ def check_nudge(env, message, start, end, frames):
     cols = env["chonk"].columns(text_bytes(message))
     common_checks(log, frames)
     limit_check(log, env, message, frames)
+    dim = model_scale(env, cols, 0, message["g"], message["b"], True)
+    if dim < 32:
+        # a limit so low that the text is dimmed to nothing, or too nearly to tell its positions apart
+        if dim == 0:
+            check(log, not any(any(f.mask) for f in frames), "the limit leaves nothing of this text: every frame is dark")
+        else:
+            log.append("  note  dimmed to %d/256 the text is too faint to tell its positions apart" % (dim + 1))
+        check(log, end - start < 9 * (message["dly"] / 1000 + 0.02) + 0.1, "the message ends (%.2f s)" % (end - start))
+        return log
     seen = []
     for f in frames:
         for skip in range(10):
@@ -749,6 +841,9 @@ def main():
         ({"type": "U", "subtype": "B", "str": "1", "_note": "(sets brightness shift 1)"}, check_table_only),
         (dict(c("HI", 400), g=255, b=25, _shift=1, _note="(at brightness shift 1)"), check_shifted),
         (dict(o("HI THERE!", 400), r=255, g=0, b=0, _shift=1, _note="(at brightness shift 1)"), check_shifted),
+        ({"type": "U", "subtype": "B", "str": "200", "_note": "(asks for shift 200: stored as 8, dark)"},
+         check_dark),
+        (dict(o("HI THERE!", 400), r=255, g=0, b=0, _note="(after shift 200 was asked for: dark)"), check_dark),
         ({"type": "U", "subtype": "B", "str": "0", "_note": "(back to no shift)"}, check_table_only),
         (dict(c("HI", 400), g=255, b=25, _note="(no shift again)"), check_chonky),
     ]
