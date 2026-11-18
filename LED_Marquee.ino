@@ -133,14 +133,18 @@ PROGMEM = "                    ";
 //The line counts as HIGH again once it has been HIGH for this long without a gap, in ms (one byte is 0.7 ms)
 #define CHOOSER_LINE_QUIET_MS 3
 //After a message has been read, wait at most this long for whatever the app writes behind it (a newline) to end
-#define CHOOSER_TRAILER_WAIT_MS 20
+#define CHOOSER_TRAILER_WAIT_MS 100
+//Before any '~' is sent (in every mode), the line from the app must be quiet, or the answer would be read
+//starting in the middle of whatever the app is sending. Wait at most this long for that, in ms
+#define REQUEST_QUIET_WAIT_MS 500
 //How long any '~' read waits for the first byte of its answer, in ms (the same as for every later byte)
 #define ANSWER_FIRST_BYTE_MS 1000
-//Before asking the normal way after an attention that brought nothing usable, let the line go quiet: at most this long
-#define CHOOSER_FALLBACK_QUIET_WAIT_MS 500
+//... and how much longer than that it may wait, once, when the app raised its hand late in that wait
+#define ANSWER_AFTER_BREAK_MS (CHOOSER_ATTN_HIGH_WAIT_MS + CHOOSER_ATTN_FIRST_BYTE_MS)
 //After this many reads in a row that brought nothing usable, go back to loop() and its normal '~'
 #define CHOOSER_MAX_FAILED_READS 3
-//1 = show on panel B what was measured at the last attention (the Uno cannot print). For the bench, not for a show:
+//1 = show on panel B what was measured at the last attention (the Uno cannot print), and send the same numbers
+//to the app as a line of text in front of the next '~' (see ChooserDisplay.h). For the bench, not for a show:
 //ms to the first byte (green), ms to the end of the message (blue), attentions (white), fallbacks to '~' (red)
 #ifndef CHOOSER_DEBUG_PANEL_B
 #define CHOOSER_DEBUG_PANEL_B 0
@@ -906,7 +910,6 @@ static inline bool chooserLineLow() {
 
 // Notifies the IMX that we're ready to retrieve custom message data
 bool readSerialData() {
-    startSerial();
     // Flushing Serial input buffer
 //            while (softSerial.available())
 //                softSerial.read();
@@ -916,7 +919,8 @@ bool readSerialData() {
 //            }
 
     // send special symbol so IMX knows to respond with custom message data
-    softSerial.print('~');
+    // (once the line is quiet: not into the middle of a message the app is pushing)
+    chooserRequest();
 //    int firstByte = softSerial.read();
 //
 //    switch (firstByte) {
@@ -1000,10 +1004,15 @@ void loop() {
         // A chooser message is shown in there, for as long as the chooser is on screen (the app
         // pushes what changes; the receive line is watched between frames); what comes back is
         // the type of the message that ended it.
-        // 0 means there is nothing to show: what was read is not a message (it has no "type"), or
-        // the chooser could not read anything usable any more. Draw nothing and ask again with a normal '~'.
+        // Two answers mean there is no message to show: what was read is not one (it has no "type":
+        // draw nothing and ask again), or the chooser ended because the app stopped answering.
         const char msgType = chooserDispatch();
-        if (!msgType) {
+        if (msgType == CHOOSER_DISPATCH_NOTHING) {
+            loopcount++;
+            return;
+        }
+        if (msgType == CHOOSER_DISPATCH_NO_ANSWER) {
+            showstarfieldcustom(600); // as after any request that was not answered
             loopcount++;
             return;
         }
@@ -1127,7 +1136,6 @@ void loop() {
             }
         }
     } else {
-        chooserLeft(); // the starfield (or the error flash before it) replaces the chooser picture
         showstarfieldcustom(600);
     }
 

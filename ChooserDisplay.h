@@ -26,6 +26,15 @@
 //  - A break that falls while the sign is already listening for the answer to a '~' (its own, or
 //    loop()'s) is received as a 0x00 byte. That byte is stepped over and the read goes on: what
 //    the app sends next is the answer (chooserAwaitAnswer).
+//  - No '~' is sent, by the chooser or by loop(), into the middle of something the app is sending:
+//    the line must be quiet first (chooserRequest).
+//
+// Two of the steps here do not know about the chooser and can be used by any display loop that
+// wants to hear the app while it draws: chooserLineLow() (one look at the pin, a few microseconds,
+// between two frames) and attentionRead() (the line was seen LOW: wait for it to be HIGH, listen,
+// read one message into the document it is given; true if one came). What the message means is
+// the caller's business. (A loop whose text lives in `json`, as the marquee's does, has to give
+// it another document, or its text is gone.)
 //
 // The sign sends no '?' any more. An object without a "type" is never a message, here or in loop().
 //
@@ -52,7 +61,6 @@ struct ChooserState {
     char count[CHOOSER_COUNT_MAX_CHARS + 1];
     ChooserLayout layout;
     uint16_t pos;              // scroll position in columns; 0 = the start of the text at the left edge
-    bool onScreen;             // the picture on the LEDs is still ours (nothing else was drawn since)
     bool holding;              // a scrolling text is standing still on its start
     bool syncDue;              // it has come round: this stand-still reads the whole message
     uint blinkCount;           // a text that fits: which frame of its blink is on the LEDs (the last one is 0, black)
@@ -62,11 +70,6 @@ struct ChooserState {
 };
 
 static ChooserState chooser;
-
-// loop() calls this before it draws anything that is not the chooser.
-static void chooserLeft() {
-    chooser.onScreen = false;
-}
 
 // What a read brought
 #define CHOOSER_REPLY_SAME 0    // the chooser message we are showing: carry on from where we are
@@ -88,10 +91,27 @@ static void chooserLeft() {
 // They are sent with the first frame after they change, which is the only frame longer than
 // panel 1 (119 columns, about 2 ms more). After a pushed message that is a frame of a text
 // standing still; after a fallback that brought the same message again it is the next scrolled one.
+//
+// Nobody may be standing at the sign, so the same build also tells the app, which logs what it
+// reads. The next time a '~' is due anyway, one line of text goes out in front of it:
+//
+//     #SSS fFFF eEEE aAA bBB lLLL~
+//
+//   SSS  a count of these lines, 000 to 999 and round again (a missing number is a lost line)
+//   FFF  ms from the line seen LOW to the first byte of the message (as on panel 2, green)
+//   EEE  ms from the line seen LOW to the end of the message (blue)
+//   AA   attentions so far, BB fallbacks so far (white, red)
+//   LLL  ms the line was still LOW after the sign first saw it LOW, rounded up (001: it was HIGH
+//        again at once, so it was a byte, not a break); 000: it did not go HIGH within
+//        CHOOSER_ATTN_HIGH_WAIT_MS
+// 27 characters, none of them a request byte, and then the '~' that was due: the app answers it
+// as it answers any request. The line carries the numbers of the latest attention; attentions
+// that needed no request in between are counted in AA.
 struct ChooserDebug {
-    unsigned int firstByteMs, endMs;
+    unsigned int firstByteMs, endMs, lowMs, lines;
     uint attentions, fallbacks; // 0 to 99, then from 0 again
-    bool stale; // panel 2 does not show these values yet
+    bool stale;     // panel 2 does not show these values yet
+    bool lineStale; // the app has not been sent them yet
 };
 
 static ChooserDebug chooserDebug;
@@ -113,6 +133,28 @@ static void chooserDigits(char* out, unsigned int value, uint digits) {
 static void chooserCount(uint& counter) {
     counter = counter >= 99 ? 0 : counter + 1;
     chooserDebug.stale = true;
+    chooserDebug.lineStale = true;
+}
+
+// Sends the numbers to the app as one line of text, if it has not had them. The caller sends
+// the '~' that ends it. Call only while listening has just begun and a '~' is due.
+static void chooserDebugLine() {
+    if (!chooserDebug.lineStale) {
+        return;
+    }
+    chooserDebug.lineStale = false;
+    char line[28];
+    memcpy_P(line, PSTR("#000 f000 e000 a00 b00 l000"), sizeof(line));
+    chooserDigits(line + 1, chooserDebug.lines, 3);
+    chooserDigits(line + 6, chooserDebug.firstByteMs, 3);
+    chooserDigits(line + 11, chooserDebug.endMs, 3);
+    chooserDigits(line + 16, chooserDebug.attentions, 2);
+    chooserDigits(line + 20, chooserDebug.fallbacks, 2);
+    chooserDigits(line + 24, chooserDebug.lowMs, 3);
+    line[4] = line[9] = line[14] = line[18] = line[22] = ' '; // (chooserDigits ends each number with a 0 byte)
+    line[27] = '\0';
+    softSerial.print(line);
+    chooserDebug.lines = chooserDebug.lines >= 999 ? 0 : chooserDebug.lines + 1;
 }
 #endif
 
@@ -233,15 +275,17 @@ static bool chooserWait(unsigned long sinceUs, unsigned long us) {
     return false;
 }
 
-// A LOW that lasts longer than this is not part of a byte (a byte holds the line LOW for nine
-// bit times at most, 0.63 ms at 14400 baud): the app is holding the line.
-#define CHOOSER_BREAK_MIN_US 1500UL
+// A LOW that lasts this long is the app raising its hand: a break, or the first of the 0x00 bytes
+// it may send instead of one (nine bit times LOW, 625 us at 14400 baud). No other byte that can
+// stand behind a message holds the line LOW that long: the longest is 0x80 with eight bit times,
+// 556 us, and no character of ASCII text has more than seven.
+#define CHOOSER_BREAK_MIN_US 590UL
 
 // Waits until the line has been HIGH for CHOOSER_LINE_QUIET_MS without a gap: a break is over, a
 // run of bytes has ended (one byte is 0.7 ms and has a HIGH stop bit in it, so a single look at
 // the pin would not do). Gives up after maxMs.
-// With stopAtBreak it also returns, at once, when the line stays LOW for longer than any byte
-// does: that is the app raising its hand, and it is left for the caller's next look at the line.
+// With stopAtBreak it also returns, at once, when the line stays LOW for CHOOSER_BREAK_MIN_US:
+// that is the app raising its hand, and it is left for the caller's next look at the line.
 static void chooserAwaitQuietLine(unsigned int maxMs, bool stopAtBreak) {
     unsigned long startUs = micros();
     unsigned long highSinceUs = startUs;
@@ -318,8 +362,11 @@ static uint chooserTake(bool readOk) {
 // we are listening: the app raised its hand just as we asked, and what it sends next (if
 // anything) is the answer. Without this the 0x00 would end the read as "no answer" while the
 // answer is still on its way.
+// A 0x00 that comes late in the wait is given the time a pushed message needs to follow it (the
+// rest of the break, the guard), so the wait can outlast ANSWER_FIRST_BYTE_MS by that much, once.
 static bool chooserAwaitAnswer() {
     unsigned long startMs = millis();
+    unsigned long waitMs = ANSWER_FIRST_BYTE_MS;
     do {
         int c = softSerial.peek();
         if (c > 0) {
@@ -327,9 +374,24 @@ static bool chooserAwaitAnswer() {
         }
         if (c == 0) {
             softSerial.read();
+            unsigned long neededMs = (millis() - startMs) + ANSWER_AFTER_BREAK_MS;
+            if (neededMs > ANSWER_FIRST_BYTE_MS + ANSWER_AFTER_BREAK_MS) {
+                neededMs = ANSWER_FIRST_BYTE_MS + ANSWER_AFTER_BREAK_MS;
+            }
+            if (neededMs > waitMs) {
+                waitMs = neededMs;
+            }
         }
-    } while (millis() - startMs < ANSWER_FIRST_BYTE_MS);
+    } while (millis() - startMs < waitMs);
     return false;
+}
+
+// Reads one JSON object of an answer into `json`.
+static DeserializationError chooserReadObject() {
+    if (!chooserAwaitAnswer()) {
+        return DeserializationError::EmptyInput;
+    }
+    return deserializeJson(json, softSerial);
 }
 
 // The read of a normal '~' request, loop()'s and ours (the '~' has just been sent).
@@ -337,16 +399,26 @@ static bool chooserAwaitAnswer() {
 // window, because the real answer may be on its way behind it. (Asking again at once would start
 // listening in the middle of that answer and read its tail as garbage.)
 static DeserializationError chooserReadMessage() {
-    if (!chooserAwaitAnswer()) {
-        return DeserializationError::EmptyInput;
-    }
-    DeserializationError err = deserializeJson(json, softSerial);
+    DeserializationError err = chooserReadObject();
     for (uint skipped = 0;
          skipped < CHOOSER_MAX_SKIPPED && err == DeserializationError::Ok && !json["type"].is<const char*>();
          skipped++) {
-        err = deserializeJson(json, softSerial);
+        err = chooserReadObject();
     }
     return err;
+}
+
+// Sends the request for the next message and begins to listen for the answer. loop()'s request
+// and the chooser's own. The line must be quiet first: a '~' sent while the app is in the middle
+// of sending something (a message it pushed while we were drawing and could not listen) would
+// start the listening inside that message, and its tail would be read as a broken answer.
+static void chooserRequest() {
+    chooserAwaitQuietLine(REQUEST_QUIET_WAIT_MS, false);
+    startSerial(); // we stopped listening after the last read, so this starts with an empty buffer
+#if CHOOSER_DEBUG_PANEL_B
+    chooserDebugLine();
+#endif
+    softSerial.print('~');
 }
 
 // A read has just ended, at the closing brace. Whatever the app writes behind a message (a
@@ -360,8 +432,7 @@ static void chooserLetTrailerPass() {
 // read's patience (a second per byte). No error flash and no error text on the wire.
 // Only ever called with the text standing still or already stopped.
 static bool chooserAsk() {
-    startSerial(); // we stopped listening after the last read, so this starts with an empty buffer
-    softSerial.print('~');
+    chooserRequest();
     DeserializationError err = chooserReadMessage();
     stopSerial();
     chooserLetTrailerPass();
@@ -384,25 +455,36 @@ static uint chooserSync() {
     return chooserTake(chooserAsk());
 }
 
-// Nothing usable was read: ask the normal way. First let whatever is still coming in go by, or
-// the '~' would be answered into the tail of it.
+// Nothing usable was read: ask the normal way (chooserRequest() first lets whatever is still
+// coming in go by).
 static uint chooserFallback() {
 #if CHOOSER_DEBUG_PANEL_B
     chooserCount(chooserDebug.fallbacks);
 #endif
-    chooserAwaitQuietLine(CHOOSER_FALLBACK_QUIET_WAIT_MS, false);
     return chooserTake(chooserAsk());
 }
 
 // The receive line was seen LOW: the app has something to say and will say it unasked.
-// Waits for the line to go HIGH and stay HIGH (the break is over), listens, and reads one message.
-// A chooser message is shown from its start, whether or not it is the one already showing.
-// If none comes within CHOOSER_ATTN_FIRST_BYTE_MS the caller asks: that is what the app means
-// when it has left chooser mode (it raises its hand and sends nothing).
-static uint chooserAttention() {
+// Waits for the line to go HIGH and stay HIGH (the break is over), listens, and reads one message
+// into `into`. Returns true when a whole JSON object came. Nothing here knows about the chooser:
+// any display loop that looks at chooserLineLow() between its frames can call this, and then
+// decide what the message means for what it is showing.
+static bool attentionRead(JsonDocument& into) {
 #if CHOOSER_DEBUG_PANEL_B
     unsigned long seenMs = millis();
+    unsigned long seenUs = micros();
     chooserCount(chooserDebug.attentions);
+    chooserDebug.firstByteMs = 0;
+    chooserDebug.endMs = 0;
+    chooserDebug.lowMs = 0;
+    // how much longer the line stays LOW (this look is only in the bench build; if the line does
+    // not go HIGH it makes the wait that follows start CHOOSER_ATTN_HIGH_WAIT_MS later)
+    while (micros() - seenUs < CHOOSER_ATTN_HIGH_WAIT_MS * 1000UL) {
+        if (!chooserLineLow()) {
+            chooserDebug.lowMs = (unsigned int) ((micros() - seenUs + 999) / 1000);
+            break;
+        }
+    }
 #endif
     chooserAwaitQuietLine(CHOOSER_ATTN_HIGH_WAIT_MS, false);
     startSerial(); // begins with an empty buffer: nothing of the break is in it
@@ -412,7 +494,7 @@ static uint chooserAttention() {
         chooserDebug.firstByteMs = (unsigned int) (millis() - seenMs);
 #endif
         softSerial.setTimeout(CHOOSER_ATTN_BYTE_MS);
-        readOk = deserializeJson(json, softSerial) == DeserializationError::Ok;
+        readOk = deserializeJson(into, softSerial) == DeserializationError::Ok;
         softSerial.setTimeout(1000); // the Stream default, for the normal '~' read
 #if CHOOSER_DEBUG_PANEL_B
         chooserDebug.endMs = (unsigned int) (millis() - seenMs);
@@ -422,7 +504,15 @@ static uint chooserAttention() {
     if (readOk) {
         chooserLetTrailerPass();
     }
-    uint reply = chooserTake(readOk);
+    return readOk;
+}
+
+// Attention while the chooser is on screen. A chooser message is shown from its start, whether
+// or not it is the one already showing. If no message came within CHOOSER_ATTN_FIRST_BYTE_MS the
+// caller asks: that is what the app means when it has left chooser mode (it raises its hand and
+// sends nothing).
+static uint chooserAttention() {
+    uint reply = chooserTake(attentionRead(json));
     if (reply == CHOOSER_REPLY_SAME) {
         chooserRestart();
         reply = CHOOSER_REPLY_CHANGED;
@@ -431,9 +521,9 @@ static uint chooserAttention() {
 }
 
 // Shows a chooser message and stays here for as long as the chooser is on screen. Returns true
-// when `json` holds a message of another type for loop() to show, false when nothing usable could
-// be read (loop() then asks with its own '~'; if that brings the same chooser message, we carry on
-// from where we were).
+// when `json` holds a message of another type for loop() to show, false when the app did not
+// answer (two requests in a row unanswered, or the line LOW for good): loop() then does what it
+// does after any unanswered request.
 //
 // Every time round this loop the receive line is looked at first, and every wait in it watches
 // the line, so the longest the line goes unwatched is one frame (or, once per message, the
@@ -442,13 +532,10 @@ static uint chooserAttention() {
 // except after an attention that was not followed by a whole message.
 bool showAsChooser(const char* blinkyStr, const char* countyStr) {
     chooser.failedReads = 0;
-    if (!(chooser.onScreen &&
-          chooserSame(chooser.text, blinkyStr, CHOOSER_MAX_CHARS) &&
-          chooserSame(chooser.count, countyStr, CHOOSER_COUNT_MAX_CHARS))) {
-        chooserStore(blinkyStr, countyStr);
-    }
-    chooser.onScreen = true;
-    chooserFullReadDone(); // loop()'s read has just brought this message, new or the same
+    // loop() has drawn something else since the chooser was last on the LEDs (the message that
+    // ended it, or the stars), so the message is always drawn afresh here, from its start.
+    chooserStore(blinkyStr, countyStr);
+    chooserFullReadDone(); // loop()'s read has just brought this message
 
     bool attention = false; // the line was seen LOW during the last wait
     for (;;) {
@@ -521,23 +608,25 @@ bool showAsChooser(const char* blinkyStr, const char* countyStr) {
 }
 
 // What loop() does with a reply it has read into `json`. Returns the type character of the message
-// to show now, or 0 when there is nothing to show: draw nothing and ask again.
-//  - no type: not a message, whatever else is in it
-//  - a chooser message: shown here, for as long as the chooser is on screen; the message that
-//    ended it is then in `json` (0 if instead nothing usable could be read any more)
+// to show now, or one of these two:
+#define CHOOSER_DISPATCH_NOTHING 0   // not a message (it has no type): draw nothing and ask again
+#define CHOOSER_DISPATCH_NO_ANSWER 1 // the chooser was shown and ended because the app stopped answering:
+                                     // do what follows an unanswered request (the stars), not another wait
+// A chooser message is shown here, for as long as the chooser is on screen; the message that ended
+// it is then in `json`.
 static char chooserDispatch() {
     const char* type = json["type"];
     if (!type) {
-        return 0;
+        return CHOOSER_DISPATCH_NOTHING;
     }
     if (type[0] == MSGTYPE_CHOOSER) {
         if (!showAsChooser(json["str"], json["flashy"])) {
-            return 0;
+            return CHOOSER_DISPATCH_NO_ANSWER;
         }
         type = json["type"]; // chooserTake() only lets a message with a type end the display
     }
-    chooserLeft(); // whatever loop() draws now replaces the chooser picture
-    return type[0];
+    // (a type whose first byte is that code's value is no type the sign knows: the default one)
+    return type[0] == CHOOSER_DISPATCH_NO_ANSWER ? MSGTYPE_DEFAULT : type[0];
 }
 
 #endif //LED_MARQUEE_CHOOSERDISPLAY_H

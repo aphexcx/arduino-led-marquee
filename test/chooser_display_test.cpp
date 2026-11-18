@@ -41,6 +41,8 @@
 #define PROGMEM
 #define pgm_read_byte(address) (*(address))
 #define pgm_read_byte_near(address) (*(address))
+#define PSTR(text) (text)
+#define memcpy_P memcpy
 #define gamma ledGammaTable // math.h already has a gamma()
 
 #define COLUMNS_PER_PANEL 60
@@ -60,15 +62,17 @@
 #define CHOOSER_ATTN_FIRST_BYTE_MS 150
 #define CHOOSER_ATTN_BYTE_MS 60
 #define CHOOSER_LINE_QUIET_MS 3
-#define CHOOSER_TRAILER_WAIT_MS 20
+#define CHOOSER_TRAILER_WAIT_MS 100
+#define REQUEST_QUIET_WAIT_MS 500
 #define ANSWER_FIRST_BYTE_MS 1000
-#define CHOOSER_FALLBACK_QUIET_WAIT_MS 500
+#define ANSWER_AFTER_BREAK_MS (CHOOSER_ATTN_HIGH_WAIT_MS + CHOOSER_ATTN_FIRST_BYTE_MS)
 #define CHOOSER_MAX_FAILED_READS 3
 #ifndef CHOOSER_DEBUG_PANEL_B
 #define CHOOSER_DEBUG_PANEL_B 0
 #endif
 
 const char MSGTYPE_CHOOSER = 'H';
+const char MSGTYPE_DEFAULT = 'D';
 const char HEART = '\x7F';
 
 const int json_capacity = 601 + JSON_OBJECT_SIZE(8);
@@ -293,6 +297,7 @@ struct FakeApp {
     std::vector<Request> requests;
     std::vector<std::string> replies;       // what the app wrote for each request ("" = nothing)
     std::vector<Push> pushes;
+    std::string heard;                      // every byte the sign sent, requests and all
 
     // Forgets every setting of the test before.
     void reset() {
@@ -322,6 +327,7 @@ struct FakeApp {
         requests.clear();
         replies.clear();
         pushes.clear();
+        heard.clear();
     }
 
     // The '~' answer that put the sign into the chooser display has just been written.
@@ -335,6 +341,7 @@ struct FakeApp {
         requests.clear();
         replies.clear();
         pushes.clear();
+        heard.clear();
     }
 
     void at(double atMs, const std::string& newMessage, bool stillChooser) {
@@ -344,6 +351,7 @@ struct FakeApp {
     // The sign has sent a request byte.
     void onRequest(char byte) {
         assert(byte == '~'); // VERSION 3: the sign sends no '?', anywhere
+        heard += byte;
         requests.push_back(Request{nowUs, byte});
         replies.push_back("");
         pending.push_back(PendingRequest{nowUs + latencyUs, (int) requests.size()});
@@ -428,7 +436,9 @@ struct FakeApp {
             if (r.number == pushBehindAnswer) {
                 message = pushBehindMessage;
                 Push p{wireBusyUntilUs + pushBehindGapUs, 0, 0, message, true};
-                p.breakEndUs = breakOnWire(p.breakStartUs, breakUs);
+                p.breakEndUs = breakAsZeros ? sendOnWire(std::string((size_t) (breakUs / BYTE_US), '\0'),
+                                                         p.breakStartUs + BYTE_US)
+                                            : breakOnWire(p.breakStartUs, breakUs);
                 p.messageEndUs = sendOnWire(message + trailer, p.breakEndUs + guardUs + BYTE_US);
                 pushes.push_back(p);
             }
@@ -472,6 +482,16 @@ struct FakeSerial {
         assert(listening);
         tick(BYTE_US); // one byte at 14400 baud
         app.onRequest(byte);
+    }
+
+    // Text that is not a request (only the bench build sends any, in front of a request)
+    void print(const char* text) {
+        assert(listening);
+        for (; *text; text++) {
+            assert(*text != '~' && *text != '?' && *text >= 0x20 && *text < 0x7F);
+            tick(BYTE_US);
+            app.heard += *text;
+        }
     }
 
     // The byte at the front of the receive buffer, -1 if it is empty. Does not wait.
@@ -554,7 +574,6 @@ static std::string repeat(const char* unit, size_t length) {
 // Puts the sign and the link into the state loop() is in when its '~' read has just brought the
 // chooser message: something else on the LEDs, the message in `json`.
 static void arrive(FakeApp::Kind kind, const std::string& text, const std::string& count) {
-    chooserLeft(); // loop() drew something else before this
     nowUs = 0;
     frames.clear();
     sending.clear();
@@ -589,15 +608,15 @@ static bool runChooser(FakeApp::Kind kind, const std::string& text, const std::s
 
 // The whole of loop() as far as the chooser goes, with the sketch's own code for the two decisions
 // (chooserReadMessage() inside readSerialData(), chooserDispatch() in loop()). Returns the type of
-// the message loop() would show next, or 0 when its normal read got nothing (the starfield).
+// the message loop() would show next, or 0 when a request got no answer (the starfield).
 static char runLoop(FakeApp::Kind kind, const std::string& text, const std::string& count) {
     arrive(kind, text, count);
     for (;;) {
         char type = chooserDispatch();
-        if (type) return type;
+        if (type == CHOOSER_DISPATCH_NO_ANSWER) return 0; // the stars, as after any unanswered request
+        if (type != CHOOSER_DISPATCH_NOTHING) return type;
         // nothing to show: loop() ends and readSerialData() asks again
-        startSerial();
-        softSerial.print('~');
+        chooserRequest();
         DeserializationError err = chooserReadMessage();
         stopSerial();
         if (err != DeserializationError::Ok) return 0;
@@ -810,7 +829,8 @@ static void leavingChooserIsAttentionAndThenTheSignAsks() {
             assert(requestsWhileChoosing() == 0);
             assert(app.requests.size() == 1 && app.replies[0] == BYE);
             double asked = ms(app.requests[0].tUs) - ms(app.pushes[0].breakEndUs);
-            assert(asked >= CHOOSER_ATTN_FIRST_BYTE_MS && asked < CHOOSER_ATTN_FIRST_BYTE_MS + 15);
+            // (the bench build sends its line of numbers first: 27 characters, 19 ms)
+            assert(asked >= CHOOSER_ATTN_FIRST_BYTE_MS && asked < CHOOSER_ATTN_FIRST_BYTE_MS + (CHOOSER_DEBUG_PANEL_B ? 35 : 15));
             // nothing was drawn after the line went LOW: the picture stood still until loop() took over
             assert(frames.back().tUs < app.pushes[0].breakStartUs + 3000);
             assert(ms(nowUs) - ms(app.requests[0].tUs) < 30);
@@ -912,7 +932,7 @@ static void noRequestByteWhileATextIsMoving() {
         size_t f = frameAt(app.requests[r].tUs);
         assert(f > 0 && positionOf(frames[f], FIRST, "3/9") == 0);
         assert(positionOf(frames[f - 1], FIRST, "3/9") == cycle - 1);
-        assert(ms(app.requests[r].tUs - frames[f].tUs) < 2); // at the first frame of the hold
+        assert(ms(app.requests[r].tUs - frames[f].tUs) < 5); // at the first frame of the hold
         assert(app.replies[r] == chooserJson(FIRST, "3/9"));
     }
     // Said the other way round: between the first scrolled frame of a pass and its last, zero bytes
@@ -1292,6 +1312,18 @@ static void bytesBehindAMessageDoNotStopTheScroll() {
     assert(assertSteadyScroll(FIRST, "3/9", 5) >= 2);
     assert(app.requests.size() == 3); // one read at each stand-still; the third brings the other message
 
+    // a long one: forty spaces, or the whole answer written twice
+    const std::string trailers[] = {std::string(40, ' '), chooserJson(FIRST, "3/9")};
+    for (size_t k = 0; k < 2; k++) {
+        freshApp();
+        app.trailer = trailers[k];
+        app.latencyUs = 9000;
+        app.at(11000, BYE, false);
+        assert(runChooser(FakeApp::V2_APP, FIRST, "3/9"));
+        assert(assertSteadyScroll(FIRST, "3/9", 5) >= 2);
+        assert(app.requests.size() == 3);
+    }
+
     // the same behind a pushed message
     freshApp();
     app.trailer = "\r\n";
@@ -1309,10 +1341,12 @@ static void breakRightBehindAnAnswerIsStillAttention() {
     // The answer to the read at the stand-still, and straight behind it (with no gap at all,
     // and with every gap up to a few ms) the app raises its hand for a new message. Letting a
     // newline behind an answer go by must not let this go by.
-    for (double gapMs = 0; gapMs < 6; gapMs += 0.2) {
+    for (double gapMs = 0; gapMs < 12; gapMs += 0.2) {
         freshApp();
+        app.breakAsZeros = gapMs >= 6; // ... and the same with a run of 0x00 bytes for a break
+        if (gapMs >= 6) gapMs += 0.05;
+        app.pushBehindGapUs = (uint64_t) ((gapMs >= 6 ? gapMs - 6 : gapMs) * 1000);
         app.pushBehindAnswer = 1;
-        app.pushBehindGapUs = (uint64_t) (gapMs * 1000);
         app.pushBehindMessage = chooserJson(SECOND, "4/9");
         app.at(FIRST_PASS_MS + 3000, BYE, false);
         assert(runChooser(FakeApp::V3_APP, FIRST, "3/9"));
@@ -1380,22 +1414,39 @@ static void lineStuckLowIsGivenUpOn() {
     assert(!softSerial.listening);
 }
 
-static void readsThatFailThenTheSameMessageKeepThePicture() {
-    // The read at the stand-still and the one after it get no answer; loop()'s own read does, and
-    // brings the same message. The picture is still ours: no blanking, no start from scratch.
+static void oneReadThatFailsThenTheSameMessageKeepsThePicture() {
+    // The read at the stand-still gets no answer; the sign asks once more and is given the
+    // message it is showing. The picture is still ours: no blanking, no start from scratch.
     freshApp();
     app.dropped.insert(1);
-    app.dropped.insert(2);
     app.at(FIRST_PASS_MS + 6000, BYE, false);
     assert(runLoop(FakeApp::V3_APP, FIRST, "3/9") == 'D');
-    assert(!chooser.onScreen); // loop() is about to draw the other message over the chooser
     assert(clears == 1);
     const int cycle = cycleOf(FIRST);
     for (size_t i = 0; i < frames.size(); i++) {
         assert(positionOf(frames[i], FIRST, "3/9") == (int) (i % cycle));
         assert(frames[i].afterClear == (i == 0));
     }
-    assert(app.requests.size() >= 3 && app.replies[2] == chooserJson(FIRST, "3/9"));
+    assert(app.replies[1] == chooserJson(FIRST, "3/9"));
+}
+
+static void twoUnansweredRequestsEndInTheStarsLikeAnyOther() {
+    // The read at the stand-still and the one after it get no answer. That is an app that does
+    // not answer: loop() shows its stars, as after any unanswered request, and does not wait a
+    // third second with the old text standing there.
+    freshApp();
+    app.dropped.insert(1);
+    app.dropped.insert(2);
+    assert(runLoop(FakeApp::V3_APP, FIRST, "3/9") == 0);
+    assert(app.requests.size() == 2);
+
+    // The same when the app leaves chooser mode and has nothing to send: one request, one wait
+    freshApp();
+    app.at(2000, "", false);
+    app.silentFromUs = 2060 * 1000; // (after its break)
+    assert(runLoop(FakeApp::V3_APP, FIRST, "3/9") == 0);
+    assert(app.requests.size() == 1);
+    assert(ms(nowUs) < 2000 + 50 + CHOOSER_ATTN_FIRST_BYTE_MS + ANSWER_FIRST_BYTE_MS + 30);
 }
 
 static void failedReadsOfAnEarlierVisitAreForgotten() {
@@ -1530,8 +1581,13 @@ static void untypedObjectIsNeverAMessageForLoop() {
         assert(chooserDispatch() == 0);
         assert(frames.empty());
         assert(requestsWhileChoosing() == 0);
-        assert(!chooser.onScreen);
     }
+    // a type that begins with the byte loop() reads as "the app did not answer" is an unknown
+    // type like any other: the default marquee
+    freshApp();
+    arrive(FakeApp::V3_APP, "HELLO", "1/1");
+    deserializeJson(json, "{\"type\":\"\\u0001\",\"str\":\"X\"}");
+    assert(chooserDispatch() == MSGTYPE_DEFAULT);
     // a message with a type but nothing else is shown by loop() (which reads a missing str as "")
     freshApp();
     arrive(FakeApp::V3_APP, "HELLO", "1/1");
@@ -1616,6 +1672,66 @@ static void breakInANormalReadIsSteppedOver() {
     assert(ms(nowUs - began) > ANSWER_FIRST_BYTE_MS - 1 && ms(nowUs - began) < ANSWER_FIRST_BYTE_MS + 5);
 }
 
+static void requestIsNotSentIntoAMessageOnItsWay() {
+    // loop() was drawing something else (and could not listen) when the app entered chooser mode
+    // and pushed. The drawing ends with the pushed message half way down the wire. The request
+    // waits until the line is quiet; the answer to it is then read whole.
+    for (double intoMs = 0; intoMs < 150; intoMs += 2.9) {
+        freshApp();
+        arrive(FakeApp::V3_APP, "HELLO", "1/1");
+        app.message = chooserJson(FIRST, "3/9");
+        nowUs = 5000 * 1000;
+        uint64_t breakEnd = breakOnWire(nowUs, 50000);
+        uint64_t frameEnd = sendOnWire(chooserJson(FIRST, "3/9"), breakEnd + 20000);
+        nowUs += (uint64_t) (intoMs * 1000); // in the break, in the guard, in the frame, after it
+        chooserRequest();
+        assert(app.requests.size() == 1);
+        uint64_t asked = app.requests[0].tUs;
+        // never between the first bit of the pushed frame and 3 ms after its last
+        assert(asked < breakEnd + 20000 || asked >= frameEnd + CHOOSER_LINE_QUIET_MS * 1000);
+        assert(chooserReadMessage() == DeserializationError::Ok);
+        stopSerial();
+        assert(strcmp(json["type"], "H") == 0 && FIRST == (const char*) json["str"]);
+    }
+}
+
+static void breakLateInAReadStillGetsItsMessage() {
+    // The app raises its hand in the last moments of a read's one-second wait. The message that
+    // follows is still waited for.
+    for (double atMs = 880; atMs < 999; atMs += 7) {
+        freshApp();
+        app.silentFromUs = 0;
+        arrive(FakeApp::V3_APP, "HELLO", "1/1");
+        chooserRequest();
+        uint64_t breakEnd = breakOnWire(nowUs + (uint64_t) (atMs * 1000), 50000);
+        sendOnWire(chooserJson(FIRST, "3/9"), breakEnd + 38000);
+        assert(chooserReadMessage() == DeserializationError::Ok);
+        stopSerial();
+        assert(FIRST == (const char*) json["str"]);
+    }
+    // ... but not for ever: a break and nothing behind it ends the read a quarter second later at most
+    freshApp();
+    app.silentFromUs = 0;
+    arrive(FakeApp::V3_APP, "HELLO", "1/1");
+    chooserRequest();
+    uint64_t began = nowUs;
+    breakOnWire(nowUs + 990 * 1000, 50000);
+    assert(chooserReadMessage() == DeserializationError::EmptyInput);
+    stopSerial();
+    assert(ms(nowUs - began) < ANSWER_FIRST_BYTE_MS + ANSWER_AFTER_BREAK_MS + 5);
+    // an object without a type, a break, and then the message: read in the one window
+    freshApp();
+    app.silentFromUs = 0;
+    arrive(FakeApp::V3_APP, "HELLO", "1/1");
+    chooserRequest();
+    uint64_t objectEnd = sendOnWire("{\"c\":7}", nowUs + 3000);
+    uint64_t lowEnd = breakOnWire(objectEnd + 1000, 50000);
+    sendOnWire(chooserJson(FIRST, "3/9"), lowEnd + 20000);
+    assert(chooserReadMessage() == DeserializationError::Ok);
+    stopSerial();
+    assert(FIRST == (const char*) json["str"]);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The measurements on panel 2 (only in the build with CHOOSER_DEBUG_PANEL_B)
 // ---------------------------------------------------------------------------------------------
@@ -1669,6 +1785,34 @@ static void measurementsAreShownOnPanelTwo() {
     size_t back = firstStartOf(FIRST, "3/9", change);
     assert(back < frames.size());
     assert(numberAt(frames[back], 96, 2) == 2 && numberAt(frames[back], 108, 2) == 1);
+
+    // The same numbers went to the app, as a line of text in front of each request that was due
+    // anyway: the one after the push that came cut in half, and the one after the app left
+    // chooser mode (attention and no message).
+    //     #SSS fFFF eEEE aAA bBB lLLL~
+    assert(app.requests.size() == 2);
+    assert(app.heard.size() == 2 * 28);
+    for (int n = 0; n < 2; n++) {
+        std::string line = app.heard.substr((size_t) n * 28, 28);
+        if (wantShow) printf("  the sign told the app: %s\n", line.c_str());
+        const char* shape = "#ddd fddd eddd add bdd lddd~";
+        for (size_t i = 0; i < 28; i++) {
+            if (shape[i] == 'd') assert(line[i] >= '0' && line[i] <= '9'); else assert(line[i] == shape[i]);
+        }
+        assert(line.size() - 1 <= 31);                    // what the app hands over as one request
+        assert(atoi(line.c_str() + 1) == n);              // the lines are numbered
+        assert(atoi(line.c_str() + 16) == 2 + n);         // attentions: two pushes, then the leaving
+        assert(atoi(line.c_str() + 20) == 1 + n);         // fallbacks: the damaged push, then the leaving
+        int low = atoi(line.c_str() + 24);
+        assert(low >= 50 - CHOOSER_SCROLL_DELAY_MS - 3 && low <= 51); // the break, from when the sign first saw it
+    }
+    // the first line has what panel 2 showed after that push
+    std::string first = app.heard.substr(0, 28);
+    assert(atoi(first.c_str() + 6) == numberAt(frames[back], 60, 3));
+    assert(atoi(first.c_str() + 11) == numberAt(frames[back], 78, 3));
+    // the second: no message came, so there is no first byte and no end
+    std::string second = app.heard.substr(28, 28);
+    assert(atoi(second.c_str() + 6) == 0 && atoi(second.c_str() + 11) == 0);
     if (wantShow) printFrame(f, "panel 2 after a push: ms to the first byte, ms to the end, attentions, fallbacks");
 }
 #endif
@@ -1710,7 +1854,8 @@ static const Test tests[] = {
     TEST(glitchOnTheLineNeverMakesAColumnComeEarly),
     TEST(silentAppIsNoticedOnlyAtTheHold),
     TEST(lineStuckLowIsGivenUpOn),
-    TEST(readsThatFailThenTheSameMessageKeepThePicture),
+    TEST(oneReadThatFailsThenTheSameMessageKeepsThePicture),
+    TEST(twoUnansweredRequestsEndInTheStarsLikeAnyOther),
     TEST(failedReadsOfAnEarlierVisitAreForgotten),
     TEST(oldAppWithSevenCharacterPreviewBlinks),
     TEST(neverMoreThanSixtyColumnsWhateverTheCountAndText),
@@ -1721,6 +1866,8 @@ static const Test tests[] = {
     TEST(untypedObjectIsNeverAMessageForLoop),
     TEST(normalReadSkipsUntypedObjectsOnlySoFar),
     TEST(breakInANormalReadIsSteppedOver),
+    TEST(requestIsNotSentIntoAMessageOnItsWay),
+    TEST(breakLateInAReadStillGetsItsMessage),
 #if CHOOSER_DEBUG_PANEL_B
     TEST(measurementsAreShownOnPanelTwo),
 #endif
