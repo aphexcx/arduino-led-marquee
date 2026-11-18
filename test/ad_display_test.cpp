@@ -587,8 +587,11 @@ static void testChonkyNudge() {
                 k++;
                 n++;
             }
+            // each picture stays for dly: until the next one appears, or until the return
             uint64_t until = k < r.frames.size() ? r.frames[k].sentUs : r.endUs;
-            if (dly >= 10) assert(near(until - first, (uint64_t) dly * 1000 + (skip < 8 ? FRAME_US : 0), 60));
+            if (dly >= 10) assert(near(until - first, (uint64_t) dly * 1000, 60));
+            // (a dly shorter than a frame takes to send: one picture straight after the other)
+            if (dly < 5 && skip < 8) assert(near(until - first, FRAME_US + 501, 60));
             if (dly == 0) assert(n == 1);
         }
         assert(k == r.frames.size());

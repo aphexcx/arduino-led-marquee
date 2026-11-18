@@ -220,8 +220,11 @@ void showCharsOneByOneOnBothPanels(const char* str, Color textColor, unsigned in
 // keeps running all the time). Otherwise it just stays for delayMs. From the first frame that
 // shows the end of the text to the return is delayMs of real time; with delayMs 0 that frame is
 // the last thing drawn.
+// With `another`, the caller draws a different picture straight after this one (scrollCols is 0
+// then). The return then comes delayMs after this call began, so that the next picture, which
+// takes as long to send as this one did, appears delayMs after this one appeared.
 static void adShowWave(const TextMetrics& m, const char* s, TextCursor left, uint16_t scrollCols,
-                       unsigned int delayMs, uint g, uint b) {
+                       unsigned int delayMs, uint g, uint b, bool another) {
     uint phase = (uint) delayMs; // where the wave starts, as it always has: the low byte of dly
     uint32_t due = 0;            // when the next frame is to be drawn
     uint32_t stepBase = 0;       // while scrolling: when the column we are on was moved to
@@ -255,7 +258,7 @@ static void adShowWave(const TextMetrics& m, const char* s, TextCursor left, uin
             }
             atEnd = true;
             scrolling = false;
-            endAt = sent + AD_TICKS(delayMs);
+            endAt = (another ? 0 : sent) + AD_TICKS(delayMs);
         }
         if (scrolling) {
             sub++;
@@ -277,7 +280,7 @@ static void adShowWave(const TextMetrics& m, const char* s, TextCursor left, uin
 }
 
 // nudge (the message's "scroll"): move the text left by one character, a column at a time, each
-// column shown for delayMs. This is what the app's letter-by-letter streaming asks for; it is not
+// column shown for delayMs (or for as long as sending a frame takes, 5 ms, if delayMs is less). This is what the app's letter-by-letter streaming asks for; it is not
 // what makes a long text scroll (that happens by itself, when nudge is false).
 void showChonkySlideStyleOnBothPanels(const char* str, unsigned int delayMs, Color colorFrom, bool nudge) {
     // TODO colorFrom, colorTo support (red is the wave)
@@ -285,12 +288,12 @@ void showChonkySlideStyleOnBothPanels(const char* str, unsigned int delayMs, Col
     TextCursor left = textSeek(m, str, 0);
     if (nudge) {
         for (uint skip = 0; skip <= fontChonk.width; skip++) {
-            adShowWave(m, str, left, 0, delayMs, colorFrom.g, colorFrom.b);
+            adShowWave(m, str, left, 0, delayMs, colorFrom.g, colorFrom.b, skip < fontChonk.width);
             textCursorNext(m, str, left);
         }
     } else {
         adShowWave(m, str, left, textOffsetToShow(adInkCols(fontChonk, m, str), COLUMNS_PER_PANEL), delayMs,
-                   colorFrom.g, colorFrom.b);
+                   colorFrom.g, colorFrom.b, false);
     }
 }
 

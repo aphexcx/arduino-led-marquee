@@ -16,7 +16,8 @@ For every 'O' and 'C' message:
     colours the sign has always sent for that style
   - a text wider than a panel moves one column at a time, never back, and ends with its last
     character whole at the right edge
-  - no gap between two frames is longer than the pace allows
+  - no gap between two frames is longer than the pace allows, and no pause inside a frame is
+    longer than the firmware's frames had before (a long pause would end the frame early)
   - from the first frame that shows the complete text (for a long text: its end) to the sign's
     next request is `dly`, within 2 percent or 10 ms, whichever is larger
 
@@ -34,6 +35,10 @@ import time
 
 COLS, PANEL, ROWS = 120, 60, 7
 HEART, VT = 0x7F, 0x0B
+# The strips take a pause in the data as the end of a frame (50 us by the WS2812 data sheet). The
+# longest pause inside a frame of the firmware before the ads were rebuilt was 25.6 us; nothing
+# checked here may need more than that.
+MAX_PAUSE_US = 26
 failures = []
 measured = []            # (style, text, dly asked, hold measured in ms, time on the sign in s)
 print_lock = threading.Lock()
@@ -108,12 +113,13 @@ def carried(v):
 # ---- running the emulator ---------------------------------------------------------------------
 class Frame:
     """One latched frame, kept small: a run of the long texts is tens of thousands of them."""
-    __slots__ = ("t", "bits", "clean", "mask", "colours", "equal")
+    __slots__ = ("t", "bits", "clean", "pause", "mask", "colours", "equal")
 
     def __init__(self, d, cache):
         self.t = d["t"]
         self.bits = d["bits"]
         self.clean = not d["marginal"] and not d["partial_bits"]
+        self.pause = d["gap_us"]                  # the longest pause between two bits of this frame
         rows = d["rows"]
         self.equal = all(r[:PANEL * 6] == r[PANEL * 6:] for r in rows)
         # One byte per column, bit 7 = top row, like the font data; and each column's colour
@@ -219,6 +225,13 @@ def common_checks(log, frames):
     check(log, bool(frames) and all(f.bits == COLS * 24 and f.clean for f in frames),
           "every frame is exactly 120 columns of clean bits (%d frames)" % len(frames))
     check(log, all(f.sides_equal() for f in frames), "both sides are equal in every frame, LED for LED")
+    pause_check(log, frames)
+
+
+def pause_check(log, frames):
+    longest = max([f.pause for f in frames] or [0])
+    check(log, longest <= MAX_PAUSE_US, "no pause inside a frame is longer than %d us (longest %.1f us)"
+          % (MAX_PAUSE_US, longest))
 
 
 def hold_check(log, env, message, style, complete_t, start, end):
@@ -400,6 +413,7 @@ def check_flashy(env, message, start, end, frames, what):
     expected = side(cols, 0, pad)
     hits = [f for f in lit if f.mask[:PANEL] == expected and f.mask[PANEL:] == expected]
     check(log, len(hits) > 20, "%s (%d frames)" % (what, len(hits)))
+    pause_check(log, lit)
     return log
 
 
@@ -418,9 +432,13 @@ def check_nudge(env, message, start, end, frames):
             seen.append(None)
     check(log, seen == list(range(9)), "the text moves left by one character, a column at a time, and "
           "the message ends (positions seen: %s)" % seen)
-    per_step = (end - frames[0].t) * 1000 / 9
-    check(log, abs(per_step - message["dly"]) <= 5, "each column is shown for dly (%.1f ms for dly %d)"
-          % (per_step, message["dly"]))
+    # when each position first appears; the last one stays until the next request
+    appear = [f.t for f, before in zip(frames, [None] + frames[:-1])
+              if before is None or f.mask[:PANEL] != before.mask[:PANEL]] + [end]
+    shown = [(b - a) * 1000 for a, b in zip(appear, appear[1:])]
+    worst = max([abs(s - message["dly"]) for s in shown] or [0])
+    check(log, len(shown) == 9 and worst <= 1, "each column is shown for dly (%s ms for dly %d)"
+          % (" ".join("%.2f" % s for s in shown), message["dly"]))
     return log
 
 
@@ -500,6 +518,8 @@ def main():
          lambda e, m, s, t, f: check_flashy(e, m, s, t, f, "flashy text with a heart is centred, the same on both sides")),
         ({"type": "F", "str": "NEW\u000bMSG\u000bX"},
          lambda e, m, s, t, f: check_flashy(e, m, s, t, f, "flashy text with tabs is centred, the same on both sides")),
+        ({"type": "F", "str": "TEN CHARS!"},
+         lambda e, m, s, t, f: check_flashy(e, m, s, t, f, "flashy text as wide as a panel, the same on both sides")),
     ]
     groups = [("one_by_one", one_by_one), ("chonky", chonky), ("rest", rest)]
     results = [None] * len(groups)

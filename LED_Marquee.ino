@@ -314,9 +314,10 @@ void sendEmptyColumns(int columns) {
 }
 
 static inline void
-sendStringJustified(const char* s, const Font& font, uint skip, const uint r, const uint g, const uint b) {
-    uint startPad, endPad;
-    getColumnsToPadForString(s, font, &startPad, &endPad);
+sendStringJustified(const char* s, const Font& font, uint skip, const uint r, const uint g, const uint b,
+                    uint startPad, uint endPad) {
+    // startPad and endPad are from getColumnsToPadForString(): the caller works them out before it
+    // turns interrupts off, so that walking the string does not make a pause in the middle of a frame
     sendEmptyColumns(startPad);
     sendString(s, font, skip, r, g, b);
     sendEmptyColumns(endPad);
@@ -403,6 +404,9 @@ void showAsInputStyle(const char* str, int idxToBlink, const char mode) {
 }
 
 void showAsCountdownStyle(const char* countdownstr, unsigned int count = 600, boolean showCount = true) {
+    uint startPad, endPad; // for the string in the middle of a panel (when the count is not shown)
+    getColumnsToPadForString(countdownstr, fontStd, &startPad, &endPad);
+
     clear();
 
     while (count > 0) {
@@ -424,7 +428,7 @@ void showAsCountdownStyle(const char* countdownstr, unsigned int count = 600, bo
             sendString(countdownstr, fontStd, 0, brightness, brightness, brightness);
         } else {
             // align string to middle if we're not showing the countdown.
-            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness);
+            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness, startPad, endPad);
         }
 
         //  sendChar( '0' , 0 , 0x80, 0 , 0 );
@@ -446,7 +450,7 @@ void showAsCountdownStyle(const char* countdownstr, unsigned int count = 600, bo
 
         } else {
             // show the string on the other panel too if we're not showing the count
-            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness);
+            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness, startPad, endPad);
         }
 
         sei();
@@ -468,7 +472,7 @@ void showAsCountdownStyle(const char* countdownstr, unsigned int count = 600, bo
             sendString(countdownstr, fontStd, 0, brightness, brightness, brightness);
         } else {
             // align string to middle if we're not showing the countdown.
-            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness);
+            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness, startPad, endPad);
         }
 
 //        sendColumnRGB(0x00, 0, 0, 0xff);
@@ -490,7 +494,7 @@ void showAsCountdownStyle(const char* countdownstr, unsigned int count = 600, bo
             sendChar('0', 0, brightness, 0, 0, false);
         } else {
             // show the string on the other panel too if we're not showing the count
-            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness);
+            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness, startPad, endPad);
         }
 
         sei();
