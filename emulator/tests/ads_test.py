@@ -483,7 +483,9 @@ def check_chonky(env, message, start, end, frames):
         worst = max([abs(s - env["step"]) for s in steps] or [0])
         check(log, worst <= 0.5, "then one column every %d ms (worst %.2f ms off)" % (env["step"], worst))
     elif dly == 1000:
-        check(log, len(frames) == 100, "dly 1000 is 100 frames, as it always was (%d)" % len(frames))
+        # a frame every AD_WAVE_FRAME_MS for as long as the text stays (10 ms: 100 frames, as it always was)
+        check(log, len(frames) == 1000 // env["wave"], "dly 1000 is %d frames, one every %d ms (%d)"
+              % (1000 // env["wave"], env["wave"], len(frames)))
     elif dly == 0:
         check(log, len(frames) == 1, "dly 0 or missing is one frame (%d)" % len(frames))
     message["_long"] = bool(last)

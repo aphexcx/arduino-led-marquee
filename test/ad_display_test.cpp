@@ -585,7 +585,7 @@ static void checkChonky(const std::string& text, unsigned int dly) {
         // a text that fits: a frame every 10 ms for as long as it stays (1000 ms: 100 frames, as before)
         size_t expected = dly < 6 ? 1 : (dly - 6) / 10 + 1;
         assert(r.frames.size() == expected || r.frames.size() == expected + 1);
-        if (dly == 1000) assert(r.frames.size() == 100);
+        if (dly == 1000) assert(r.frames.size() == 1000 / AD_WAVE_FRAME_MS);
     }
 }
 
