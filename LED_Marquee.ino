@@ -128,12 +128,20 @@ PROGMEM = "                    ";
 //gives attention and sends nothing), so this is also the pause before the next message after "leave chooser".
 //On the sign the app's first byte was measured 26 to 38 ms after the end of its break
 #define CHOOSER_ATTN_FIRST_BYTE_MS 150
-//... and this long for each byte after it
-#define CHOOSER_ATTN_BYTE_MS 60
+//... and this long for each byte after it. The app may pause inside a message (its sending thread is held up
+//for 40 to 80 ms a few times a minute), so this is longer than that
+#define CHOOSER_ATTN_BYTE_MS 100
 //The line counts as HIGH again once it has been HIGH for this long without a gap, in ms (one byte is 0.7 ms)
 #define CHOOSER_LINE_QUIET_MS 3
+//A LOW that lasts this long (microseconds) is the app raising its hand: a break, or the first of the 0x00 bytes it
+//may send instead of one (nine bit times LOW, 625 us at 14400 baud). No other byte holds the line LOW that long:
+//the longest is 0x80 with eight bit times, 556 us, and no character of ASCII text has more than seven
+#define CHOOSER_BREAK_MIN_US 590UL
 //After a message has been read, wait at most this long for whatever the app writes behind it (a newline) to end
 #define CHOOSER_TRAILER_WAIT_MS 100
+//When the line from the app changed while a request went out, the sign listens again only once the line has been
+//HIGH for this long, in ms: longer than it is between two bytes sent back to back (nine bit times, 0.63 ms)
+#define REQUEST_GAP_MS 1
 //Before any '~' is sent (in every mode), the line from the app must have been quiet for this long, in ms, or
 //the answer would be read starting in the middle of whatever the app is sending. (The app wants about 10 ms of
 //silence between a message it pushed and the next request.) Every request in every mode is this much later
@@ -206,6 +214,9 @@ static_assert(CHOOSER_REFRESH_MS >= 1000 && CHOOSER_REFRESH_MS <= 30000, "CHOOSE
 static_assert(CHOOSER_HOLD_MS >= 1 && CHOOSER_HOLD_MS <= 60000 && CHOOSER_SCROLL_DELAY_MS >= 1 &&
               CHOOSER_SCROLL_DELAY_MS <= 1000 && CHOOSER_BLINK_PAUSE_MS >= 0 && CHOOSER_BLINK_PAUSE_MS <= 60000,
               "the chooser's waits are counted in microseconds in 32 bits");
+static_assert(CHOOSER_ATTN_BYTE_MS + 10 <= 255 && REQUEST_QUIET_MS <= 255, "the quiet times are kept in 8 bits");
+static_assert(REQUEST_GAP_MS >= 1 && REQUEST_GAP_MS <= REQUEST_QUIET_MS,
+              "the gap must be longer than the line is HIGH inside a run of bytes (0.63 ms at most)");
 static_assert(CHOOSER_LINE_QUIET_MS >= 1 && CHOOSER_LINE_QUIET_MS < CHOOSER_ATTN_HIGH_WAIT_MS &&
               CHOOSER_LINE_QUIET_MS < CHOOSER_TRAILER_WAIT_MS,
               "the line must be seen HIGH for longer than it is inside a run of bytes (0.63 ms at most)");
@@ -910,6 +921,20 @@ static inline bool chooserLineLow() {
     return digitalRead(rxPin) == LOW;
 }
 
+// Sends one byte to the app and says whether the line FROM the app changed while it went out. SoftwareSerial
+// sends with interrupts off, so its receiver cannot take a byte that begins in that time. That something began is
+// known, not guessed: the receive pin's change flag, which the pin sets with interrupts off too (PB2 is the only
+// pin of its group that is watched, and only while the sign listens). Nothing is decided here; what the sign does
+// about it is in chooserRequest(). What begins after this byte has gone out is not reported.
+static bool chooserSendByte(char c) {
+    uint oldSREG = SREG;
+    cli();
+    softSerial.write(c);                    // (puts SREG back as it found it: interrupts stay off)
+    bool changed = PCIFR & bit(PCIF0);
+    SREG = oldSREG;
+    return changed;
+}
+
 // The chooser display (MSGTYPE_CHOOSER): showAsChooser() with its scrolling and its watch on the receive line,
 // and the two decisions readSerialData() and loop() make about a reply (chooserReadMessage, chooserDispatch).
 // It is in its own file so that the host test can run it against a fake sign and a fake app.
@@ -926,20 +951,17 @@ bool readSerialData() {
 //            }
 
     // send special symbol so IMX knows to respond with custom message data
-    // (once the line is quiet: not into a message the app is pushing. If it never is, nothing was
-    // sent: a request without an answer)
-    if (!chooserRequest()) {
-        return false;
-    }
+    // (once the line is quiet: not into a message the app is pushing)
 //    int firstByte = softSerial.read();
 //
 //    switch (firstByte) {
 //
 //    }
 
-    // Read the JSON document from the serial port (stepping over what is not a message: the 0x00 a
-    // break is received as, and an object without a "type")
-    DeserializationError err = chooserReadMessage();
+    // ... and read the JSON document from the serial port (stepping over what is not a message: the
+    // 0x00 a break is received as, white space, an object without a "type"; and letting by, without
+    // an error, the rest of a message the app sent by itself while the sign could not listen)
+    DeserializationError err = chooserExchange();
 
     if (err == DeserializationError::Ok) {
         stopSerial();

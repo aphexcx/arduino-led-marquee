@@ -29,6 +29,22 @@
 //  - No '~' is sent, by the chooser or by loop(), into something the app is sending or is about
 //    to send: the line must be quiet first, and after a LOW the app is given the time its message
 //    needs to begin (chooserRequest).
+//  - A frame is whole or it is not a frame. A message opens with a brace and a double quote
+//    (chooserOpensMessage). What arrives without having been asked for is taken only as a
+//    complete object with a type. Anything less, and an "answer" that does not open like a
+//    message or cannot be read to its end, is the rest of something the sign did not hear the
+//    start of: it is let by, and then the sign asks again (chooserExchange). It is an error on
+//    the sign only when three requests in a row end that way.
+//  - A request that has gone out stands. Whether something of the app's began while it went
+//    out is known, not guessed (the receive pin's change flag at the end of the sign's own
+//    byte: chooserSendByte, in the sketch). If so its start was missed: the sign listens again
+//    once the line has paused, and reads the answer to the request it sent. That something
+//    crossed the request is never by itself a reason to ask again; a second request would take
+//    a second message from the app's list (chooserRequest).
+//  - The first LOW the sign sees may be a bit of a message, not a break: the sign's own app
+//    raises its hand with a run of 0x00 bytes, and a break can be too short to see. A run of
+//    zeros is waited out like a break. A message that is already going by is let by, all of it,
+//    and then the sign asks, once (attentionRead).
 //
 // Two of the steps here do not know about the chooser and can be used by any display loop that
 // wants to hear the app while it draws: chooserLineLow() (one look at the pin, a few microseconds,
@@ -139,11 +155,13 @@ static void chooserCount(uint& counter) {
 
 // Sends the numbers to the app as one line of text, if it has not had them. The caller sends
 // the '~' that ends it. Call only while listening has just begun and a '~' is due.
-static void chooserDebugLine() {
+// Returns true if the line from the app changed while this one went out (see chooserSendByte).
+// The line is sent whole all the same, and the caller sends its '~' behind it and then deals
+// with what crossed, as for a '~' alone.
+static bool chooserDebugLine() {
     if (!chooserDebug.lineStale) {
-        return;
+        return false;
     }
-    chooserDebug.lineStale = false;
     char line[28];
     memcpy_P(line, PSTR("#000 f000 e000 a00 b00 l000"), sizeof(line));
     chooserDigits(line + 1, chooserDebug.lines, 3);
@@ -154,8 +172,15 @@ static void chooserDebugLine() {
     chooserDigits(line + 24, chooserDebug.lowMs, 3);
     line[4] = line[9] = line[14] = line[18] = line[22] = ' '; // (chooserDigits ends each number with a 0 byte)
     line[27] = '\0';
-    softSerial.print(line);
+    bool crossed = false;
+    for (const char* c = line; *c; c++) {
+        if (chooserSendByte(*c)) {
+            crossed = true;
+        }
+    }
+    chooserDebug.lineStale = false;
     chooserDebug.lines = chooserDebug.lines >= 999 ? 0 : chooserDebug.lines + 1;
+    return crossed;
 }
 #endif
 
@@ -294,20 +319,16 @@ static bool chooserWait(unsigned long sinceUs, unsigned long us) {
     return false;
 }
 
-// A LOW that lasts this long is the app raising its hand: a break, or the first of the 0x00 bytes
-// it may send instead of one (nine bit times LOW, 625 us at 14400 baud). No other byte that can
-// stand behind a message holds the line LOW that long: the longest is 0x80 with eight bit times,
-// 556 us, and no character of ASCII text has more than seven.
-#define CHOOSER_BREAK_MIN_US 590UL
-
 #define LINE_QUIET 0 // HIGH for quietMs without a gap: nothing is on its way
 #define LINE_BREAK 1 // (only with stopAtBreak) the app is holding it LOW
-#define LINE_BUSY 2  // gave up: still LOW, or still carrying bytes
+#define LINE_BUSY 2  // gave up after maxMs: it is still carrying bytes
+#define LINE_HELD 3  // gave up: LOW without a gap for maxLowMs
 
 // Waits until the line has been HIGH for quietMs without a gap: a break is over, a run of
 // bytes has ended (one byte is 0.7 ms and has a HIGH stop bit in it, so a single look at the
-// pin would not do). Gives up, with LINE_BUSY, after maxMs, or when the line has been LOW
-// without a gap for maxLowMs (nothing is driving it, or it is held for good).
+// pin would not do). Gives up after maxMs (LINE_BUSY: bytes are still arriving), or when the
+// line has been LOW without a gap for maxLowMs (LINE_HELD: nothing is driving it, or it is held
+// for good).
 // With stopAtBreak it also returns, at once, when the line stays LOW for CHOOSER_BREAK_MIN_US:
 // that is the app raising its hand, and it is left for the caller's next look at the line.
 static uint chooserAwaitQuietLine(unsigned int maxMs, unsigned int maxLowMs, uint quietMs, bool stopAtBreak) {
@@ -326,7 +347,7 @@ static uint chooserAwaitQuietLine(unsigned int maxMs, unsigned int maxLowMs, uin
                 return LINE_BREAK;
             }
             if (nowUs - lowSinceUs >= maxLowMs * 1000UL) {
-                return LINE_BUSY;
+                return LINE_HELD;
             }
             highSinceUs = nowUs;
         } else {
@@ -342,9 +363,24 @@ static uint chooserAwaitQuietLine(unsigned int maxMs, unsigned int maxLowMs, uin
 }
 
 // What may stand in front of a message without being part of it: the 0x00 a break is received
-// as, and JSON white space (an app that ends what it writes with a newline).
+// as (and each of the zero bytes the app sends instead of a break), JSON white space (an app
+// that ends what it writes with a newline), and 0xFF. That last one is what the receiver makes
+// of a dip of the line too short to be a byte (it finds a start bit and then nothing but HIGH);
+// no message contains it (JSON is ASCII or UTF-8, which has no 0xFF).
 static bool chooserIsPadding(int c) {
-    return c == 0 || c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    return c == 0 || c == 0xFF || c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+// Takes the byte of padding at the front of the receive buffer. A 0x00 is the line having been
+// LOW: the app raising its hand, received by the receiver instead of seen by a look at the pin.
+// It counts as a LOW seen all the same (see lineSeenLow), or the sign would ask into the
+// message that is about to follow it.
+static void chooserTakePadding(int c) {
+    softSerial.read();
+    if (c == 0) {
+        lineLowAtMs = millis();
+        lineWasLow = true;
+    }
 }
 
 // Waits up to maxMs for a pushed message to begin: the next byte in the receive buffer that is
@@ -362,10 +398,78 @@ static bool chooserAwaitObject(unsigned int maxMs) {
             if (!chooserIsPadding(c)) {
                 return false;
             }
-            softSerial.read();
+            chooserTakePadding(c);
         }
     } while (millis() - startMs < maxMs);
     return false;
+}
+
+// What ArduinoJson reads a message from: the serial line, with the opening brace in front again
+// that chooserOpensMessage() took from it.
+struct ChooserReader {
+    bool brace; // the '{' has not been handed over yet
+
+    int read() {
+        if (brace) {
+            brace = false;
+            return '{';
+        }
+        char c;
+        return softSerial.readBytes(&c, 1) ? (unsigned char) c : -1; // (waits, up to the timeout)
+    }
+
+    size_t readBytes(char* buffer, size_t length) {
+        size_t n = 0;
+        if (brace && length) {
+            brace = false;
+            buffer[n++] = '{';
+        }
+        return n + softSerial.readBytes(buffer + n, length - n);
+    }
+};
+
+// A MESSAGE OPENS WITH A BRACE AND A DOUBLE QUOTE: `{"` (white space may stand between them;
+// `{}` is let through as the object without a type that it is). The '{' is at the front of the
+// receive buffer. Takes it and looks at what follows, waiting up to byteMs for it.
+// False: this is not where a message begins. It is a '{' from the inside of one, the rest of
+// something the sign did not hear the start of, and the caller lets it go by.
+// The quote is what tells the two apart. ArduinoJson also reads keys in single quotes and
+// without any, so the rest of a pushed message whose text is  x{type:'D',str:'...'}  would be a
+// message of its own if a brace were enough. But inside a JSON string a double quote is always
+// written \", so a brace inside a text is followed by a double quote only when the text ends
+// there, and what follows that (`{","flashy":...`, `{"}`) is never an object.
+// (This holds for messages whose values are texts and numbers, as all of the app's are. A value
+// that is itself an object would open like a message.)
+static bool chooserOpensMessage(unsigned int byteMs) {
+    softSerial.read(); // the '{'
+    unsigned long startMs = millis();
+    do {
+        int c = softSerial.peek();
+        if (c == '"' || c == '}') {
+            return true;
+        }
+        if (c >= 0) {
+            if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+                return false;
+            }
+            softSerial.read();
+        }
+    } while (millis() - startMs < byteMs);
+    return false; // a brace and then nothing
+}
+
+// Reads the message that begins at the front of the receive buffer (the caller has seen its '{'
+// there) into `into`, allowing byteMs for every byte after the first.
+// InvalidInput also when it does not open like a message (chooserOpensMessage).
+static DeserializationError chooserReadFrame(JsonDocument& into, unsigned int byteMs) {
+    DeserializationError err = DeserializationError::InvalidInput;
+    softSerial.setTimeout(byteMs);
+    if (chooserOpensMessage(byteMs)) {
+        ChooserReader reader = {true};
+        err = deserializeJson(into, reader);
+    }
+    softSerial.setTimeout(1000); // the Stream default
+    return err;
 }
 
 // What is in `json` after a read, and what it does to the display. A different chooser message
@@ -409,11 +513,10 @@ static bool chooserAwaitAnswer() {
         if (c >= 0 && !chooserIsPadding(c)) {
             return true;
         }
-        if (c > 0) {
-            softSerial.read(); // white space
+        if (c >= 0) {
+            chooserTakePadding(c);
         }
         if (c == 0) {
-            softSerial.read();
             unsigned long neededMs = (millis() - startMs) + ANSWER_AFTER_BREAK_MS;
             if (neededMs > ANSWER_FIRST_BYTE_MS + ANSWER_AFTER_BREAK_MS) {
                 neededMs = ANSWER_FIRST_BYTE_MS + ANSWER_AFTER_BREAK_MS;
@@ -431,7 +534,10 @@ static DeserializationError chooserReadObject() {
     if (!chooserAwaitAnswer()) {
         return DeserializationError::EmptyInput;
     }
-    return deserializeJson(json, softSerial);
+    if (softSerial.peek() != '{') {
+        return DeserializationError::InvalidInput; // every message opens with a brace
+    }
+    return chooserReadFrame(json, ANSWER_FIRST_BYTE_MS);
 }
 
 // The read of a normal '~' request, loop()'s and ours (the '~' has just been sent).
@@ -448,65 +554,119 @@ static DeserializationError chooserReadMessage() {
     return err;
 }
 
-// How long after its own '~' the sign looks for a byte that cannot be the answer to it: one that
-// has arrived before the app can have read the request began while the sign was still sending,
-// and was damaged by that (two byte times: the damaged byte may be received late).
-#define REQUEST_COLLISION_US 1400UL
+#define REQUEST_SENT 0    // the request went out and the sign is listening for its answer
+#define REQUEST_UNASKED 1 // nothing was sent: bytes nobody asked for are arriving; the sign is listening
+#define REQUEST_DEAD 2    // the sign is not listening: the line never became quiet
 
-// Sends the request for the next message and listens for the answer. loop()'s request and the
-// chooser's own. Returns false, with nothing sent and not listening, if the line from the app
-// does not become quiet: that is a request without an answer.
+// How often one exchange may ask (again after letting go by what was not a message)
+#define REQUEST_MAX_TRIES 3
+
+// Gets the request for the next message out, if the line allows it. loop()'s and the chooser's.
 //
-// Three rules keep the sign from talking into what the app is sending:
+// Three rules keep the sign from talking into what the app is sending, and from asking twice:
 //  1. The line must be quiet first, for REQUEST_QUIET_MS, however long the app goes on (up to
 //     REQUEST_BUSY_WAIT_MS; a line LOW without a gap for REQUEST_QUIET_WAIT_MS is dead). So a
 //     request never follows a message of the app's by less than that, seen or not.
 //  2. If the line was seen LOW less than CHOOSER_ATTN_FIRST_BYTE_MS ago (by any look, anywhere),
 //     the app may be about to send a message by itself. The sign listens for the rest of that
-//     time and sends nothing. If a byte comes, no request is sent at all: what is coming is the
-//     answer (true is returned and the caller reads it).
-//  3. If the app began to send in the one moment the sign could not see it coming (it was
-//     drawing during the break, and the message's first bit fell while the '~' went out), that
-//     first byte is damaged. It shows as a byte that is there sooner than any answer can be. The
-//     sign then lets the message go by and asks once more. (A message nobody asked for is a
-//     pushed chooser message; in chooser mode a request takes nothing from the app's list.)
-static bool chooserRequest() {
-    for (uint attempt = 0;; attempt++) {
-        if (chooserAwaitQuietLine(REQUEST_BUSY_WAIT_MS, REQUEST_QUIET_WAIT_MS, REQUEST_QUIET_MS, false) != LINE_QUIET) {
-            return false;
-        }
-        startSerial(); // we stopped listening after the last read, so this starts with an empty buffer
-        while (lineWasLow && millis() - lineLowAtMs < CHOOSER_ATTN_FIRST_BYTE_MS) {
-            if (softSerial.peek() >= 0) {
-                return true;
-            }
-        }
-#if CHOOSER_DEBUG_PANEL_B
-        chooserDebugLine();
-#endif
-        softSerial.print('~');
-        if (attempt) {
-            return true;
-        }
-        bool damaged = false;
-        unsigned long sentUs = micros();
-        do {
-            int c = softSerial.peek();
-            if (c == 0) {
-                break; // the app raised its hand as we asked: the read steps over it
-            }
-            if (c > 0) {
-                damaged = true;
-                break;
-            }
-        } while (micros() - sentUs < REQUEST_COLLISION_US);
-        if (!damaged) {
-            return true;
-        }
-        stopSerial();
-        lineLowAtMs = millis(); // what is on the line now counts as seen
-        lineWasLow = true;
+//     time and sends nothing. If a byte comes, no request is sent: REQUEST_UNASKED.
+//  3. A REQUEST THAT HAS GONE OUT STANDS. It is never sent a second time because of what was on
+//     the line while it went out. The request byte goes out through chooserSendByte(), which
+//     says whether the line from the app changed meanwhile. If it did, something of the app's
+//     began while the sign could not receive: the app raising its hand (a break, or the run of
+//     0x00 bytes it sends instead of one), the first byte of a message it pushed, or noise. It
+//     cannot be the answer: the app had not received the request yet. Whatever it is, its
+//     start was missed, so the receiver is not trusted with it (it would take a byte from its
+//     middle): the sign stops listening until the line has been HIGH for REQUEST_GAP_MS, longer
+//     than it ever is between two bytes sent back to back, and then listens for the answer as
+//     after any request. What the app sends behind a break or a run of zeros is then read whole:
+//     the message it pushed, or, if it has left chooser mode, the answer to this very request.
+//     Asking again instead would take a second message from the app's list for the one shown.
+//     The one thing that is lost is a pushed message whose own first byte crossed the request
+//     (no break in front of it that the sign could see, and its first bit inside the 0.7 ms of
+//     the request): the request then gets no answer, the read ends as unanswered, and the sign
+//     is that much later, with nothing taken and no error. (If that message pauses further on,
+//     its second part arrives where the answer would, is let by like any rest of a message,
+//     and the sign does ask again: chooserExchange. The app is in chooser mode then.)
+//     And one limit: for that REQUEST_GAP_MS the sign hears nothing. The app answers a request
+//     2 to 9 ms after it. If NOISE crossed the request and the answer began within the
+//     millisecond after it, the answer goes by and the request counts as unanswered.
+static uint chooserRequest() {
+    if (chooserAwaitQuietLine(REQUEST_BUSY_WAIT_MS, REQUEST_QUIET_WAIT_MS, REQUEST_QUIET_MS, false) != LINE_QUIET) {
+        return REQUEST_DEAD;
     }
+    startSerial(); // we stopped listening after the last read, so this starts with an empty buffer
+    while (lineWasLow && millis() - lineLowAtMs < CHOOSER_ATTN_FIRST_BYTE_MS) {
+        if (softSerial.peek() >= 0) {
+            return REQUEST_UNASKED;
+        }
+    }
+    bool crossed = false;
+#if CHOOSER_DEBUG_PANEL_B
+    crossed = chooserDebugLine();
+#endif
+    if (chooserSendByte('~')) {
+        crossed = true;
+    }
+    if (crossed) {
+        stopSerial();
+        if (chooserAwaitQuietLine(REQUEST_BUSY_WAIT_MS, REQUEST_QUIET_WAIT_MS, REQUEST_GAP_MS, false) != LINE_QUIET) {
+            return REQUEST_DEAD; // (the request did go out; nothing can be heard on this line)
+        }
+        startSerial();
+    }
+    return REQUEST_SENT;
+}
+
+// The line is carrying the rest of something the sign did not hear the start of. Stops
+// listening and lets it go by: until the line has been quiet for longer than the app may pause
+// inside a message.
+static void chooserLetRestPass() {
+    stopSerial();
+    chooserAwaitQuietLine(REQUEST_BUSY_WAIT_MS, REQUEST_QUIET_WAIT_MS, CHOOSER_ATTN_BYTE_MS + 10, false);
+}
+
+// One exchange with the app: gets its next message into `json`. loop()'s read and the chooser's.
+// Asks, and reads the answer; or, if the app is already sending by itself, reads that.
+//   Ok          a message is in `json` (an object; whether it has a type is the caller's check
+//               for an answer, and checked here for what came unasked)
+//   EmptyInput  no answer, or the line is dead
+//   another     the last of REQUEST_MAX_TRIES requests in a row was answered with something that
+//               opened like a message and could not be read
+// A FRAME IS WHOLE OR IT IS NOT A FRAME. What does not open like a message (`{"`), what opens
+// like one and cannot be read to its end, and what arrives unasked and is not a complete object
+// with a type, is first of all the rest of something whose start the sign did not hear (the app
+// may pause inside a message for longer than the line needs to look quiet). So it is no error
+// yet: it is let by, until the line has been quiet for longer than such a pause, and the sign
+// asks again. That costs no message: if the bytes were an answer that was damaged on the line,
+// its message was lost with them; if they were the rest of a pushed message, the app is in
+// chooser mode, where a request takes nothing. Only when the last try ends the same way is it
+// reported. The caller stops the listening.
+static DeserializationError chooserExchange() {
+    DeserializationError unreadable = DeserializationError::EmptyInput;
+    for (uint attempt = 0; attempt < REQUEST_MAX_TRIES; attempt++) {
+        unreadable = DeserializationError::EmptyInput;
+        uint request = chooserRequest();
+        if (request == REQUEST_DEAD) {
+            return DeserializationError::EmptyInput;
+        }
+        if (request == REQUEST_UNASKED) {
+            if (chooserAwaitObject(CHOOSER_ATTN_FIRST_BYTE_MS) &&
+                chooserReadFrame(json, CHOOSER_ATTN_BYTE_MS) == DeserializationError::Ok &&
+                json["type"].is<const char*>()) {
+                return DeserializationError::Ok;
+            }
+            chooserLetRestPass();
+            continue;
+        }
+        DeserializationError err = chooserReadMessage();
+        if (err == DeserializationError::Ok || err == DeserializationError::EmptyInput) {
+            return err;
+        }
+        unreadable = err;
+        chooserLetRestPass();
+    }
+    return unreadable;
 }
 
 // A read has just ended, at the closing brace. Whatever the app writes behind a message (a
@@ -520,10 +680,7 @@ static void chooserLetTrailerPass() {
 // read's patience (a second per byte). No error flash and no error text on the wire.
 // Only ever called with the text standing still or already stopped.
 static bool chooserAsk() {
-    if (!chooserRequest()) {
-        return false;
-    }
-    DeserializationError err = chooserReadMessage();
+    DeserializationError err = chooserExchange();
     stopSerial();
     chooserLetTrailerPass();
     return err == DeserializationError::Ok;
@@ -545,7 +702,7 @@ static uint chooserSync() {
     return chooserTake(chooserAsk());
 }
 
-// Nothing usable was read: ask the normal way (chooserRequest() first lets whatever is still
+// Nothing usable was read: ask the normal way (chooserExchange() first lets whatever is still
 // coming in go by).
 static uint chooserFallback() {
 #if CHOOSER_DEBUG_PANEL_B
@@ -556,7 +713,8 @@ static uint chooserFallback() {
 
 // The receive line was seen LOW: the app has something to say and will say it unasked.
 // Waits for the line to go HIGH and stay HIGH (the break is over), listens, and reads one message
-// into `into`. Returns true when a whole JSON object came. Nothing here knows about the chooser:
+// into `into`. Returns true when a whole JSON object came. When bytes came that were not one, the
+// line is quiet again on return (they have gone by). Nothing here knows about the chooser:
 // any display loop that looks at chooserLineLow() between its frames can call this, and then
 // decide what the message means for what it is showing.
 static bool attentionRead(JsonDocument& into) {
@@ -576,16 +734,23 @@ static bool attentionRead(JsonDocument& into) {
         }
     }
 #endif
-    chooserAwaitQuietLine(CHOOSER_ATTN_HIGH_WAIT_MS, CHOOSER_ATTN_HIGH_WAIT_MS, CHOOSER_LINE_QUIET_MS, false);
+    if (chooserAwaitQuietLine(CHOOSER_ATTN_HIGH_WAIT_MS, CHOOSER_ATTN_HIGH_WAIT_MS, CHOOSER_LINE_QUIET_MS, false) ==
+        LINE_BUSY) {
+        // Bytes, and no end to them: this LOW was no break but a bit of a message that is going
+        // by (the app's break was too short to be seen, or it gives none). Its start is gone.
+        // Let all of it go by; the caller then asks, once.
+        chooserLetRestPass();
+        return false;
+    }
     startSerial(); // begins with an empty buffer: nothing of the break is in it
     bool readOk = false;
-    if (chooserAwaitObject(CHOOSER_ATTN_FIRST_BYTE_MS)) {
+    bool began = chooserAwaitObject(CHOOSER_ATTN_FIRST_BYTE_MS);
+    bool nothingCame = !began && softSerial.peek() < 0;
+    if (began) {
 #if CHOOSER_DEBUG_PANEL_B
         chooserDebug.firstByteMs = (unsigned int) (millis() - seenMs);
 #endif
-        softSerial.setTimeout(CHOOSER_ATTN_BYTE_MS);
-        readOk = deserializeJson(into, softSerial) == DeserializationError::Ok;
-        softSerial.setTimeout(1000); // the Stream default, for the normal '~' read
+        readOk = chooserReadFrame(into, CHOOSER_ATTN_BYTE_MS) == DeserializationError::Ok;
 #if CHOOSER_DEBUG_PANEL_B
         chooserDebug.endMs = (unsigned int) (millis() - seenMs);
 #endif
@@ -593,6 +758,11 @@ static bool attentionRead(JsonDocument& into) {
     stopSerial();
     if (readOk) {
         chooserLetTrailerPass();
+    } else if (!nothingCame) {
+        // Bytes came and were not a whole message: the rest of one (the LOW was a bit of it, not
+        // a break), or one that was cut short. Let the rest go by before the caller asks, or
+        // every bit of it would be the next attention.
+        chooserLetRestPass();
     }
     return readOk;
 }
@@ -642,7 +812,8 @@ bool showAsChooser(const char* blinkyStr, const char* countyStr) {
                 return false; // a line that stays LOW, an app that is gone
             }
             if (lineSeenLow()) {
-                continue; // the app raised its hand while we were reading: that comes first
+                attention = true; // the app raised its hand while we were reading: that comes first
+                continue;         // (and is acted on even if the line is HIGH again by then)
             }
             reply = chooserFallback();
             if (reply == CHOOSER_REPLY_FAILED) {
