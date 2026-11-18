@@ -255,7 +255,8 @@ def run_group(env, name, messages, port, flags=()):
         # what the sign was showing when the message came: the last frame latched before it
         before = frames[first - 1].load if first else [0, 0]
         out.append((requests[i], requests[i + 1], frames[first:at], before))
-    return out
+    # ... and what the sign drew by itself before it asked for anything: the startup words
+    return out, [f for f in frames if f.t <= requests[0]]
 
 
 def text_bytes(message):
@@ -333,9 +334,10 @@ def check_dark(env, message, start, end, frames):
 
 
 def check_table_only(env, message, start, end, frames):
-    """A message that is only run for the table of what it asks of the supply."""
-    supply_row(message, frames)
-    return [label(message), "  ok    ran to its end (%d frames, %.2f s)" % (len(frames), end - start)]
+    """A message that is run for the table of what it asks of the supply, and for the limits."""
+    log = [label(message), "  ok    ran to its end (%d frames, %.2f s)" % (len(frames), end - start)]
+    limit_check(log, env, message, frames)
+    return log
 
 
 # ---- the supply -------------------------------------------------------------------------------------
@@ -354,7 +356,7 @@ def supply_row(message, frames):
 
 
 def limit_check(log, env, message, frames):
-    """Every style: the table. O and C on an image with limits: no frame above them."""
+    """Every style: the table, and on an image with limits: no frame above them."""
     both, one = supply_row(message, frames)
     if env["limit_both"]:
         check(log, both <= env["limit_both"], "no frame asks more than %d mA of the supply, both sides together "
@@ -672,7 +674,7 @@ def find(haystack, needle):
 def check_marquee(env, message, start, end, frames, font_name, what, probe):
     """`probe`: how many bytes from the start of the text to look for in one frame."""
     log = [label(message)]
-    supply_row(message, frames)
+    limit_check(log, env, message, frames)
     font = env[font_name]
     cols = font.columns(text_bytes(message)[:probe])[:-1]
     check(log, any(find(f.mask, [0] + cols + [0]) for f in frames),
@@ -693,7 +695,7 @@ def check_marquee(env, message, start, end, frames, font_name, what, probe):
 
 def check_flashy(env, message, start, end, frames, what):
     log = [label(message)]
-    supply_row(message, frames)
+    limit_check(log, env, message, frames)
     font, text = env["std"], text_bytes(message)
     cols = font.columns(text)[:-1]
     pad = (PANEL - len(cols)) // 2 if len(cols) < PANEL else 0
@@ -865,7 +867,7 @@ def main():
         n("RAVEGPT", 750, green), n("SAYS.", 250, green), n("SAYS..", 250, green), n("SAYS...", 250, green),
         n(".|    ", 250, pink), n("...|  ", 250, pink), n("......", 150, pink),
         n("NO", 650, red), n("NO BARS", 650, red), n("TRYING", 400, red), n("AGAIN", 400, red), n("LATER!", 400, red))]
-    # The beat input flashing a marquee white: the largest steps the firmware makes. Table only.
+    # The beat input flashing a marquee white: the largest loads the firmware makes.
     beat = [(dict(m, _note="(beat at 128 a minute)"), check_table_only) for m in (
         {"type": "D", "str": "I LIVE FOR THAT ENERGY"}, {"type": "N", "str": "CHONKY MARQUEE"},
         {"type": "T", "str": "TRACK ID GOES HERE"})]
@@ -905,8 +907,13 @@ def main():
     def work(i):
         name, cases, flags = groups[i]
         try:
-            runs = run_group(env, name, [m for m, _ in cases], port + i, flags)
+            runs, startup = run_group(env, name, [m for m, _ in cases], port + i, flags)
             logs = []
+            if i == 0:
+                words = {"type": "-", "str": "I LIVE FOR THAT ENERGY!", "_order": -1,
+                         "_note": "(the startup words, before the first request)"}
+                logs.append(label(words))
+                limit_check(logs, env, words, startup)
             for (message, checker), (start, end, frames, before) in zip(cases, runs):
                 message["_before"] = before
                 logs += checker(env, message, start, end, frames)
