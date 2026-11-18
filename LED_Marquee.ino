@@ -99,30 +99,40 @@ PROGMEM = "                    ";
 #define COUNTDOWN_DELAY 500
 
 // ---- Chooser preview (MSGTYPE_CHOOSER): a message too wide for the space beside the count scrolls.
-// ---- These six values are the ones to tune:
+// ---- (Contract VERSION 3: the app pushes changes; the sign asks nothing while a text moves. See ChooserDisplay.h)
+// ---- These five values are the ones to tune:
 //How long the start of a scrolling message stands still before it moves (and again every time round), in ms
 #define CHOOSER_HOLD_MS 600
 //Time per scrolled LED column in ms, lower is faster. 35 is about 4.8 characters a second
-//(on the sign a step measures 36 to 37 ms: the millisecond clock stands still while a frame is sent)
+//(on the sign a step measures up to 1 ms more: the clock loses a tick while a frame is sent)
 #define CHOOSER_SCROLL_DELAY_MS 35
 //Blank columns between the end of the message and its start coming round again. 18 is three spaces. 1 to 240
 #define CHOOSER_GAP_COLS 18
 //Brightness of scrolling text, 0-255 before gamma correction. 145 is where the fade blink of a short message starts
 #define CHOOSER_TEXT_BRIGHTNESS 145
-//While scrolling, ask the app "anything changed?" ('?') every this many columns. Lower reacts faster to !next
-#define CHOOSER_POLL_EVERY_COLS 6
-//While a text scrolls the app is only asked for a checksum of its message. The message itself is read again
-//every time the text has come round, and at the latest after this many ms (one short hitch if the text is moving).
-//Lower is safer against a wrong preview staying up, higher hitches long texts less often. 1000 to 30000
+//A message that fits (the blink) is read again from the app every this many ms, in case a push was lost;
+//the text stands at its brightest for the moment that takes. A scrolling message is read again each time it has
+//come round instead, at its stand-still. Lower corrects a wrong short preview sooner (and is how fast the sign
+//follows an app that does not push yet), higher pauses the blink less often. 1000 to 30000
 #define CHOOSER_REFRESH_MS 8000
-// ---- The rest rarely needs touching:
-//Ask the app at least every this many ms, whatever the scroll is doing (the app lane counts on 250 at most)
-#define CHOOSER_POLL_EVERY_MS 200
-//How long to wait for each byte of the app's answer to a chooser poll, in ms. A late answer costs one visible hitch
-#define CHOOSER_POLL_TIMEOUT_MS 60
-//After this many requests in a row without a usable answer, ask the normal way (which waits up to a second).
-//If the same chooser message comes back the scroll carries on from where it was
-#define CHOOSER_MAX_FAILED_POLLS 3
+// ---- The rest rarely needs touching (the first three are the contract's numbers on the sign's side):
+//After the receive line was seen LOW (the app's "attention"), wait at most this long for it to be HIGH again, in ms
+#define CHOOSER_ATTN_HIGH_WAIT_MS 100
+//... then at most this long for the first byte of the message the app sends unasked (contract: ATTN_FIRST_BYTE_MS)
+#define CHOOSER_ATTN_FIRST_BYTE_MS 150
+//... and this long for each byte after it
+#define CHOOSER_ATTN_BYTE_MS 60
+//The line counts as HIGH again once it has been HIGH for this long without a gap, in ms (one byte is 0.7 ms)
+#define CHOOSER_LINE_QUIET_MS 3
+//Before asking the normal way after an attention that brought nothing usable, let the line go quiet: at most this long
+#define CHOOSER_FALLBACK_QUIET_WAIT_MS 500
+//After this many reads in a row that brought nothing usable, go back to loop() and its normal '~'
+#define CHOOSER_MAX_FAILED_READS 3
+//1 = show on panel B what was measured at the last attention (the Uno cannot print). For the bench, not for a show:
+//ms to the first byte (green), ms to the end of the message (blue), attentions (white), fallbacks to '~' (red)
+#ifndef CHOOSER_DEBUG_PANEL_B
+#define CHOOSER_DEBUG_PANEL_B 0
+#endif
 
 // Change this to be at least as long as your pixel string (too long will work fine, just be a little slower)
 #define NUM_PANELS 2  // Number of panels. There are 2.
@@ -170,7 +180,10 @@ static_assert(CHOOSER_GLYPH_COLS == FONTSTD_WIDTH && CHOOSER_HEART_COLS == HEART
 static_assert(CHOOSER_CHAR_VT == VT && CHOOSER_CHAR_HEART == HEART, "ChooserScroll.h: special characters");
 static_assert(CHOOSER_GAP_COLS >= 1 && CHOOSER_GAP_COLS <= 240, "CHOOSER_GAP_COLS must be 1 to 240");
 static_assert(CHOOSER_REFRESH_MS >= 1000 && CHOOSER_REFRESH_MS <= 30000, "CHOOSER_REFRESH_MS must be 1000 to 30000");
-static_assert(CHOOSER_POLL_EVERY_MS <= 250, "the app expects a chooser poll at least every 250 ms");
+static_assert(CHOOSER_HOLD_MS >= 1 && CHOOSER_HOLD_MS <= 60000 && CHOOSER_SCROLL_DELAY_MS >= 1 &&
+              CHOOSER_SCROLL_DELAY_MS <= 1000, "the chooser's waits are counted in microseconds in 32 bits");
+static_assert(CHOOSER_LINE_QUIET_MS >= 2 && CHOOSER_LINE_QUIET_MS < CHOOSER_ATTN_HIGH_WAIT_MS,
+              "the line must be seen HIGH for longer than one byte (0.7 ms; the clock counts whole ms)");
 
 /* Calculates how many empty columns to pad this string on its start and on its end,
  * and stores the results in startPad and endPad. Helps get it to be in the middle of the panel.
@@ -866,8 +879,14 @@ void marquee(const char* marqueePtr, const Font& font = fontStd, bool pad = true
     free(paddingString);
 }
 
-// The chooser display (MSGTYPE_CHOOSER): showAsChooser() with its scrolling and polling, and the two
-// decisions readSerialData() and loop() make about a reply (chooserReadMessage, chooserDispatch).
+// The level of the serial line from the app, read straight from the pin (SoftwareSerial is not involved and need
+// not be listening). The line idles HIGH. The app holds it LOW to say "I have a new chooser message for you".
+static inline bool chooserLineLow() {
+    return digitalRead(rxPin) == LOW;
+}
+
+// The chooser display (MSGTYPE_CHOOSER): showAsChooser() with its scrolling and its watch on the receive line,
+// and the two decisions readSerialData() and loop() make about a reply (chooserReadMessage, chooserDispatch).
 // It is in its own file so that the host test can run it against a fake sign and a fake app.
 #include "ChooserDisplay.h"
 
@@ -960,10 +979,11 @@ void loop() {
     diagnosticLedOff();
 
     if (readSuccessful) {
-        // A chooser message is shown in there, for as long as the chooser is on screen (the app is
-        // asked '?' between frames); what comes back is the type of the message that ended it.
+        // A chooser message is shown in there, for as long as the chooser is on screen (the app
+        // pushes what changes; the receive line is watched between frames); what comes back is
+        // the type of the message that ended it.
         // 0 means there is nothing to show: what was read is not a message (it has no "type"), or
-        // the chooser's reads kept failing. Draw nothing and ask again with a normal '~'.
+        // the chooser could not read anything usable any more. Draw nothing and ask again with a normal '~'.
         const char msgType = chooserDispatch();
         if (!msgType) {
             loopcount++;
