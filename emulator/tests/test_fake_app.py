@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests of fake_app.py without a socket: the chooser checksum against the
-contract's vectors, and what each contract version answers to ~ and ?.
+contract's vectors, what each contract version answers to ~ and ?, and what
+version 3 pushes unasked and when.
 
 usage: test_fake_app.py <work dir>
 Python 3 standard library only.
@@ -26,7 +27,8 @@ def app(work, lines, contract):
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     args = argparse.Namespace(playlist=path, once=False, quiet=True, chooser_polls=40,
-                              contract=contract, idle='{"type":"S","str":"","stars":20}')
+                              contract=contract, idle='{"type":"S","str":"","stars":20}',
+                              chooser_seconds=6, break_ms=50, guard_ms=20, interactive=False)
     return fake_app.App(args)
 
 
@@ -80,6 +82,42 @@ def main():
           "after the last chooser message, ? is answered like ~ with the next message in full")
     check(all('"type"' not in x for x in (c1, c2)) and c1 != c2,
           "a checksum reply has no type and differs between the two messages (%s, %s)" % (c1, c2))
+
+    print("contract version 3")
+    now = [100.0]
+    a = app(work, [a_msg, pick1[:-1] + ',"_seconds":2.5}', pick2, b_msg], 3)
+    a.clock = lambda: now[0]
+    check(a.push_due() == (None, None) and a.next_push_at() is None,
+          "nothing is pushed while no chooser message is selected")
+    got = answers(a, "~~~?~")
+    check(got == [a_msg, pick1, pick1, c1, pick1],
+          "requests are answered as in version 2, however many come (%s)" % " ".join(got[2:]))
+    now[0] += 2.4
+    check(a.push_due() == (None, None) and a.next_push_at() == 102.5,
+          "the selection lasts its _seconds, counted from the answer that selected it")
+    now[0] += 0.1
+    push, _ = a.push_due()
+    check(push == b"@break50\n@after20\n" + pick2.encode("ascii"),
+          "then the next message is pushed: the line LOW for 50 ms, a wait of 20 ms, the "
+          "message (%r)" % push)
+    got = answers(a, "~?")
+    check(got == [pick2, c2] and a.push_due() == (None, None),
+          "and requests are answered about the new selection, which is not pushed twice")
+    now[0] += 5.9
+    check(a.push_due() == (None, None), "a message without _seconds stays for --chooser-seconds")
+    now[0] += 0.2
+    push, _ = a.push_due()
+    check(push == b"@break50\n" and a.next_push_at() is None and a.push_due() == (None, None),
+          "leaving chooser mode is the line LOW and no message (%r), and then nothing more "
+          "is pushed" % push)
+    got = answers(a, "~~~")
+    check(got == [b_msg, a_msg, pick1],
+          "the message it left chooser mode for goes to the sign's next request, once")
+    a.args.break_ms, a.args.guard_ms = 12.5, 0
+    now[0] += 10
+    push, _ = a.push_due()
+    check(push.startswith(b"@break12.5\n@after0\n{"),
+          "--break-ms and --guard-ms are written as plain decimal numbers (%r)" % push[:22])
 
     if failures:
         print("FAILED: %d fake app check(s)" % len(failures))
