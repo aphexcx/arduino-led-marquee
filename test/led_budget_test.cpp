@@ -97,12 +97,12 @@ static uint16_t slowSent(uint8_t r, uint8_t g, uint8_t b, uint8_t scale, bool wa
 
 static void checkScale(uint16_t allowed, uint8_t r, uint8_t g, uint8_t b, bool waveRed, bool greenCarried) {
     uint8_t scale = ledBudgetScale(allowed, r, g, b, waveRed, greenCarried);
-    // it fits ...
-    assert(slowSent(r, g, b, scale, waveRed, greenCarried) <= allowed);
-    // ... and nothing brighter does
-    for (int s = scale + 1; s <= 255; s++) {
-        assert(slowSent(r, g, b, (uint8_t) s, waveRed, greenCarried) > allowed);
+    // it fits, and so does every dimming below it: a ramp passes through those ...
+    for (int s = 0; s <= scale; s++) {
+        assert(slowSent(r, g, b, (uint8_t) s, waveRed, greenCarried) <= allowed);
     }
+    // ... and the next brighter one does not
+    if (scale < 255) assert(slowSent(r, g, b, (uint8_t) (scale + 1), waveRed, greenCarried) > allowed);
 }
 
 static void testBudgetScale() {
@@ -117,10 +117,40 @@ static void testBudgetScale() {
     // the chonky heading that started this (wave, green 255, blue 25): undimmed it can send
     // 255 + 255 + 29 per LED
     assert(slowSent(0, 255, 25, 255, true, true) == 539);
-    assert(ledBudgetScale(539, 0, 255, 25, true, true) == 255);
-    assert(ledBudgetScale(538, 0, 255, 25, true, true) < 255);
+    // ... but on the way there (a ramp) it can send a little more: the blue of 25, dimmed, goes
+    // out as up to 31. It is left alone only when the most any dimming of it sends is allowed.
+    {
+        uint16_t most = 0;
+        for (int s = 0; s <= 255; s++) {
+            uint16_t sent = slowSent(0, 255, 25, (uint8_t) s, true, true);
+            if (sent > most) most = sent;
+        }
+        assert(most > 539 && most <= 541);
+        assert(ledBudgetScale(most, 0, 255, 25, true, true) == 255);
+        assert(ledBudgetScale(most - 1, 0, 255, 25, true, true) < 255);
+    }
     // pure blue 128 is sent as 192: it needs dimming under a limit its plain value would pass
     assert(ledBudgetScale(128, 0, 0, 128, false, false) < 255);
+    // What is sent does not fall evenly with the dimming: a red of 12 goes out as 14, but dimmed
+    // to 11 as 15. With 14 allowed the full colour would fit, and a ramp up to it would not: the
+    // frame at 11 is over. So the answer stays below the first dimming that is too bright.
+    assert(slowSent(12, 0, 0, 255, false, false) == 14);
+    {
+        uint8_t scale = ledBudgetScale(14, 12, 0, 0, false, false);
+        assert(scale < 255);
+        for (int s = 0; s <= scale; s++) assert(slowSent(12, 0, 0, (uint8_t) s, false, false) <= 14);
+    }
+    // the case the review found: a chonky text with green and blue 192. Every frame of a ramp of
+    // any length stays within what the text is allowed
+    for (uint16_t allowed = 0; allowed <= 765; allowed += 5) {
+        uint8_t scale = ledBudgetScale(allowed, 0, 192, 192, true, true);
+        for (int frames = 2; frames <= 255; frames += 11) {
+            for (int frame = 0; frame < frames; frame++) {
+                uint8_t at = ledRampScale(scale, (uint8_t) frame, (uint8_t) frames);
+                assert(slowSent(0, 192, 192, at, true, true) <= allowed);
+            }
+        }
+    }
 
     // against the slow way: every limit that matters, both styles, many colours
     srand(20261118);

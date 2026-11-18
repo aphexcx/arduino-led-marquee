@@ -290,8 +290,10 @@ def model_scale(env, cols, r, g, b, wave):
     for scale in range(256):
         red = max(carried(dimmed(v, scale)) for v in range(256)) if wave else carried(dimmed(r, scale))
         green = carried(dimmed(g, scale)) if wave else dimmed(g, scale)
-        if red + green + carried(dimmed(b, scale)) <= allowed:
-            best = scale
+        # the brightest dimming up to which everything fits: a ramp passes through all those below it
+        if red + green + carried(dimmed(b, scale)) > allowed:
+            break
+        best = scale
     return best
 
 

@@ -143,10 +143,12 @@ static void adWaitUntil(uint32_t ticks) {
 #endif
 
 #if AD_DIMS
-// How far the supply's limit dims the chonky text being shown (255 = not at all), whether it
-// comes up over AD_RAMP_MS, and what that makes of the frame being sent
+// How far the supply's limit dims the chonky text being shown (255 = not at all), how many
+// frames of its ramp it has had (it comes on once per message, over AD_RAMP_MS, whatever
+// happens on the way: a nudge to the next position does not cut the ramp short), and what the
+// two make of the frame being sent
 static uint adTextScale = 255;
-static bool adRamp = false;
+static uint adRampFrame = 0;
 static uint adWaveScale = 255;
 #endif
 
@@ -341,8 +343,8 @@ void showCharsOneByOneOnBothPanels(const char* str, Color textColor, unsigned in
 // With `another`, the caller draws a different picture straight after this one (scrollCols is 0
 // then). The return then comes delayMs after this call began, so that the next picture, which
 // takes as long to send as this one did, appears delayMs after this one appeared.
-// (With the supply's settings on: the text is dimmed by adTextScale, and when adRamp is set it
-// comes up to that over AD_RAMP_MS. The caller sets both.)
+// (With the supply's settings on: the text is dimmed by adTextScale and comes up to that over
+// AD_RAMP_MS, counted in adRampFrame. The caller sets both before a message's first call.)
 static void adShowWave(const TextMetrics& m, const char* s, TextCursor left, uint16_t scrollCols,
                        unsigned int delayMs, uint g, uint b, bool another) {
     uint phase = (uint) delayMs; // where the wave starts, as it always has: the low byte of dly
@@ -355,7 +357,6 @@ static void adShowWave(const TextMetrics& m, const char* s, TextCursor left, uin
 #if AD_DIMS
     const uint fullG = g;
     const uint fullB = b;
-    uint frame = adRamp ? 0 : AD_RAMP_FRAMES; // which frame of the ramp comes next
 #endif
 
     adClockStart();
@@ -377,11 +378,11 @@ static void adShowWave(const TextMetrics& m, const char* s, TextCursor left, uin
         }
 #if AD_DIMS
         // this frame's brightness, worked out before the frame, not in it
-        adWaveScale = ledRampScale(adTextScale, frame, AD_RAMP_FRAMES);
+        adWaveScale = ledRampScale(adTextScale, adRampFrame, AD_RAMP_FRAMES);
         g = ledScaled(fullG, adWaveScale);
         b = ledScaled(fullB, adWaveScale);
-        if (frame < AD_RAMP_FRAMES) {
-            frame++;
+        if (adRampFrame < AD_RAMP_FRAMES) {
+            adRampFrame++;
         }
 #endif
         uint32_t sent = adDrawFrame(fontChonk, m, s, left, AD_SHOW_ALL, 0, true, phase, g, b);
@@ -427,16 +428,13 @@ void showChonkySlideStyleOnBothPanels(const char* str, unsigned int delayMs, Col
     adTextScale = adBudgetScale(fontChonk, m, str, 0, colorFrom.g, colorFrom.b, true);
 #endif
 #if AD_DIMS
-    adRamp = true; // the text comes on once, at its first position
+    adRampFrame = 0; // the text comes on once per message
 #endif
     if (nudge) {
         const uint last = left.glyphCols; // the first character's own width, not the font's
         for (uint skip = 0; skip <= last; skip++) {
             adShowWave(m, str, left, 0, delayMs, colorFrom.g, colorFrom.b, skip < last);
             textCursorNext(m, str, left);
-#if AD_DIMS
-            adRamp = false;
-#endif
         }
     } else {
         adShowWave(m, str, left, textOffsetToShow(adInkCols(fontChonk, m, str), COLUMNS_PER_PANEL), delayMs,

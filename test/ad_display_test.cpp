@@ -284,7 +284,9 @@ static int modelScale(const std::vector<uint8_t>& cols, int r, int g, int b, boo
             }
         }
         int green = wave ? modelCarried(modelDim(g, scale)) : modelDim(g, scale);
-        if (red + green + modelCarried(modelDim(b, scale)) <= allowed) best = scale;
+        // the brightest dimming up to which everything fits: a ramp passes through all those below it
+        if (red + green + modelCarried(modelDim(b, scale)) > allowed) break;
+        best = scale;
     }
     (best < 255 ? dimmedRuns : undimmedRuns)++;
     return best;
@@ -677,8 +679,9 @@ static void checkNudge(const std::string& text, unsigned int dly) {
         // position has no next one: every frame that is left must be its own)
         while (k < r.frames.size() &&
                (n == 0 || skip + 1 == positions || rowsOfSide(r.frames[k], 0) != modelSide(cols, skip + 1, 0))) {
-            // the wave starts again at every position; the text comes on (the ramp) only at the first
-            checkWaveFrame(r.frames[k], cols, skip, dly, n, skip == 0 ? modelRamp(dim, n) : dim);
+            // the wave starts again at every position; the text comes on once per message: the
+            // ramp counts the message's frames and goes on across positions
+            checkWaveFrame(r.frames[k], cols, skip, dly, n, modelRamp(dim, k));
             k++;
             n++;
         }

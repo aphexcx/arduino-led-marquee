@@ -71,13 +71,16 @@ static inline uint16_t ledAllowance(uint16_t litPerSide, uint32_t limitBoth, uin
     return (uint16_t) allowed;
 }
 
-// The brightest dimming (0 to 255, 255 = not dimmed) at which an LED of this colour sends no more
-// than `allowed` (see ledAllowance). 255 when it does as it is.
-// About 1.5 ms on the sign when it has to search; call it before a message's first frame.
+// The brightest dimming (0 to 255, 255 = not dimmed) up to which an LED of this colour sends no
+// more than `allowed` (see ledAllowance): at the dimming returned AND AT EVERY DIMMING BELOW IT.
+// The second half matters because what is sent does not fall evenly with the dimming (12 goes out
+// as 14, 11 as 15): a text that comes on over a ramp passes through the dimmings below its own,
+// and none of those frames may be over the limit either. 255 when nothing has to be dimmed.
+// Under 1 ms on the sign; call it before a message's first frame.
 static inline uint8_t ledBudgetScale(uint16_t allowed, uint8_t r, uint8_t g, uint8_t b, bool waveRed,
                                      bool greenCarried) {
-    if (ledSent(r, g, b, 255, waveRed, greenCarried, 255) <= allowed) {
-        return 255; // the usual case: nothing to search for
+    if (allowed >= 765) {
+        return 255; // no limit that an LED could reach: nothing to search for
     }
     uint8_t best = 0;   // dimmed to 0 nothing is sent: that is within any limit
     uint8_t redMax = 0; // waveRed: reds dimmed by `scale` are the values 0 to scale; the largest any of them is sent as
@@ -86,9 +89,10 @@ static inline uint8_t ledBudgetScale(uint16_t allowed, uint8_t r, uint8_t g, uin
         if (carried > redMax) {
             redMax = carried;
         }
-        if (ledSent(r, g, b, (uint8_t) scale, waveRed, greenCarried, redMax) <= allowed) {
-            best = (uint8_t) scale;
+        if (ledSent(r, g, b, (uint8_t) scale, waveRed, greenCarried, redMax) > allowed) {
+            break; // the first dimming that is too bright: stay below it
         }
+        best = (uint8_t) scale;
     }
     return best;
 }
