@@ -9,12 +9,17 @@
 // because when it would go would depend on how TCP happened to cut the stream.
 //
 // With directives on (sign-emu --link-directives), a reply may be preceded by
-// a line the emulator consumes instead of putting it on the wire:
-//   @<ms>\n     put this reply's first bit on the wire <ms> milliseconds of
-//               simulated time after its request, instead of --link-latency-ms
-//   @none\n     this request gets no reply
+// lines the emulator consumes instead of putting them on the wire:
+//   @<ms>\n       put this reply's first bit on the wire <ms> milliseconds of
+//                 simulated time after its request, instead of --link-latency-ms
+//   @none\n       this request gets no reply
+//   @break<ms>\n  hold the line to the sign LOW for <ms> milliseconds (a UART
+//                 break). It is an item of its own, in its place in the stream:
+//                 a "@<ms>" or "@after<ms>" line in front of it applies to it.
+//   @after<ms>\n  the next item (a reply or a break) starts no sooner than <ms>
+//                 milliseconds after the item before it ended
 // A directive is only recognised where a reply would start, and only if it is
-// exactly one of those two forms. Anything else that starts with @ is not a
+// exactly one of those four forms. Anything else that starts with @ is not a
 // directive: its bytes go to the sign like any others, from the first byte
 // that shows it. So a mistyped directive is seen on the wire, and never
 // swallows what follows it.
@@ -29,7 +34,7 @@
 
 #include "emu.h"
 
-#define DIRECTIVE_MAX 15             // "none", or a number of milliseconds
+#define DIRECTIVE_MAX 20             // a word and a number of milliseconds
 
 static struct {
     int directives;
@@ -42,6 +47,8 @@ static struct {
     size_t directive_n;
     int has_delay;
     double delay_ms;
+    int has_after;
+    double after_ms;
 } g;
 
 void reply_init(int directives)
@@ -56,13 +63,25 @@ void reply_reset(void)
     reply_init(g.directives);
 }
 
-static void emit(reply_cb_t cb, void *param, int complete)
+// Hands over what is in data (n bytes of it), or a break when break_ms is
+// more than 0, with the delay and the gap that were waiting for the next item.
+static void hand_over(reply_cb_t cb, void *param, size_t n, int complete, double break_ms)
 {
-    cb(g.data, g.n, g.has_delay, g.delay_ms, complete, param);
-    g.n = 0;
-    g.blank = 1;
+    reply_t r = { .data = g.data, .n = n, .complete = complete,
+                  .has_delay = g.has_delay, .delay_ms = g.delay_ms,
+                  .has_after = g.has_after, .after_ms = g.after_ms, .break_ms = break_ms };
     g.has_delay = 0;
     g.delay_ms = 0;
+    g.has_after = 0;
+    g.after_ms = 0;
+    cb(&r, param);
+}
+
+static void emit(reply_cb_t cb, void *param, int complete)
+{
+    hand_over(cb, param, g.n, complete, 0);
+    g.n = 0;
+    g.blank = 1;
 }
 
 // One byte of what goes to the sign.
@@ -72,8 +91,8 @@ static void data_byte(uint8_t c, reply_cb_t cb, void *param)
         int has_delay = g.has_delay;
         double delay_ms = g.delay_ms;
         emit(cb, param, 0);
-        g.has_delay = has_delay;
-        g.delay_ms = delay_ms;
+        g.has_delay = has_delay;      // every piece is placed like the first;
+        g.delay_ms = delay_ms;        // the gap in front belongs to the first only
     }
     g.data[g.n++] = c;
     if (c != ' ' && c != '\t' && c != '\r' && c != '\n')
@@ -106,12 +125,25 @@ static void not_a_directive(reply_cb_t cb, void *param)
         data_byte((uint8_t) g.directive[i], cb, param);
 }
 
-// "none", or digits with at most one point among them.
-static int directive_value(const char *text, int *none, double *ms)
+// What a directive line says.
+enum { D_DELAY, D_NONE, D_BREAK, D_AFTER };
+
+// "none", or digits with at most one point among them, with "break" or
+// "after" in front or nothing. Returns 0 if the text is none of those.
+static int directive_value(const char *text, int *kind, double *ms)
 {
-    *none = !strcmp(text, "none");
-    if (*none)
+    *kind = D_DELAY;
+    if (!strcmp(text, "none")) {
+        *kind = D_NONE;
         return 1;
+    }
+    if (!strncmp(text, "break", 5)) {
+        *kind = D_BREAK;
+        text += 5;
+    } else if (!strncmp(text, "after", 5)) {
+        *kind = D_AFTER;
+        text += 5;
+    }
     int digits = 0, points = 0;
     for (const char *p = text; *p; p++) {
         if (*p >= '0' && *p <= '9')
@@ -124,12 +156,14 @@ static int directive_value(const char *text, int *none, double *ms)
     if (!digits || points > 1)
         return 0;
     *ms = strtod(text, NULL);
+    if (*kind == D_BREAK && !(*ms > 0))
+        return 0;                     // a break of no length is not a break
     return *ms <= 1e9;                // 11 days: keeps the cycle count far inside 64 bits
 }
 
 static void end_directive(reply_cb_t cb, void *param)
 {
-    int none;
+    int kind;
     double ms = 0;
     char value[DIRECTIVE_MAX + 1];
     size_t n = g.directive_n;
@@ -137,21 +171,30 @@ static void end_directive(reply_cb_t cb, void *param)
         n--;                          // the line ended \r\n
     memcpy(value, g.directive, n);
     value[n] = 0;
-    if (!directive_value(value, &none, &ms)) {
+    if (!directive_value(value, &kind, &ms)) {
         not_a_directive(cb, param);
         data_byte('\n', cb, param);
         return;
     }
     g.in_directive = 0;
     g.directive_n = 0;
-    if (none) {
+    if (kind == D_NONE) {
         g.has_delay = 0;
         g.delay_ms = 0;
-        cb(g.data, 0, 0, 0, 1, param);   // a reply of no bytes; waiting whitespace stays
-        return;
+        g.has_after = 0;
+        g.after_ms = 0;
+        hand_over(cb, param, 0, 1, 0);   // a reply of no bytes; waiting whitespace stays
+    } else if (kind == D_BREAK) {
+        // Not a reply: a request that is waiting for its answer goes on
+        // waiting. Waiting whitespace stays for the reply that follows.
+        hand_over(cb, param, 0, 0, ms);
+    } else if (kind == D_AFTER) {
+        g.has_after = 1;
+        g.after_ms = ms;
+    } else {
+        g.has_delay = 1;
+        g.delay_ms = ms;
     }
-    g.has_delay = 1;
-    g.delay_ms = ms;
 }
 
 void reply_feed(const uint8_t *buf, size_t len, reply_cb_t cb, void *param)
@@ -193,6 +236,8 @@ void reply_new_exchange(int drop_delay)
     if (drop_delay) {
         g.has_delay = 0;
         g.delay_ms = 0;
+        g.has_after = 0;
+        g.after_ms = 0;
     }
 }
 

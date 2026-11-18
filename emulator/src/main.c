@@ -68,7 +68,9 @@ static void usage(FILE *f)
 "                           whole reply (one JSON object) to arrive (default 1000,\n"
 "                           0 = never hold: replies go on the wire as they arrive)\n"
 "    --link-directives      let the app place a reply itself: \"@<ms>\\n\" before a reply\n"
-"                           replaces --link-latency-ms for it, \"@none\\n\" sends none\n"
+"                           replaces --link-latency-ms for it, \"@none\\n\" sends none;\n"
+"                           and hold the line LOW: \"@break<ms>\\n\" (a UART break),\n"
+"                           \"@after<ms>\\n\" for a gap after the item before\n"
 "    --request-chars <s>    bytes that count as a request (default \"~?\")\n"
 "  inputs\n"
 "    --bpm <n>              pulse the beat input (A0) n times a minute\n"
@@ -162,18 +164,39 @@ static uint64_t ms_to_cycles(double ms)
 {
     return (uint64_t) llround(ms * (F_CPU_HZ / 1000.0));
 }
-static uint64_t g_unfinished_replies, g_link_changes;
+static uint64_t g_unfinished_replies, g_link_changes, g_breaks;
 
-static void deliver(const uint8_t *data, size_t n, int has_delay, double delay_ms, int complete,
-                    void *param)
+static void deliver(const reply_t *r, void *param)
 {
     int answering = g_hold.active && !g_hold.done;
     uint64_t base = answering ? g_hold.base : avr->cycle;
-    double ms = has_delay ? delay_ms : answering ? opt.latency_ms : 0;
-    if (n)
-        uart_rx_enqueue(data, n, base + ms_to_cycles(ms));
-    if (answering && complete)
+    double ms = r->has_delay ? r->delay_ms : answering ? opt.latency_ms : 0;
+    uint64_t after = r->has_after ? ms_to_cycles(r->after_ms) : 0;
+    if (r->break_ms > 0) {
+        // A break is placed like a reply. At least one cycle long.
+        uint64_t low = ms_to_cycles(r->break_ms);
+        uart_rx_enqueue_break(low ? low : 1, base + ms_to_cycles(ms), after);
+    } else if (r->n) {
+        uart_rx_enqueue(r->data, r->n, base + ms_to_cycles(ms), after);
+    }
+    if (answering && r->complete)
         g_hold.done = 1;
+}
+
+// The app holds the line to the sign LOW. Recorded when it falls, with the
+// cycle it will rise again.
+static void on_break(uint64_t start_cycle, uint64_t due_cycle, uint64_t end_cycle)
+{
+    char extra[128];
+    g_breaks++;
+    snprintf(extra, sizeof(extra), "\"due\":%llu,\"end\":%llu,\"ms\":%.6f",
+             (unsigned long long) due_cycle, (unsigned long long) end_cycle,
+             (double) (end_cycle - due_cycle) / (F_CPU_HZ / 1000.0));
+    rec_event("break", start_cycle, extra);
+    tail_append(g_last_rx, sizeof(g_last_rx), '_');   // the view shows a break as a low line
+    if (opt.verbose)
+        fprintf(stderr, "[%10.6f] app -> sign: line LOW for %.3f ms\n", cycles_to_s(start_cycle),
+                (double) (end_cycle - due_cycle) / (F_CPU_HZ / 1000.0));
 }
 
 // The client changed: it closed, a read or write on it failed, or another
@@ -429,6 +452,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "sign-emu: simavr's atmega328p has no port B or port D to attach to\n");
         return 1;
     }
+    uart_on_break(on_break);
     reply_init(opt.directives);
     if (opt.bpm > 0) {
         // bpm is 1..600: a period of 0.1 to 60 s, always longer than the pulse.
@@ -589,6 +613,9 @@ int main(int argc, char **argv)
     fprintf(out, "sign-emu: serial: sign sent %llu bytes (%llu requests), app sent %llu bytes\n",
             (unsigned long long) g_tx_bytes, (unsigned long long) g_requests,
             (unsigned long long) g_rx_bytes);
+    if (g_breaks)
+        fprintf(out, "sign-emu: serial: the app held the line LOW %llu time(s)\n",
+                (unsigned long long) g_breaks);
     if (g_unfinished_replies)
         fprintf(out, "sign-emu: NOTE: %llu request(s) had no complete reply within %d ms of real "
                      "time; from there this run's timing depends on this computer\n",

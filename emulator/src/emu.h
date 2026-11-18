@@ -39,6 +39,7 @@ typedef struct {
     uint32_t t0h_min, t0h_max, t1h_min, t1h_max;   // high times seen, in CPU cycles
     uint64_t marginal;      // pulses whose width is between a clean 0 and a clean 1
     uint32_t gap_max;       // longest low gap between two bits of this frame, in cycles
+    uint64_t send_cycles;   // from the first rising edge of the frame to its last falling edge
 } ws_frame_info_t;
 
 typedef void (*ws_frame_cb_t)(const image_t *img, uint64_t latch_cycle,
@@ -61,28 +62,43 @@ typedef void (*uart_rx_cb_t)(uint8_t byte, int framing_ok, uint64_t start_cycle,
 
 // 0, or -1 if the simulated chip has no port B pins to attach to.
 int uart_init(avr_t *avr, unsigned baud, uart_tx_cb_t on_tx, uart_rx_cb_t on_rx);
+// The app held the line to the sign LOW (a break): the cycle the line was seen
+// to fall, the cycle it was due to fall, and the cycle it is due to rise again.
+typedef void (*uart_break_cb_t)(uint64_t start_cycle, uint64_t due_cycle, uint64_t end_cycle);
+void uart_on_break(uart_break_cb_t cb);
 // Queue one reply for the firmware's RX pin. Replies go out in the order they
 // were queued, as from one UART: each one's bytes back to back, 8N1, its first
-// start bit no earlier than not_before_cycle and not before the reply ahead of
-// it has finished.
-void uart_rx_enqueue(const uint8_t *buf, size_t n, uint64_t not_before_cycle);
+// start bit no earlier than not_before_cycle, not before the item ahead of it
+// has finished, and no sooner than after_cycles after that item finished.
+void uart_rx_enqueue(const uint8_t *buf, size_t n, uint64_t not_before_cycle,
+                     uint64_t after_cycles);
+// Queue a break: the line is held LOW for low_cycles. It takes its turn in
+// the same queue, under the same two rules for when it may start.
+void uart_rx_enqueue_break(uint64_t low_cycles, uint64_t not_before_cycle, uint64_t after_cycles);
 size_t uart_rx_pending(void);
 size_t uart_rx_dropped(void);                 // bytes lost because the queue was full
 
 // ---- reply.c --------------------------------------------------------------
-// Cuts the app's byte stream into replies (one JSON object each).
+// Cuts the app's byte stream into replies (one JSON object each) and breaks.
 #define REPLY_MAX 8192
-// data[0..n) is one reply, or a piece of one when complete is 0. has_delay:
-// a directive gave this reply its own delay. n can be 0 (directive "none").
-typedef void (*reply_cb_t)(const uint8_t *data, size_t n, int has_delay, double delay_ms,
-                           int complete, void *param);
+typedef struct {
+    const uint8_t *data;    // data[0..n) is one reply, or a piece of one when complete is 0
+    size_t n;               // can be 0: directive "none", or a break
+    int complete;
+    int has_delay;          // directive "@<ms>": this item has its own delay
+    double delay_ms;
+    int has_after;          // directive "@after<ms>": and a gap after the item before it
+    double after_ms;
+    double break_ms;        // more than 0: not a reply but a break of this length ("@break<ms>")
+} reply_t;
+typedef void (*reply_cb_t)(const reply_t *reply, void *param);
 void reply_init(int directives);
 // Forgets everything unfinished: a directive in progress or waiting for its
 // reply, a partly received reply, whitespace. For when the client changes.
 void reply_reset(void);
 // A new request, or the wait for the last one's answer ran out: the next
 // reply starts from outside any JSON object. drop_delay also forgets a
-// directive's delay that was waiting for a reply.
+// directive's delay or gap that was waiting for a reply.
 void reply_new_exchange(int drop_delay);
 void reply_feed(const uint8_t *buf, size_t len, reply_cb_t cb, void *param);
 void reply_flush(reply_cb_t cb, void *param);

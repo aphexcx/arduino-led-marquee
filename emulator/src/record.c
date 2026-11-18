@@ -613,11 +613,13 @@ void rec_frame(const image_t *img, uint64_t latch_cycle, const ws_frame_info_t *
         static const char hex[] = "0123456789abcdef";
         fprintf(g_events, "{\"type\":\"frame\",\"t\":%.7f,\"cycle\":%llu,\"bits\":%llu,"
                           "\"partial_bits\":%u,\"marginal\":%llu,\"gap_us\":%.3f,"
+                          "\"send_us\":%.3f,"
                           "\"t0h_cycles\":[%u,%u],\"t1h_cycles\":[%u,%u],\"rows\":[",
                 cycles_to_s(latch_cycle), (unsigned long long) latch_cycle,
                 (unsigned long long) info->bits, info->partial_bits,
                 (unsigned long long) info->marginal,
                 info->gap_max / (F_CPU_HZ / 1e6),
+                (double) info->send_cycles / (F_CPU_HZ / 1e6),
                 info->t0h_min, info->t0h_max, info->t1h_min, info->t1h_max);
         char row_text[COLS * 6 + 4];
         for (int row = 0; row < ROWS; row++) {

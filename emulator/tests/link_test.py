@@ -46,6 +46,9 @@ class Run:
         # Each rx line is a byte a listener decoded from the pin: "cycle" is when
         # its start bit was seen to fall, "due" is when the model had it due.
         self.rx = [e for e in events if e["type"] == "rx"]
+        # Each break line is the app holding the line LOW: "cycle" is when it was
+        # seen to fall, "due" when it was due to, "end" when it is due to rise.
+        self.breaks = [e for e in events if e["type"] == "break"]
         late = [e["cycle"] - e["due"] for e in self.rx]
         if late and not (0 <= min(late) and max(late) <= 4):
             raise RuntimeError("a start bit was seen on the pin %d..%d cycles after it was due; "
@@ -437,10 +440,19 @@ def main():
           "a late reply that is over before the second request does not move the second "
           "reply: it starts 5 ms after its own request (%d cycles)" % gap)
 
-    check("InvalidInput" in early.tx_text(),
-          "that reply arrived while the firmware showed stars after a timed-out read, still "
-          "listening: it left damaged bytes in the receive buffer and the next read failed "
-          "(the sign sent %r)" % early.tx_text())
+    # What the firmware made of that reply is its own code, and it differs by
+    # firmware. Master's readSerialData() returns from a timed-out read without
+    # stopSerial(), so it is still listening while it draws the stars. The
+    # firmware with chooser contract 3 stops listening there.
+    if "InvalidInput" in early.tx_text():
+        check(True, "that reply arrived while the firmware showed stars after a timed-out read, "
+                    "still listening: it left damaged bytes in the receive buffer and the next "
+                    "read failed (the sign sent %r)" % early.tx_text())
+    else:
+        check(early.tx_text() == "~~~",
+              "that reply arrived while the firmware showed stars after a timed-out read. This "
+              "firmware had stopped listening: nothing of it was received and the next read "
+              "was clean (the sign sent %r)" % early.tx_text())
 
     print("a reply cut short by a client that stays connected")
     # The first reply stops inside a string and the wait for it runs out. The
@@ -478,6 +490,49 @@ def main():
           "the newline travels in front of the next reply and the sign parses both")
     check(nl_same.lines == nl_later.lines,
           "sent with the reply or 0.3 s after it: identical dump")
+
+    print("the line held LOW (--link-directives)")
+    # While the sign draws HELLO it is not listening, so nothing here depends on
+    # what the firmware makes of a break: these checks are about the wire.
+    # Bytes that come behind a reply in the same write are placed from the
+    # moment the emulator read them, with the clock still held for the request:
+    # the middle of the request's stop bit (9.5 bit times after its start bit
+    # began) and at most one instruction later.
+    after_reply = (19 * 16000000 + 14400) // (2 * 14400)
+    push = b"@300\n@break50\n@after20\n" + stars
+    run = run_case(env, "break", [[(hello + push, 0)], [(stars, 0)]], 3, d)
+    b = run.breaks[0] if len(run.breaks) == 1 else {"cycle": 0, "due": 0, "end": 0, "ms": 0}
+    placed = b["due"] - run.tx[0]["cycle"] - 300 * 16000
+    check(len(run.breaks) == 1 and 0 <= b["cycle"] - b["due"] <= 4
+          and b["end"] - b["due"] == 50 * 16000 and b["ms"] == 50,
+          '"@break50\\n": the line falls at its due cycle and is due to rise exactly 50 ms later '
+          "(%d breaks, %d cycles)" % (len(run.breaks), b["end"] - b["due"]))
+    check(after_reply <= placed <= after_reply + 4,
+          '"@300\\n" in front of it: the break is placed 300 ms after the bytes were read '
+          "(%d cycles after that, expected %d to %d)" % (placed, after_reply, after_reply + 4))
+    first = run.rx[len(hello)] if len(run.rx) > len(hello) + 1 else {"due": 0}
+    check(run.rx_text() == (hello + stars + stars).decode() and first["due"] == b["end"] + 20 * 16000
+          and run.rx[len(hello) + 1]["due"] == first["due"] + nearest_cycle(10),
+          '"@after20\\n" before what follows: its first start bit is due exactly 20 ms after the '
+          "break ended, and its other bytes follow back to back (%d cycles after the break)"
+          % (first["due"] - b["end"]))
+    again = run_case(env, "break-again", [[(hello + push, 0)], [(stars, 0)]], 3, d)
+    check(again.lines == run.lines, "the same run again: identical dump")
+    run = run_case(env, "break-answer", [[(b"@break10\n" + hello, 0)]], 2, d)
+    cut = run_case(env, "break-answer-cut", [[(b"@break10\n", 0), (hello, 0.3)]], 2, d)
+    b = run.breaks[0] if len(run.breaks) == 1 else {"due": 0, "end": 0}
+    check(len(run.breaks) == 1 and b["due"] == run.tx[0]["cycle"] + request_cycles + 5 * 16000
+          and run.rx[0]["due"] == b["end"] and run.rx_text() == hello.decode(),
+          "a break sent as the answer to a request is placed like a reply (5 ms after the "
+          "request), and the reply behind it starts when the line rises")
+    check(cut.lines == run.lines,
+          "a break is not a reply: the clock stays held for the reply that comes 0.3 s later "
+          "(identical dump)")
+    for label, text in [("no length", b"@break\n"), ("a length of 0", b"@break0\n"),
+                        ("a letter in the number", b"@after2x\n"), ("another word", b"@low50\n")]:
+        run = run_case(env, "notbreak", [[(text + hello, 0)]], 2, d)
+        check(not run.breaks and run.rx_text().startswith(text.decode() + "{"),
+              "a mistyped directive (%s) is not swallowed: its bytes go to the sign" % label)
 
     reconnection_tests(env, hello, stars, request_cycles)
 
