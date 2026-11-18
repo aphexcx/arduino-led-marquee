@@ -430,14 +430,17 @@ def check_nudge(env, message, start, end, frames):
                 break
         else:
             seen.append(None)
-    check(log, seen == list(range(9)), "the text moves left by one character, a column at a time, and "
-          "the message ends (positions seen: %s)" % seen)
+    # the first character's lit columns and its blank one; a vertical tab is only its blank column
+    text = text_bytes(message)
+    positions = 1 if not text or text[0] == VT else env["chonk"].cols + 1
+    check(log, seen == list(range(positions)), "the text moves left by its first character, a column at a "
+          "time, no further, and the message ends (positions seen: %s)" % seen)
     # when each position first appears; the last one stays until the next request
     appear = [f.t for f, before in zip(frames, [None] + frames[:-1])
               if before is None or f.mask[:PANEL] != before.mask[:PANEL]] + [end]
     shown = [(b - a) * 1000 for a, b in zip(appear, appear[1:])]
     worst = max([abs(s - message["dly"]) for s in shown] or [0])
-    check(log, len(shown) == 9 and worst <= 1, "each column is shown for dly (%s ms for dly %d)"
+    check(log, len(shown) == positions and worst <= 1, "each column is shown for dly (%s ms for dly %d)"
           % (" ".join("%.2f" % s for s in shown), message["dly"]))
     return log
 
@@ -508,6 +511,7 @@ def main():
     rest = [
         (c(long_text(300), 1000), check_chonky),
         (c("ABCDEF", 333, scroll=True), check_nudge),             # an odd dly never ended before
+        (c("\u000bAB", 333, scroll=True), check_nudge),           # a tab first: one position, not nine
         ({"type": "N", "str": "I \u007f DREAMSTATE \u007f"},
          lambda e, m, s, t, f: check_marquee(e, m, s, t, f, "chonk", "chonky marquee", 5)),
         ({"type": "D", "str": "I \u007f U \u0001! AND \u007f\u007f TRANCE"},

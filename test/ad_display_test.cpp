@@ -570,36 +570,50 @@ static void testChonkyLong() {
     tests++;
 }
 
-// "scroll": true. The text moves left by one character, a column at a time, each column for dly.
-static void testChonkyNudge() {
-    std::vector<uint8_t> cols = modelColumns(MODEL_CHONK, "ABCDEF|");
-    for (unsigned int dly : DELAYS) {
-        if (dly > 4000) continue;
-        Run r = runWith(showCNudge, "ABCDEF|", dly);
-        // nine positions (0 to 8 columns to the left), each from its first frame for dly
-        size_t k = 0;
-        for (size_t skip = 0; skip <= 8; skip++) {
-            assert(k < r.frames.size());
-            uint64_t first = r.frames[k].sentUs;
-            size_t n = 0;
-            while (k < r.frames.size() && (n == 0 || rowsOfSide(r.frames[k], 0) != modelSide(cols, skip + 1, 0))) {
-                checkWaveFrame(r.frames[k], cols, skip, dly, n); // the wave starts again at every position
-                k++;
-                n++;
-            }
-            // each picture stays for dly: until the next one appears, or until the return
-            uint64_t until = k < r.frames.size() ? r.frames[k].sentUs : r.endUs;
-            if (dly >= 10) assert(near(until - first, (uint64_t) dly * 1000, 60));
-            // (a dly shorter than a frame takes to send: one picture straight after the other)
-            if (dly < 5 && skip < 8) assert(near(until - first, FRAME_US + 501, 60));
-            if (dly == 0) assert(n == 1);
+// "scroll": true. The text moves left by its first character, a column at a time, each column for dly.
+static void checkNudge(const std::string& text, unsigned int dly) {
+    std::vector<uint8_t> cols = modelColumns(MODEL_CHONK, text);
+    // the first character's lit columns and its blank one: 9 positions; a vertical tab is only
+    // its blank column, and so is an empty text: 1 position
+    size_t positions = text.empty() || text[0] == '\x0B' ? 1 : 9;
+    Run r = runWith(showCNudge, text.c_str(), dly);
+    size_t k = 0;
+    for (size_t skip = 0; skip < positions; skip++) {
+        assert(k < r.frames.size());
+        uint64_t first = r.frames[k].sentUs;
+        size_t n = 0;
+        // this position's frames: up to the first frame that shows the next position (the last
+        // position has no next one: every frame that is left must be its own)
+        while (k < r.frames.size() &&
+               (n == 0 || skip + 1 == positions || rowsOfSide(r.frames[k], 0) != modelSide(cols, skip + 1, 0))) {
+            checkWaveFrame(r.frames[k], cols, skip, dly, n); // the wave starts again at every position
+            k++;
+            n++;
         }
-        assert(k == r.frames.size());
-        // it always ends (the old code never did for an odd dly)
-        assert(r.endUs - r.startUs <= 9 * ((uint64_t) dly * 1000 + 6000));
+        // each picture stays for dly: until the next one appears, or until the return
+        uint64_t until = k < r.frames.size() ? r.frames[k].sentUs : r.endUs;
+        if (dly >= 10) assert(near(until - first, (uint64_t) dly * 1000, 60));
+        // (a dly shorter than a frame takes to send: one picture straight after the other)
+        if (dly < 5 && skip + 1 < positions) assert(near(until - first, FRAME_US + 501, 60));
+        if (dly == 0) assert(n == 1);
     }
-    // shorter than the nudge: nothing is read past the end of the string
-    runWith(showCNudge, "", 20);
+    // nothing after the last position: the text never moves into its second character
+    assert(k == r.frames.size());
+    // it always ends (the old code never did for an odd dly)
+    assert(r.endUs - r.startUs <= positions * ((uint64_t) dly * 1000 + 6000));
+}
+
+static void testChonkyNudge() {
+    // "ABCDEF|" is what the app's streaming sends; then a heart, a narrow character, a byte that is
+    // not in the font, a vertical tab first, and nothing at all
+    const char* texts[] = {"ABCDEF|", "\x7F" "AB", ".AB", "\x01" "AB", "\x0B" "AB|", "\x0B", ""};
+    for (const char* text : texts) {
+        for (unsigned int dly : DELAYS) {
+            if (dly <= 4000) checkNudge(text, dly);
+        }
+    }
+    // shorter than the nudge (its last two positions are both dark, so checkNudge cannot tell them
+    // apart): nothing is read past the end of the string, and it ends
     runWith(showCNudge, "A", 20);
     tests++;
 }

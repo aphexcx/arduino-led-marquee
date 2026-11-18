@@ -279,16 +279,19 @@ static void adShowWave(const TextMetrics& m, const char* s, TextCursor left, uin
     }
 }
 
-// nudge (the message's "scroll"): move the text left by one character, a column at a time, each
-// column shown for delayMs (or for as long as sending a frame takes, 5 ms, if delayMs is less). This is what the app's letter-by-letter streaming asks for; it is not
+// nudge (the message's "scroll"): move the text left by its first character, a column at a time,
+// each column shown for delayMs (or for as long as sending a frame takes, 5 ms, if delayMs is less).
+// The last position has the first character's last lit column gone and the blank column after it
+// at the left edge: 9 positions for an ordinary character, 1 for a vertical tab or an empty text. This is what the app's letter-by-letter streaming asks for; it is not
 // what makes a long text scroll (that happens by itself, when nudge is false).
 void showChonkySlideStyleOnBothPanels(const char* str, unsigned int delayMs, Color colorFrom, bool nudge) {
     // TODO colorFrom, colorTo support (red is the wave)
     const TextMetrics m = fontMetrics(fontChonk);
     TextCursor left = textSeek(m, str, 0);
     if (nudge) {
-        for (uint skip = 0; skip <= fontChonk.width; skip++) {
-            adShowWave(m, str, left, 0, delayMs, colorFrom.g, colorFrom.b, skip < fontChonk.width);
+        const uint last = left.glyphCols; // the first character's own width, not the font's
+        for (uint skip = 0; skip <= last; skip++) {
+            adShowWave(m, str, left, 0, delayMs, colorFrom.g, colorFrom.b, skip < last);
             textCursorNext(m, str, left);
         }
     } else {
