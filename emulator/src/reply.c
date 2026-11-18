@@ -18,8 +18,12 @@
 //                 a "@<ms>" or "@after<ms>" line in front of it applies to it.
 //   @after<ms>\n  the next item (a reply or a break) starts no sooner than <ms>
 //                 milliseconds after the item before it ended
+//   @batch\n      in front of a reply: the clock stays held for the request
+//   @end\n        after that reply, until this line has arrived. Everything in
+//                 between is then placed with the clock standing still, however
+//                 TCP cut the bytes into pieces.
 // A directive is only recognised where a reply would start, and only if it is
-// exactly one of those four forms. Anything else that starts with @ is not a
+// exactly one of those six forms. Anything else that starts with @ is not a
 // directive: its bytes go to the sign like any others, from the first byte
 // that shows it. So a mistyped directive is seen on the wire, and never
 // swallows what follows it.
@@ -126,7 +130,7 @@ static void not_a_directive(reply_cb_t cb, void *param)
 }
 
 // What a directive line says.
-enum { D_DELAY, D_NONE, D_BREAK, D_AFTER };
+enum { D_DELAY, D_NONE, D_BREAK, D_AFTER, D_BATCH, D_END };
 
 // "none", or digits with at most one point among them, with "break" or
 // "after" in front or nothing. Returns 0 if the text is none of those.
@@ -135,6 +139,10 @@ static int directive_value(const char *text, int *kind, double *ms)
     *kind = D_DELAY;
     if (!strcmp(text, "none")) {
         *kind = D_NONE;
+        return 1;
+    }
+    if (!strcmp(text, "batch") || !strcmp(text, "end")) {
+        *kind = text[0] == 'b' ? D_BATCH : D_END;
         return 1;
     }
     if (!strncmp(text, "break", 5)) {
@@ -191,6 +199,11 @@ static void end_directive(reply_cb_t cb, void *param)
     } else if (kind == D_AFTER) {
         g.has_after = 1;
         g.after_ms = ms;
+    } else if (kind == D_BATCH || kind == D_END) {
+        // A mark, not an item: a delay or a gap that is waiting stays for the
+        // item that follows.
+        reply_t r = { .data = g.data, .batch = kind == D_BATCH, .end = kind == D_END };
+        cb(&r, param);
     } else {
         g.has_delay = 1;
         g.delay_ms = ms;
@@ -239,6 +252,15 @@ void reply_new_exchange(int drop_delay)
         g.has_after = 0;
         g.after_ms = 0;
     }
+}
+
+void reply_give_up(reply_cb_t cb, void *param)
+{
+    if (g.in_directive)
+        not_a_directive(cb, param);   // it never got its newline: ordinary bytes
+    if (g.n && !g.blank)
+        emit(cb, param, 0);
+    reply_new_exchange(1);
 }
 
 // Passes on what has arrived of a reply that is not complete. Whitespace

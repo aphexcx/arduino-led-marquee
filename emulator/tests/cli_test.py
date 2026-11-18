@@ -66,6 +66,33 @@ def main():
     check(status == 1 and "cannot read" in err,
           "a firmware file that places data outside the flash: exit status 1")
 
+    # Outputs are created empty, so none may be the firmware file and no two the same file.
+    import shutil
+    copy = os.path.join(work, "same.hex")
+    shutil.copy(hexfile, copy)
+    status, err = run("--duration", "0.01", "--frames", copy, copy)
+    check(status == 2 and "same file" in err
+          and open(copy, "rb").read() == open(hexfile, "rb").read(),
+          "--frames given the firmware file: refused with exit status 2, the firmware untouched")
+    link = os.path.join(work, "link-to-same.hex")
+    if os.path.lexists(link):
+        os.remove(link)
+    os.symlink(os.path.abspath(copy), link)
+    status, err = run("--duration", "0.01", "--record", link, copy)
+    check(status == 2 and "same file" in err
+          and open(copy, "rb").read() == open(hexfile, "rb").read(),
+          "--record given a link to the firmware file: refused, the firmware untouched")
+    one = os.path.join(work, "one.out")
+    if os.path.exists(one):
+        os.remove(one)
+    status, err = run("--duration", "0.01", "--record", one, "--frames",
+                      os.path.join(work, ".", "one.out"), hexfile)
+    check(status == 2 and "same file" in err and not os.path.exists(one),
+          "--record and --frames on one path (spelled two ways): refused, nothing written")
+    status, err = run("--duration", "0.01", "--record", os.path.join(work, "two.gif"), "--frames",
+                      os.path.join(work, "two.jsonl"), hexfile)
+    check(status == 0, "two different outputs are written as before (status %d)" % status)
+
     # The largest values together. The latch time of a whole second means no
     # frame latches in this short run; the GIF must still be the right size
     # (64 pixels an LED) and one tick long, and match the frames dump.

@@ -170,10 +170,22 @@ size_t uart_rx_dropped(void)
 static avr_cycle_count_t rx_step(avr_t *avr, avr_cycle_count_t when, void *param)
 {
     if (g_rx_phase == PHASE_BREAK) {
-        rx_set(1);                                   // the break is over
-        g_break_on = 0;
+        g_break_on = 0;                              // the break is over
         g_prev_end = when;
         g_rx_phase = 0;
+        // If the next item starts at this very cycle (no gap was asked for), the
+        // line does not rise in between: a wire has one level per moment. The
+        // start bit of a byte glued to a break is then no falling edge, and no
+        // receiver can find it, the firmware's or the listener here.
+        int glued = 0;
+        if (g_reply_head != g_reply_tail) {
+            uint64_t start = g_reply[g_reply_head].not_before;
+            if (g_reply[g_reply_head].after && g_prev_end + g_reply[g_reply_head].after > start)
+                start = g_prev_end + g_reply[g_reply_head].after;
+            glued = start <= when;
+        }
+        if (!glued)
+            rx_set(1);
         return rx_step(avr, when, param);            // the next item, or wait for one
     }
     if (g_rx_phase == 0) {

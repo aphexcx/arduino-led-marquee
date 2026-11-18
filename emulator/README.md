@@ -92,7 +92,13 @@ emulator/fake_app.py emulator/playlists/demo.jsonl
   120 x 7 layout.
 
 Without the app, `--duration <seconds>` stops a run after that much simulated
-time; the startup animation takes the first 5.5 s.
+time; the startup animation takes the first 5.5 s. `--until-disconnect` stops
+it when the app hangs up (`fake_app.py --once` does, at the request after its
+last message).
+
+Every output is created empty before the run, so the emulator refuses, with
+exit status 2 and before it opens anything, an output path that is the
+firmware file or the same file as another output.
 
 **When each picture is shown.** A GIF cannot time frames finer than 1/100 s,
 and viewers slow down anything under 2/100 s. So the clip is cut into ticks of
@@ -231,7 +237,8 @@ and does not put on the wire:
 | `@250` newline, then the reply | this reply's start bit begins 250 ms (simulated, fractions allowed) after its request, instead of `--link-latency-ms` |
 | `@none` newline | this request gets no reply, and the clock is not held waiting for one |
 | `@break50` newline | the line to the sign is held LOW for 50 ms (simulated, fractions allowed, more than 0): a UART break. It is an item of its own and takes its turn on the wire like a reply (rule 4). It is not a reply: a request that is waiting for its answer goes on waiting. A `@250` or `@after20` line in front of it applies to it |
-| `@after20` newline, then a reply or `@break` | that item starts no sooner than 20 ms after the item before it ended (its last stop bit, or the end of a break), whenever that was. This is the guard between a break and the message behind it |
+| `@after20` newline, then a reply or `@break` | that item starts no sooner than 20 ms after the item before it ended (its last stop bit, or the end of a break), whenever that was. This is the guard between a break and the message behind it. With `@after0` (or none) the item is glued to a break: the line has one level at a time and does not rise in between, so a byte's start bit is then no falling edge and no receiver finds it |
+| `@batch` newline in front of a reply, `@end` newline after it | the clock stays held for the request until `@end` has arrived, not only until the reply is complete. Everything in between (the reply, and pushes behind it) is read with the clock standing still, in however many pieces TCP delivers it, and is placed the same in every run |
 
 A push in chooser contract version 3.1 is therefore `@break50`, `@after20` and
 the message, each directive on its own line; leaving chooser mode is
@@ -249,9 +256,9 @@ A reply can be delayed past the firmware's timeout and into a later request's
 window; rule 4 then decides the order on the wire. Without
 `--link-directives` an `@` is an ordinary byte and goes to the sign.
 
-Only those four forms are directives: `@`, then `none`, or a plain number of
-milliseconds with `break` or `after` or nothing in front of it, then a
-newline, where a reply would start. Anything else that
+Only those six forms are directives: `@`, then `none`, `batch`, `end`, or a
+plain number of milliseconds with `break` or `after` or nothing in front of
+it, then a newline, where a reply would start. Anything else that
 starts with `@` (a missing newline, a stray letter) is passed to the sign as
 the bytes it is, from the first byte that shows it is not a directive. A
 mistyped directive is therefore visible on the wire (the sign answers
@@ -282,8 +289,9 @@ out while no client is connected (nobody answers it).
 What is **not** repeatable, and how to tell:
 
 - A reply that is not complete within `--link-wait-ms` of real time. What has
-  arrived of it is placed as in rule 3, and the rest goes on the wire at
-  whatever simulated moment it arrives. The reply is then given up: the next
+  arrived of it is placed as in rule 3 (a directive that never got its
+  newline included: it goes to the sign as the bytes it is), and the rest
+  goes on the wire at whatever simulated moment it arrives. The reply is then given up: the next
   request's reply is looked for afresh, and a directive that was waiting for
   the late reply is dropped. The run's summary says
   `NOTE: n request(s) had no complete reply ...`.
@@ -294,9 +302,9 @@ What is **not** repeatable, and how to tell:
   same request, a push, for example). They go on the wire at the simulated
   moment they arrive, plus their directive's delay if they have one. There is
   one way to make them repeatable, and `tests/push_test.py` uses it: send them
-  in the same write as the reply to a request, behind it. They are then read
-  while the clock is still held for that request, and the moment they arrive
-  is the same in every run (the middle of the request's stop bit).
+  behind the reply to a request, inside `@batch` ... `@end`. They are then
+  read while the clock is still held for that request, and the moment they
+  arrive is the same in every run (the middle of the request's stop bit).
 - `--link-wait-ms 0`: the clock is never held, and everything is placed by
   arrival.
 

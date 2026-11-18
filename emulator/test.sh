@@ -44,17 +44,23 @@ python3 tests/gif_cases.py build/tests/gif_case build/tests/gif
 echo "== unit: fake app"
 python3 tests/test_fake_app.py build/tests/fake_app
 
+echo "== unit: the checkers' reading of Fonts.h"
+python3 tests/push_test.py font ../Fonts.h
+
 messages=$(grep -c '^{' "$PLAYLIST")
 
 echo "== smoke run: boot, startup animation, then $messages messages from $PLAYLIST"
-# The run ends when the sign asks for message number messages + 1, that is
-# when it has finished drawing the last one. --duration is only a safety net.
+# The fake app plays the list once and hangs up at the request after its last
+# message, that is when the sign has finished drawing it; the run ends there.
+# (Not after a number of requests: firmware that polls spends requests on its
+# polls, and the last message would never be served.) --duration is only a
+# safety net.
 build/sign-emu --headless --port "$PORT" --wait-client 30 \
-    --until-requests $((messages + 1)) --duration 300 \
+    --until-disconnect --duration 300 \
     --record "$OUT/all_types.gif" --frames "$OUT/all_types.jsonl" \
     "$HEX" 2> "$OUT/sign-emu.log" &
 emu=$!
-if ! ./fake_app.py --quiet --port "$PORT" --connect-timeout 30 "$PLAYLIST"; then
+if ! ./fake_app.py --quiet --once --port "$PORT" --connect-timeout 30 "$PLAYLIST"; then
     kill "$emu" 2>/dev/null || true
     cat "$OUT/sign-emu.log"
     echo "FAILED: the fake app could not run"
@@ -97,8 +103,8 @@ if grep -q CHOOSER_ATTN_FIRST_BYTE_MS ../LED_Marquee.ino; then
 
     echo "== chooser contract 3: the same against the bench image (numbers on panel B and to the app)"
     make --no-print-directory firmware-debug
-    python3 tests/push_test.py run build/sign-emu build/firmware-debug/LED_Marquee.hex ../Fonts.h \
-        build/tests/push-debug $((PORT + 14))
+    python3 tests/push_test.py run --bench build/sign-emu build/firmware-debug/LED_Marquee.hex \
+        ../Fonts.h build/tests/push-debug $((PORT + 14))
 
     echo "== chooser contract 3: fake_app.py --contract 3, at real-time speed"
     # The fake app counts this computer's seconds, so the run is paced. Request 1

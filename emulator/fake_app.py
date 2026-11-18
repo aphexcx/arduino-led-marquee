@@ -253,6 +253,29 @@ class App:
             directive_number(self.args.break_ms), directive_number(self.args.guard_ms),
             encode(message).decode("ascii"))
 
+    def on_request(self, request):
+        """Everything the app writes when it reads a request byte, in order, as a list of
+        (bytes, text for the log). None when the playlist is finished.
+        Contract version 3: a change that is overdue is handled BEFORE the request is answered
+        (the app never answers with a message it no longer holds, and never pushes behind a
+        stale answer). If that change pushed a chooser message, the push is the answer: a
+        request gets at most one frame. If the app left chooser mode instead (the line LOW,
+        no frame), the request is answered with the message it left for."""
+        out = []
+        if self.args.contract == 3:
+            push, shown = self.push_due()
+            if push is not None:
+                out.append((push, "the selection's time was up: pushed first  ->  %s" % shown))
+                if self.held is None:
+                    return out
+            elif self.finished:
+                return None
+        reply, shown = self.answer(request)
+        if reply is None:
+            return out or None
+        out.append((reply, "sign asked %s  ->  %s" % (chr(request), shown)))
+        return out
+
     def answer(self, request):
         if self.args.contract == 3:
             return self.answer_v3(request)
@@ -330,12 +353,14 @@ class App:
                 if other:
                     self.log("sign said: %r" % bytes(other).decode("ascii", "replace"))
                     other.clear()
-                reply, shown = self.answer(byte)
-                if reply is None:
+                writes = self.on_request(byte)
+                if writes is None:
                     self.log("sign asked %s; playlist finished" % chr(byte))
+                    self.finished = True
                     break
-                sock.sendall(reply)
-                self.log("sign asked %s  ->  %s" % (chr(byte), shown))
+                for reply, shown in writes:
+                    sock.sendall(reply)
+                    self.log(shown)
         if other:
             self.log("sign said: %r" % bytes(other).decode("ascii", "replace"))
         sock.close()

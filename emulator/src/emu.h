@@ -90,6 +90,7 @@ typedef struct {
     int has_after;          // directive "@after<ms>": and a gap after the item before it
     double after_ms;
     double break_ms;        // more than 0: not a reply but a break of this length ("@break<ms>")
+    int batch, end;         // not a reply but a mark: "@batch" before, "@end" after a batch
 } reply_t;
 typedef void (*reply_cb_t)(const reply_t *reply, void *param);
 void reply_init(int directives);
@@ -102,6 +103,10 @@ void reply_reset(void);
 void reply_new_exchange(int drop_delay);
 void reply_feed(const uint8_t *buf, size_t len, reply_cb_t cb, void *param);
 void reply_flush(reply_cb_t cb, void *param);
+// The wait for a request's answer ran out. What has arrived goes to the wire
+// as the bytes it is, a directive that never got its newline included, and
+// nothing of it is left to act on a later reply.
+void reply_give_up(reply_cb_t cb, void *param);
 
 // ---- link.c ---------------------------------------------------------------
 int link_listen(int port);                    // 127.0.0.1:port; 0 on success

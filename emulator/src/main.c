@@ -1,6 +1,7 @@
 // sign-emu: runs the sign's real firmware image on a simulated ATmega328P
 // (simavr) and shows what the LEDs would show. See ../README.md.
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
@@ -8,6 +9,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "emu.h"
 #include "avr_ioport.h"
@@ -20,6 +22,7 @@ static struct {
     int band;
     double duration_s;        // 0 = run until stopped
     long until_requests;      // 0 = off
+    int until_disconnect;     // stop when the app hangs up
     double speed;             // 0 = as fast as possible
     int speed_set;
     const char *gif, *png_dir, *events;
@@ -49,6 +52,8 @@ static void usage(FILE *f)
 "    --duration <s>         stop after this much simulated time\n"
 "    --until-requests <n>   stop when the sign asks for its n-th message\n"
 "                           (it has then finished drawing the first n-1)\n"
+"    --until-disconnect     stop when the app hangs up (an app that plays a list once\n"
+"                           hangs up at the request after its last message)\n"
 "    --speed <x>            pace to x times real time (live default 1, 0 = flat out)\n"
 "  views\n"
 "    --headless             no terminal view (default when stdout is not a terminal)\n"
@@ -153,8 +158,12 @@ static void on_frame(const image_t *img, uint64_t latch_cycle, const ws_frame_in
 // While a request is being answered (g_hold.active), a reply is placed
 // relative to the end of that request's stop bit. Anything else the app sends
 // is placed relative to the moment it arrives.
+// With "@batch" in front of the reply the hold does not end when the reply
+// is complete (reply_seen) but at "@end": what the app sends in between is
+// read with the clock standing still.
 static struct {
     int active, done;
+    int keep, reply_seen;
     uint64_t base;
 } g_hold;
 
@@ -168,7 +177,15 @@ static uint64_t g_unfinished_replies, g_link_changes, g_breaks;
 
 static void deliver(const reply_t *r, void *param)
 {
-    int answering = g_hold.active && !g_hold.done;
+    int held = g_hold.active && !g_hold.done;
+    int answering = held && !g_hold.reply_seen;
+    if (r->batch || r->end) {
+        if (held && r->batch)
+            g_hold.keep = 1;
+        if (held && r->end)
+            g_hold.done = 1;
+        return;
+    }
     uint64_t base = answering ? g_hold.base : avr->cycle;
     double ms = r->has_delay ? r->delay_ms : answering ? opt.latency_ms : 0;
     uint64_t after = r->has_after ? ms_to_cycles(r->after_ms) : 0;
@@ -179,8 +196,12 @@ static void deliver(const reply_t *r, void *param)
     } else if (r->n) {
         uart_rx_enqueue(r->data, r->n, base + ms_to_cycles(ms), after);
     }
-    if (answering && r->complete)
-        g_hold.done = 1;
+    if (answering && r->complete) {
+        if (g_hold.keep)
+            g_hold.reply_seen = 1;
+        else
+            g_hold.done = 1;
+    }
 }
 
 // The app holds the line to the sign LOW. Recorded when it falls, with the
@@ -213,6 +234,8 @@ static void on_link_change(int connected)
     g_link_changes++;
     reply_reset();
     g_hold.active = 0;
+    if (!connected && opt.until_disconnect)
+        g_stop = 1;
     if (opt.verbose)
         fprintf(stderr, "[%10.6f] link: %s\n", cycles_to_s(avr->cycle),
                 connected ? "a client connected" : "the client is gone");
@@ -259,6 +282,8 @@ static void on_tx(uint8_t byte, int framing_ok, uint64_t start_cycle, uint64_t e
         reply_new_exchange(0);      // this request's reply starts outside any object
         g_hold.active = 1;
         g_hold.done = 0;
+        g_hold.keep = 0;
+        g_hold.reply_seen = 0;
         g_hold.base = end_cycle;
         // on_link_change() ends the hold (g_hold.active = 0) if the client
         // goes away or is replaced while the clock is held for it.
@@ -274,8 +299,7 @@ static void on_tx(uint8_t byte, int framing_ok, uint64_t start_cycle, uint64_t e
             // The reply did not finish in time. What has arrived of it goes
             // where a reply goes; the rest goes on the wire when it comes.
             g_unfinished_replies++;
-            reply_flush(deliver, NULL);
-            reply_new_exchange(1);  // and it is given up: it must not swallow later replies
+            reply_give_up(deliver, NULL);   // it must not swallow or delay later replies
         }
         g_hold.active = 0;
         // Anything the client sent after its reply in the same breath is not
@@ -337,6 +361,33 @@ static void no_sleep(avr_t *a, avr_cycle_count_t how_long)
 }
 
 // ---- main -------------------------------------------------------------------
+// True when two paths name the same file: the same existing file (also by a
+// link), or, for one that does not exist yet, the same name in the same
+// directory.
+static int same_file(const char *a, const char *b)
+{
+    struct stat sa, sb;
+    int ea = stat(a, &sa) == 0, eb = stat(b, &sb) == 0;
+    if (ea && eb)
+        return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+    if (ea != eb)
+        return 0;
+    char da[PATH_MAX], db[PATH_MAX], ra[PATH_MAX], rb[PATH_MAX];
+    snprintf(da, sizeof(da), "%s", a);
+    snprintf(db, sizeof(db), "%s", b);
+    char *sla = strrchr(da, '/'), *slb = strrchr(db, '/');
+    const char *na = sla ? sla + 1 : a, *nb = slb ? slb + 1 : b;
+    if (strcmp(sla ? sla + 1 : da, slb ? slb + 1 : db) != 0)
+        return 0;
+    (void) na;
+    (void) nb;
+    if (sla) *sla = 0;
+    if (slb) *slb = 0;
+    if (!realpath(sla ? (da[0] ? da : "/") : ".", ra) || !realpath(slb ? (db[0] ? db : "/") : ".", rb))
+        return !strcmp(a, b);
+    return !strcmp(ra, rb);
+}
+
 // A number option. Anything that is not a number in [min, max] is refused
 // here, with the range, so that no later conversion to an integer type, a
 // cycle count or a file field can overflow or be given nonsense.
@@ -389,6 +440,7 @@ int main(int argc, char **argv)
         // GIF's 16-bit sizes, the port in 16.
         if (!strcmp(a, "--duration")) opt.duration_s = arg_num(argc, argv, &i, 1e-6, 1e9);
         else if (!strcmp(a, "--until-requests")) opt.until_requests = arg_int(argc, argv, &i, 1, 1000000000);
+        else if (!strcmp(a, "--until-disconnect")) opt.until_disconnect = 1;
         else if (!strcmp(a, "--speed")) { opt.speed = arg_num(argc, argv, &i, 0, 1000); opt.speed_set = 1; }
         else if (!strcmp(a, "--headless")) opt.headless = 1;
         else if (!strcmp(a, "--band")) opt.band = 1;
@@ -418,6 +470,21 @@ int main(int argc, char **argv)
     }
     if (!opt.speed_set)
         opt.speed = opt.headless ? 0 : 1;
+
+    // Outputs are created empty before the run. So none of them may be the
+    // firmware file, and no two of them the same file: checked before anything
+    // is opened.
+    {
+        const char *path[] = { opt.hex, opt.gif, opt.events, opt.png_dir };
+        const char *what[] = { "the firmware file", "--record", "--frames", "--png-dir" };
+        for (int i = 0; i < 4; i++)
+            for (int j = i + 1; j < 4; j++)
+                if (path[i] && path[j] && same_file(path[i], path[j])) {
+                    fprintf(stderr, "sign-emu: %s and %s are the same file (%s): nothing was "
+                                    "written\n", what[i], what[j], path[j]);
+                    return 2;
+                }
+    }
 
     // The simulated chip.
     avr = avr_make_mcu_by_name("atmega328p");
@@ -625,7 +692,9 @@ int main(int argc, char **argv)
                      "sign was full\n", uart_rx_dropped());
     if (g_rx_wire_errors)
         fprintf(out, "sign-emu: WARNING: %llu byte(s) to the sign were not seen on the wire as "
-                     "they were sent (emulator fault)\n", (unsigned long long) g_rx_wire_errors);
+                     "they were sent (an emulator fault, unless bytes were sent with no gap behind "
+                     "a break: their first start bit is then no edge)\n",
+                (unsigned long long) g_rx_wire_errors);
     if (g_marginal || g_partial || g_framing_errors)
         fprintf(out, "sign-emu: WARNING: %llu marginal WS2812 pulses, %llu frames with a partial "
                      "pixel, %llu serial framing errors\n",

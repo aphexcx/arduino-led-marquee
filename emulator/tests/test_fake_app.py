@@ -119,6 +119,27 @@ def main():
     check(push.startswith(b"@break12.5\n@after0\n{"),
           "--break-ms and --guard-ms are written as plain decimal numbers (%r)" % push[:22])
 
+    print("contract version 3: a change that is overdue when a request is read")
+    now = [500.0]
+    a = app(work, [a_msg, pick1[:-1] + ',"_seconds":2.5}', pick2, b_msg], 3)
+    a.clock = lambda: now[0]
+    answers(a, "~~")                     # the first message, then pick1 is selected
+    now[0] += 2.6                        # its time is up, and a request is read in the same turn
+    got = a.on_request(ord("~"))
+    check(len(got) == 1 and got[0][0] == b"@break50\n@after20\n" + pick2.encode("ascii"),
+          "the new message is pushed before the request is answered, and the push is the "
+          "answer: one frame, never the old message (%r)" % [g[0] for g in got])
+    got = a.on_request(ord("~"))
+    check([g[0] for g in got] == [pick2.encode("ascii")],
+          "the next request is answered with the new selection")
+    now[0] += 6.1                        # the app leaves chooser mode, a request is waiting
+    got = a.on_request(ord("~"))
+    check([g[0] for g in got] == [b"@break50\n", b_msg.encode("ascii")],
+          "leaving chooser mode with a request waiting: the line LOW, then that request is "
+          "answered with the message it left for (%r)" % [g[0] for g in got])
+    got = a.on_request(ord("~"))
+    check([g[0] for g in got] == [a_msg.encode("ascii")], "and nothing is sent twice")
+
     if failures:
         print("FAILED: %d fake app check(s)" % len(failures))
         sys.exit(1)

@@ -2,6 +2,12 @@
 """Chooser contract version 3.1 (the app pushes, the sign does not poll),
 measured on the real firmware.
 
+  Add --bench to run or check when the image is the bench build: its lines of numbers
+  and its digits on panel B are then REQUIRED; without --bench they must be absent.
+
+  push_test.py font <Fonts.h>
+      The checker's own reading of the font (the 7-column heart, the vertical tab).
+
   push_test.py run <sign-emu> <firmware.hex> <Fonts.h> <work dir> [port] [--record out.gif]
       A scripted app: a 64-character chooser message pushed just as the sign
       asks for its next message, two changes pushed while it scrolls, a change
@@ -157,8 +163,10 @@ class Dump:
         return found
 
 
-def analyse(dump, font, expect=None):
-    """expect: for the scripted run, what must be found (counts of pushes and so on)."""
+def analyse(dump, font, expect=None, bench=False):
+    """expect: for the scripted run, what must be found (counts of pushes and so on).
+    bench: the caller says this is the bench image (CHOOSER_DEBUG_PANEL_B). It is not read
+    from the dump: an image that was meant to be the bench build and is not must fail."""
     objects = dump.objects()
     messages = {}
     for _, _, obj in objects:
@@ -173,7 +181,12 @@ def analyse(dump, font, expect=None):
         return
 
     # ---- which message and position every frame shows ------------------------
-    bench = bool(dump.said)        # the bench build: numbers on panel B, lines to the app
+    if bench:
+        check(bool(dump.said), "this is the bench image: it sent lines of numbers to the app (%d)"
+              % len(dump.said))
+    else:
+        check(not dump.said, "this is the plain image: it sent no line of numbers to the app "
+                             "(%d)" % len(dump.said))
     digits = {tuple(font[str(d)]): str(d) for d in range(10)}
 
     def panel_b_numbers(f):
@@ -468,7 +481,7 @@ def push(at_ms, message):
     return b"@%d\n@break50\n@after20\n" % at_ms + message
 
 
-def run(emu, hexfile, font_path, work, port, record):
+def run(emu, hexfile, font_path, work, port, record, bench):
     os.makedirs(work, exist_ok=True)
     dump, log = os.path.join(work, "push.jsonl"), os.path.join(work, "push.log")
     one = chooser("THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG AND KEEPS ON RUNNING", "1/4")
@@ -479,16 +492,18 @@ def run(emu, hexfile, font_path, work, port, record):
     # Each answer is ONE write, so that everything in it reaches the emulator while it holds the
     # simulated clock for the request: the pushes are then placed from that request, not from
     # how fast this computer is.
+    # (@batch ... @end: the emulator keeps the clock held until @end has arrived, in however
+    # many pieces TCP delivers the write.)
     plan = [
         # request 1 (after the startup animation; the sign is in loop()'s own read): the app
         # enters chooser mode at that very moment and pushes the first message. The break
         # falls 5 ms after the request, while the sign is listening for its answer.
         # Then two changes pushed while a text scrolls: 4 s later, and 4 s after that.
-        b"@break50\n@after20\n" + one + push(4000, two) + push(8000, three),
+        b"@batch\n@break50\n@after20\n" + one + push(4000, two) + push(8000, three) + b"@end\n",
         # request 2 (the sign's own read, when the third text has come round and stands still):
         # the app is on a fourth message that it never pushed. 3 s later it leaves chooser
         # mode: the line LOW, and nothing behind it.
-        four + b"@3000\n@break50\n",
+        b"@batch\n" + four + b"@3000\n@break50\n@end\n",
         # request 3 (the sign asking, because no message followed that attention)
         bye,
     ]
@@ -533,7 +548,7 @@ def run(emu, hexfile, font_path, work, port, record):
           "sign-emu ran to the end without a warning (exit status %s)" % proc.returncode)
     analyse(Dump(dump), load_font_std(font_path),
             {"pushes": 3, "unpushed": 1, "leaves": 1, "requests": 4, "break_ms": 50,
-             "guard_ms": 20})
+             "guard_ms": 20}, bench)
 
 
 def idle(emu, hexfile, font_path, work, port):
@@ -617,19 +632,41 @@ def idle(emu, hexfile, font_path, work, port):
                    "latest %.0f ms after the message's last byte); %d runs did not" % (worst, len(bad)))
 
 
+def font_check(font_path):
+    """The checker's own font reading, against the widths the firmware draws."""
+    font = load_font_std(font_path)
+    cols = text_columns(font, "I \x7f U")
+    check(len(cols) == 5 + 1 + 5 + 1 + 7 + 1 + 5 + 1 + 5 and any(cols[12:19]),
+          "the heart (0x7F) is read from Fonts.h, 7 columns wide: \"I \\x7f U\" is %d columns"
+          % len(cols))
+    check(text_columns(font, "A\x0bB") == font["A"] + [0, 0] + font["B"],
+          "the vertical tab is only the blank column behind it")
+    m = Message(font, {"type": "H", "str": "I \x7f U AND MORE TEXT SO THAT IT SCROLLS",
+                       "flashy": "12/345"})
+    check(m.scrolls and len(m.pictures) > 100,
+          "a chooser message with a heart in it has its pictures (%d)" % len(m.pictures))
+    check(len(text_columns(font, "caf\xe9")) == 23, "a byte outside the font counts as a space")
+
+
 def main():
     args = sys.argv[1:]
     record = None
+    bench = "--bench" in args
+    if bench:
+        args.remove("--bench")
     if "--record" in args:
         at = args.index("--record")
         record = args[at + 1]
         del args[at:at + 2]
     if len(args) >= 5 and args[0] == "run":
-        run(args[1], args[2], args[3], args[4], int(args[5]) if len(args) > 5 else 14430, record)
+        run(args[1], args[2], args[3], args[4], int(args[5]) if len(args) > 5 else 14430, record,
+            bench)
+    elif len(args) == 2 and args[0] == "font":
+        font_check(args[1])
     elif len(args) >= 5 and args[0] == "idle":
         idle(args[1], args[2], args[3], args[4], int(args[5]) if len(args) > 5 else 14430)
     elif len(args) == 3 and args[0] == "check":
-        analyse(Dump(args[2]), load_font_std(args[1]))
+        analyse(Dump(args[2]), load_font_std(args[1]), None, bench)
     else:
         sys.exit(__doc__)
     if failures:

@@ -35,7 +35,7 @@ def check(ok, text):
 
 
 class Run:
-    def __init__(self, lines, wall_s, log, status):
+    def __init__(self, lines, wall_s, log, status, tolerate_wire=False):
         self.lines = lines                     # the dump, without its meta line
         self.wall_s = wall_s
         self.log = log
@@ -50,11 +50,11 @@ class Run:
         # seen to fall, "due" when it was due to, "end" when it is due to rise.
         self.breaks = [e for e in events if e["type"] == "break"]
         late = [e["cycle"] - e["due"] for e in self.rx]
-        if late and not (0 <= min(late) and max(late) <= 4):
+        if late and not (0 <= min(late) and max(late) <= 4) and not tolerate_wire:
             raise RuntimeError("a start bit was seen on the pin %d..%d cycles after it was due; "
                                "it must be there at the first instruction boundary (0 to 4 "
                                "cycles)" % (min(late), max(late)))
-        if "WARNING" in log:
+        if "WARNING" in log and not tolerate_wire:
             raise RuntimeError("sign-emu warned: %s" % log.strip()[-300:])
         self.frames = sum(1 for e in events if e["type"] == "frame")
 
@@ -65,7 +65,7 @@ class Run:
         return bytes(e["byte"] for e in self.tx).decode("latin-1")
 
 
-def run_case(env, name, plan, requests, flags=()):
+def run_case(env, name, plan, requests, flags=(), tolerate_wire=False):
     """plan: for each request, a list of (bytes, pause before sending, in real seconds)."""
     dump = os.path.join(env["work"], name + ".jsonl")
     log = os.path.join(env["work"], name + ".log")
@@ -114,7 +114,7 @@ def run_case(env, name, plan, requests, flags=()):
         if emu.poll() is None:
             emu.kill()
     lines = open(dump, encoding="utf-8").read().splitlines()
-    return Run(lines[1:], wall, open(log).read(), emu.returncode)
+    return Run(lines[1:], wall, open(log).read(), emu.returncode, tolerate_wire)
 
 
 class Session:
@@ -476,6 +476,14 @@ def main():
           and offset(run, 0, 1) == request_cycles + 5 * 16000,
           "a directive whose reply never came is dropped when the wait runs out: the next "
           "request's reply is placed by --link-latency-ms, not by the stale delay")
+    run = run_case(env, "cut-open-directive",
+                   [[(b"@250", 0)], [(hello, 0)], [(stars, 0)]], 4, short_wait + d)
+    asked = [i for i, e in enumerate(run.tx) if e.get("char") == "~"]
+    check(run.rx_text() == "@250" + (hello + stars).decode() and len(asked) == 4
+          and offset(run, 4, asked[1]) == request_cycles + 5 * 16000,
+          "a directive that never got its newline goes to the sign as the bytes it is when the "
+          "wait runs out (the sign sent %r), and does not delay the next reply: that one "
+          "starts 5 ms after its own request" % run.tx_text()[:16])
 
     print("bytes sent after a reply in the same write")
     run = run_case(env, "trailing", [[(hello + b"xyz", 0)], [(stars, 0)]], 3)
@@ -518,13 +526,13 @@ def main():
           % (first["due"] - b["end"]))
     again = run_case(env, "break-again", [[(hello + push, 0)], [(stars, 0)]], 3, d)
     check(again.lines == run.lines, "the same run again: identical dump")
-    run = run_case(env, "break-answer", [[(b"@break10\n" + hello, 0)]], 2, d)
-    cut = run_case(env, "break-answer-cut", [[(b"@break10\n", 0), (hello, 0.3)]], 2, d)
+    run = run_case(env, "break-answer", [[(b"@break10\n@after1\n" + hello, 0)]], 2, d)
+    cut = run_case(env, "break-answer-cut", [[(b"@break10\n", 0), (b"@after1\n" + hello, 0.3)]], 2, d)
     b = run.breaks[0] if len(run.breaks) == 1 else {"due": 0, "end": 0}
     check(len(run.breaks) == 1 and b["due"] == run.tx[0]["cycle"] + request_cycles + 5 * 16000
-          and run.rx[0]["due"] == b["end"] and run.rx_text() == hello.decode(),
+          and run.rx[0]["due"] == b["end"] + 16000 and run.rx_text() == hello.decode(),
           "a break sent as the answer to a request is placed like a reply (5 ms after the "
-          "request), and the reply behind it starts when the line rises")
+          "request), and the reply behind it starts 1 ms after the line rises")
     check(cut.lines == run.lines,
           "a break is not a reply: the clock stays held for the reply that comes 0.3 s later "
           "(identical dump)")
@@ -533,6 +541,39 @@ def main():
         run = run_case(env, "notbreak", [[(text + hello, 0)]], 2, d)
         check(not run.breaks and run.rx_text().startswith(text.decode() + "{"),
               "a mistyped directive (%s) is not swallowed: its bytes go to the sign" % label)
+
+    print("the line has one level at a time")
+    # A reply with no gap behind a break: the line does not rise between the
+    # break and the reply's start bit, so that start bit is no falling edge and
+    # nothing can find the byte. (The first falling edge is the first 0 bit
+    # that follows a 1 bit inside the byte, at least a bit time later.)
+    glued = run_case(env, "break-glued",
+                     [[(hello + b"@300\n@break10\n@after0\n" + stars, 0)], [(stars, 0)]], 3, d,
+                     tolerate_wire=True)
+    b = glued.breaks[0] if len(glued.breaks) == 1 else {"cycle": 0, "end": 0}
+    edges = [e["cycle"] for e in glued.rx if e["cycle"] >= b["cycle"]]
+    check(bool(edges) and min(edges) >= b["end"] + nearest_cycle(1),
+          '"@after0\\n": no falling edge at the end of the break; the first one a listener '
+          "finds is %d cycles later, inside the byte" % ((min(edges) - b["end"]) if edges else -1))
+    check("no gap behind" in glued.log,
+          "and the emulator says that those bytes were not seen on the wire as they were sent")
+    gap = run_case(env, "break-gap",
+                   [[(hello + b"@300\n@break10\n@after0.5\n" + stars, 0)], [(stars, 0)]], 3, d)
+    b = gap.breaks[0] if len(gap.breaks) == 1 else {"end": 0}
+    check(gap.rx_text() == (hello + stars + stars).decode()
+          and gap.rx[len(hello)]["due"] == b["end"] + 8000,
+          '"@after0.5\\n": the line rises for half a millisecond and every byte is read')
+
+    print("a batch (--link-directives)")
+    one = run_case(env, "batch", [[(b"@batch\n" + hello + push + b"@end\n", 0)], [(stars, 0)]], 3, d)
+    cut = run_case(env, "batch-cut",
+                   [[(b"@batch\n" + hello, 0), (push[:9], 0.3), (push[9:] + b"@end\n", 0.3)],
+                    [(stars, 0)]], 3, d)
+    check(len(one.breaks) == 1 and one.rx_text() == (hello + stars + stars).decode(),
+          '"@batch\\n" ... "@end\\n" around a reply and a push behind it: all of it is placed')
+    check(cut.lines == one.lines,
+          "the same sent in three writes 0.3 s apart: the clock stood still until @end, "
+          "identical dump")
 
     reconnection_tests(env, hello, stars, request_cycles)
 
