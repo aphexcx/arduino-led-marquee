@@ -3,7 +3,7 @@
 // message i. A preview that fits beside the count blinks. A longer one scrolls column by column
 // (see ChooserScroll.h for the geometry).
 //
-// Contract VERSION 3: the app pushes, the sign does not poll.
+// Contract VERSION 3.1: the app pushes, the sign does not poll.
 //
 // The sign cannot listen to the app and move a text at the same moment (interrupts are off while a
 // frame goes out, and a conversation takes as long as the app and the link take). So while a text
@@ -16,11 +16,16 @@
 //    listen, read one message (chooserAttention).
 //  - Underneath is a read of the whole message with '~', but only where a wait cannot be seen:
 //    with a scrolling text standing still on its start, each time it has come round; and for a
-//    text that fits, every CHOOSER_REFRESH_MS at the brightest frame of its blink (chooserSync).
+//    text that fits, every CHOOSER_REFRESH_MS in the dark pause between two blinks (chooserSync).
 //    So a push that was lost, or an app that does not push at all, is put right at the next
 //    stand-still, and a text is never out of date for longer than once round.
 //  - Whatever was read and is not a whole message is not shown. The sign then asks the normal way
 //    (chooserFallback); if that brings nothing either, showAsChooser() returns and loop() asks.
+//  - That is also how the chooser ends. When the app leaves chooser mode it raises its hand and
+//    sends nothing: the sign waits CHOOSER_ATTN_FIRST_BYTE_MS, asks, and is given the next message.
+//  - A break that falls while the sign is already listening for the answer to a '~' (its own, or
+//    loop()'s) is received as a 0x00 byte. That byte is stepped over and the read goes on: what
+//    the app sends next is the answer (chooserAwaitAnswer).
 //
 // The sign sends no '?' any more. An object without a "type" is never a message, here or in loop().
 //
@@ -52,7 +57,7 @@ struct ChooserState {
     bool syncDue;              // it has come round: this stand-still reads the whole message
     uint blinkCount;           // a text that fits: which frame of its blink is on the LEDs (the last one is 0, black)
     uint failedReads;          // reads in a row that brought nothing usable
-    unsigned long holdStartUs; // when the stand-still began (micros)
+    unsigned long holdStartUs; // when the stand-still (or the dark pause of the blink) began (micros)
     unsigned long fullReadMs;  // when the whole message was last read (millis)
 };
 
@@ -79,11 +84,13 @@ static void chooserLeft() {
 //   blue   ms from the line seen LOW to the end of the message
 //   white  how many times the line was seen LOW (two digits, counts round)
 //   red    how many of those ended in asking with '~' because no whole message followed
+// (leaving chooser mode is one of those, by design: attention and no message)
 // They are sent with the first frame after they change, which is the only frame longer than
-// panel 1; that frame is always one of a text standing still.
+// panel 1 (119 columns, about 2 ms more). After a pushed message that is a frame of a text
+// standing still; after a fallback that brought the same message again it is the next scrolled one.
 struct ChooserDebug {
     unsigned int firstByteMs, endMs;
-    uint attentions, fallbacks;
+    uint attentions, fallbacks; // 0 to 99, then from 0 again
     bool stale; // panel 2 does not show these values yet
 };
 
@@ -100,6 +107,12 @@ static void chooserDigits(char* out, unsigned int value, uint digits) {
         out[digits] = '0' + value % 10;
         value /= 10;
     }
+}
+
+// One more on a counter that is shown as two digits
+static void chooserCount(uint& counter) {
+    counter = counter >= 99 ? 0 : counter + 1;
+    chooserDebug.stale = true;
 }
 #endif
 
@@ -136,12 +149,15 @@ static void chooserDrawFrame(uint brightness) {
 #if CHOOSER_DEBUG_PANEL_B
     char first[4], end[4], attentions[3], fallbacks[3];
     bool numbers = chooserDebug.stale;
-    chooserDebug.stale = false;
-    chooserDigits(first, chooserDebug.firstByteMs, 3);
-    chooserDigits(end, chooserDebug.endMs, 3);
-    chooserDigits(attentions, chooserDebug.attentions % 100, 2);
-    chooserDigits(fallbacks, chooserDebug.fallbacks % 100, 2);
-    ChooserCursor digitCur = chooserSeek(first, CHOOSER_PANEL_COLS, 0); // every number starts the same way
+    ChooserCursor digitCur = countCur;
+    if (numbers) { // (not on every frame: the divisions would slow the blink)
+        chooserDebug.stale = false;
+        chooserDigits(first, chooserDebug.firstByteMs, 3);
+        chooserDigits(end, chooserDebug.endMs, 3);
+        chooserDigits(attentions, chooserDebug.attentions, 2);
+        chooserDigits(fallbacks, chooserDebug.fallbacks, 2);
+        digitCur = chooserSeek(first, CHOOSER_PANEL_COLS, 0); // every number starts the same way
+    }
 #endif
 
     cli();
@@ -183,7 +199,7 @@ static void chooserFullReadDone() {
 }
 
 // Puts the stored message on the LEDs from its start: a scrolling text standing still on its
-// first characters, a text that fits at the brightest frame of its blink.
+// first characters, a text that fits at the first and brightest frame of its blink.
 static void chooserRestart() {
     chooser.pos = 0;
     chooser.holding = true;
@@ -217,20 +233,38 @@ static bool chooserWait(unsigned long sinceUs, unsigned long us) {
     return false;
 }
 
+// A LOW that lasts longer than this is not part of a byte (a byte holds the line LOW for nine
+// bit times at most, 0.63 ms at 14400 baud): the app is holding the line.
+#define CHOOSER_BREAK_MIN_US 1500UL
+
 // Waits until the line has been HIGH for CHOOSER_LINE_QUIET_MS without a gap: a break is over, a
 // run of bytes has ended (one byte is 0.7 ms and has a HIGH stop bit in it, so a single look at
 // the pin would not do). Gives up after maxMs.
-static void chooserAwaitQuietLine(unsigned int maxMs) {
-    unsigned long startMs = millis();
-    unsigned long highSinceMs = startMs;
+// With stopAtBreak it also returns, at once, when the line stays LOW for longer than any byte
+// does: that is the app raising its hand, and it is left for the caller's next look at the line.
+static void chooserAwaitQuietLine(unsigned int maxMs, bool stopAtBreak) {
+    unsigned long startUs = micros();
+    unsigned long highSinceUs = startUs;
+    unsigned long lowSinceUs = startUs;
+    bool wasLow = false;
     for (;;) {
-        unsigned long nowMs = millis();
+        unsigned long nowUs = micros();
         if (chooserLineLow()) {
-            highSinceMs = nowMs;
-        } else if (nowMs - highSinceMs >= CHOOSER_LINE_QUIET_MS) {
-            return;
+            if (!wasLow) {
+                wasLow = true;
+                lowSinceUs = nowUs;
+            }
+            if (stopAtBreak && nowUs - lowSinceUs >= CHOOSER_BREAK_MIN_US) {
+                return;
+            }
+            highSinceUs = nowUs;
+        } else {
+            wasLow = false;
+            if (nowUs - highSinceUs >= CHOOSER_LINE_QUIET_MS * 1000UL) {
+                return;
+            }
         }
-        if (nowMs - startMs >= maxMs) {
+        if (nowUs - startUs >= maxMs * 1000UL) {
             return;
         }
     }
@@ -279,11 +313,33 @@ static uint chooserTake(bool readOk) {
     return CHOOSER_REPLY_CHANGED;
 }
 
+// Waits for the first byte of the answer to a '~', as long as a read waits for any byte.
+// A 0x00 in front of it is thrown away. That is what a break is received as when it falls while
+// we are listening: the app raised its hand just as we asked, and what it sends next (if
+// anything) is the answer. Without this the 0x00 would end the read as "no answer" while the
+// answer is still on its way.
+static bool chooserAwaitAnswer() {
+    unsigned long startMs = millis();
+    do {
+        int c = softSerial.peek();
+        if (c > 0) {
+            return true;
+        }
+        if (c == 0) {
+            softSerial.read();
+        }
+    } while (millis() - startMs < ANSWER_FIRST_BYTE_MS);
+    return false;
+}
+
 // The read of a normal '~' request, loop()'s and ours (the '~' has just been sent).
 // An object without a type is not a message. It is stepped over and the read goes on in the same
 // window, because the real answer may be on its way behind it. (Asking again at once would start
 // listening in the middle of that answer and read its tail as garbage.)
 static DeserializationError chooserReadMessage() {
+    if (!chooserAwaitAnswer()) {
+        return DeserializationError::EmptyInput;
+    }
     DeserializationError err = deserializeJson(json, softSerial);
     for (uint skipped = 0;
          skipped < CHOOSER_MAX_SKIPPED && err == DeserializationError::Ok && !json["type"].is<const char*>();
@@ -291,6 +347,13 @@ static DeserializationError chooserReadMessage() {
         err = deserializeJson(json, softSerial);
     }
     return err;
+}
+
+// A read has just ended, at the closing brace. Whatever the app writes behind a message (a
+// newline, say) is not the app raising its hand: let it go by before the line is watched again.
+// A break is not let by: it is still there for the next look at the line.
+static void chooserLetTrailerPass() {
+    chooserAwaitQuietLine(CHOOSER_TRAILER_WAIT_MS, true);
 }
 
 // Asks for the whole message the normal way and reads the answer into `json`, with the normal
@@ -301,6 +364,7 @@ static bool chooserAsk() {
     softSerial.print('~');
     DeserializationError err = chooserReadMessage();
     stopSerial();
+    chooserLetTrailerPass();
     return err == DeserializationError::Ok;
 }
 
@@ -310,8 +374,8 @@ static bool chooserSyncIsDue() {
         // standing still on its start, having come round since the last read
         return chooser.holding && chooser.syncDue;
     }
-    // a text that fits: at the brightest frame of a blink, when the last read is long enough ago
-    return chooser.blinkCount == CHOOSER_BLINK_FRAMES - 1 && millis() - chooser.fullReadMs >= CHOOSER_REFRESH_MS;
+    // a text that fits: in the dark after a blink, when the last read is long enough ago
+    return chooser.blinkCount == 0 && millis() - chooser.fullReadMs >= CHOOSER_REFRESH_MS;
 }
 
 // The read underneath the pushes: the whole message, compared with what is shown.
@@ -324,23 +388,23 @@ static uint chooserSync() {
 // the '~' would be answered into the tail of it.
 static uint chooserFallback() {
 #if CHOOSER_DEBUG_PANEL_B
-    chooserDebug.fallbacks++;
-    chooserDebug.stale = true;
+    chooserCount(chooserDebug.fallbacks);
 #endif
-    chooserAwaitQuietLine(CHOOSER_FALLBACK_QUIET_WAIT_MS);
+    chooserAwaitQuietLine(CHOOSER_FALLBACK_QUIET_WAIT_MS, false);
     return chooserTake(chooserAsk());
 }
 
 // The receive line was seen LOW: the app has something to say and will say it unasked.
 // Waits for the line to go HIGH and stay HIGH (the break is over), listens, and reads one message.
 // A chooser message is shown from its start, whether or not it is the one already showing.
+// If none comes within CHOOSER_ATTN_FIRST_BYTE_MS the caller asks: that is what the app means
+// when it has left chooser mode (it raises its hand and sends nothing).
 static uint chooserAttention() {
 #if CHOOSER_DEBUG_PANEL_B
     unsigned long seenMs = millis();
-    chooserDebug.attentions++;
-    chooserDebug.stale = true;
+    chooserCount(chooserDebug.attentions);
 #endif
-    chooserAwaitQuietLine(CHOOSER_ATTN_HIGH_WAIT_MS);
+    chooserAwaitQuietLine(CHOOSER_ATTN_HIGH_WAIT_MS, false);
     startSerial(); // begins with an empty buffer: nothing of the break is in it
     bool readOk = false;
     if (chooserAwaitObject(CHOOSER_ATTN_FIRST_BYTE_MS)) {
@@ -355,6 +419,9 @@ static uint chooserAttention() {
 #endif
     }
     stopSerial();
+    if (readOk) {
+        chooserLetTrailerPass();
+    }
     uint reply = chooserTake(readOk);
     if (reply == CHOOSER_REPLY_SAME) {
         chooserRestart();
@@ -370,8 +437,9 @@ static uint chooserAttention() {
 //
 // Every time round this loop the receive line is looked at first, and every wait in it watches
 // the line, so the longest the line goes unwatched is one frame (or, once per message, the
-// blanking of the strip and a frame): a few milliseconds. No byte is sent from here while a text
-// is moving, except after an attention that was not followed by a whole message.
+// blanking of the strip and a frame): a few milliseconds. A LOW seen during a wait is acted on
+// even if it is gone again by the next look. No byte is sent from here while a text is moving,
+// except after an attention that was not followed by a whole message.
 bool showAsChooser(const char* blinkyStr, const char* countyStr) {
     chooser.failedReads = 0;
     if (!(chooser.onScreen &&
@@ -382,9 +450,11 @@ bool showAsChooser(const char* blinkyStr, const char* countyStr) {
     chooser.onScreen = true;
     chooserFullReadDone(); // loop()'s read has just brought this message, new or the same
 
+    bool attention = false; // the line was seen LOW during the last wait
     for (;;) {
         uint reply = CHOOSER_REPLY_SAME;
-        if (chooserLineLow()) {
+        if (attention || chooserLineLow()) {
+            attention = false;
             reply = chooserAttention();
         } else if (chooserSyncIsDue()) {
             reply = chooserSync();
@@ -410,13 +480,26 @@ bool showAsChooser(const char* blinkyStr, const char* countyStr) {
         }
 
         if (!chooserScrolls(chooser.layout)) {
-            // Fits: the next frame of the blink, one straight after the other
-            chooser.blinkCount = chooser.blinkCount ? chooser.blinkCount - 1 : CHOOSER_BLINK_FRAMES - 1;
-            chooserDrawFrame(chooserBlinkLevel(chooser.blinkCount));
+            // Fits: the blink. The text fades to black frame after frame, stays dark for a
+            // moment (the time a read took in that moment is part of it), and starts again.
+            if (chooser.blinkCount) {
+                chooser.blinkCount--;
+                chooserDrawFrame(chooserBlinkLevel(chooser.blinkCount));
+                if (!chooser.blinkCount) {
+                    chooser.holdStartUs = micros();
+                }
+            } else if (chooserWait(chooser.holdStartUs, CHOOSER_BLINK_PAUSE_MS * 1000UL)) {
+                attention = true;
+            } else {
+                chooser.blinkCount = CHOOSER_BLINK_FRAMES - 1;
+                chooserDrawFrame(chooserBlinkLevel(chooser.blinkCount));
+            }
         } else if (chooser.holding) {
             // Standing still on the start of the text (the frame is already on the LEDs). The
             // time a read took is part of the stand-still, not added to it.
-            if (!chooserWait(chooser.holdStartUs, CHOOSER_HOLD_MS * 1000UL)) {
+            if (chooserWait(chooser.holdStartUs, CHOOSER_HOLD_MS * 1000UL)) {
+                attention = true;
+            } else {
                 chooser.holding = false;
             }
         } else {
@@ -432,7 +515,7 @@ bool showAsChooser(const char* blinkyStr, const char* countyStr) {
                 chooser.holdStartUs = micros();
                 continue;
             }
-            chooserWait(stepStartUs, CHOOSER_SCROLL_DELAY_MS * 1000UL);
+            attention = chooserWait(stepStartUs, CHOOSER_SCROLL_DELAY_MS * 1000UL);
         }
     }
 }

@@ -54,11 +54,14 @@
 #define CHOOSER_SCROLL_DELAY_MS 35
 #define CHOOSER_GAP_COLS 18
 #define CHOOSER_TEXT_BRIGHTNESS 145
+#define CHOOSER_BLINK_PAUSE_MS 200
 #define CHOOSER_REFRESH_MS 8000
 #define CHOOSER_ATTN_HIGH_WAIT_MS 100
 #define CHOOSER_ATTN_FIRST_BYTE_MS 150
 #define CHOOSER_ATTN_BYTE_MS 60
 #define CHOOSER_LINE_QUIET_MS 3
+#define CHOOSER_TRAILER_WAIT_MS 20
+#define ANSWER_FIRST_BYTE_MS 1000
 #define CHOOSER_FALLBACK_QUIET_WAIT_MS 500
 #define CHOOSER_MAX_FAILED_READS 3
 #ifndef CHOOSER_DEBUG_PANEL_B
@@ -250,12 +253,15 @@ struct PendingRequest {
 
 struct Push {
     uint64_t breakStartUs, breakEndUs, messageEndUs;
-    std::string message; // what the app meant to send
+    std::string message; // what the app holds at that moment
+    bool frame;          // the message was put on the line behind the break
 };
 
 struct FakeApp {
-    // V3_APP: contract version 3. Whenever its message changes it pushes: a break, a guard, the
-    //         message, unasked. It answers '~' with the message it holds now.
+    // V3_APP: contract version 3.1. Whenever its chooser message changes it pushes: a break, a
+    //         guard, the message, unasked. When it leaves chooser mode it gives the break and
+    //         sends nothing. It answers '~' with the message it holds now, except that a request
+    //         that was on its way while a frame was pushed is answered by that frame alone.
     // V2_APP: contract version 2.1 as far as a version 3 sign can tell: it never pushes and
     //         answers '~' with the message it holds now.
     // OLD_APP: the same on the wire; kept apart so a test can say which app it means.
@@ -267,6 +273,13 @@ struct FakeApp {
     uint64_t silentFromUs;      // from this time on it does not answer or push at all
     uint64_t breakUs, guardUs;  // the push: how long the line is held LOW, and the wait before the message
     bool breakAsZeros;          // the push holds the line LOW with a run of 0x00 bytes instead of a break
+    bool leaveWithFrame;        // contract 3.0: leaving chooser mode pushes the other message as a frame too
+    bool oneFramePerRequest;    // contract 3.1 rule 3 (off: 3.0, a request overtaken by a push gets a second frame)
+    std::string trailer;        // bytes it writes behind every message (a newline, say)
+    uint64_t leftAtUs;          // when it left chooser mode by a push (UINT64_MAX: it has not)
+    int pushBehindAnswer;       // straight behind its answer to this request (0: none) it pushes pushBehindMessage,
+    uint64_t pushBehindGapUs;   // the break beginning this long after the answer's last stop bit
+    std::string pushBehindMessage;
     // What happens to push number n (counting from 1):
     std::map<int, std::string> damagedPush; // the message arrives as these bytes instead ("" = cut in half)
     std::set<int> lostPush;                 // nothing of it reaches the line (no break, no message)
@@ -291,6 +304,13 @@ struct FakeApp {
         breakUs = 50000;
         guardUs = 20000;
         breakAsZeros = false;
+        leaveWithFrame = false;
+        oneFramePerRequest = true;
+        trailer.clear();
+        leftAtUs = UINT64_MAX;
+        pushBehindAnswer = 0;
+        pushBehindGapUs = 0;
+        pushBehindMessage.clear();
         damagedPush.clear();
         lostPush.clear();
         breakOnly.clear();
@@ -309,6 +329,7 @@ struct FakeApp {
         kind = k;
         message = first;
         chooserMode = true;
+        leftAtUs = UINT64_MAX;
         pending.clear();
         pushOwed = false;
         requests.clear();
@@ -340,7 +361,8 @@ struct FakeApp {
     void push(uint64_t atUs) {
         pushOwed = false;
         int number = (int) pushes.size() + 1;
-        Push p{atUs, atUs, atUs, message};
+        Push p{atUs, atUs, atUs, message, false};
+        if (!chooserMode && leftAtUs == UINT64_MAX) leftAtUs = atUs;
         if (atUs >= silentFromUs || lostPush.count(number)) {
             pushes.push_back(p);
             return;
@@ -358,8 +380,12 @@ struct FakeApp {
         if (damagedPush.count(number)) {
             bytes = damagedPush[number].empty() ? bytes.substr(0, bytes.size() / 2) : damagedPush[number];
         }
-        if (!breakOnly.count(number)) {
-            p.messageEndUs = sendOnWire(bytes, p.breakEndUs + guardUs + BYTE_US);
+        // On leaving chooser mode the app raises its hand and says nothing: the message that
+        // follows is taken from its list by the sign's own request, not thrown at a sign that
+        // may not be listening.
+        if (!breakOnly.count(number) && (chooserMode || leaveWithFrame)) {
+            p.messageEndUs = sendOnWire(bytes + trailer, p.breakEndUs + guardUs + BYTE_US);
+            p.frame = true;
         }
         pushes.push_back(p);
     }
@@ -385,17 +411,40 @@ struct FakeApp {
             PendingRequest r = pending.front();
             pending.pop_front();
             if (r.dueUs >= silentFromUs || dropped.count(r.number)) return;
+            if (kind == V3_APP && oneFramePerRequest) {
+                // one request, at most one frame: a request that was on the wire before the last
+                // byte of a pushed frame was written is answered by that frame
+                uint64_t sentUs = requests[(size_t) r.number - 1].tUs;
+                for (size_t i = 0; i < pushes.size(); i++) {
+                    if (pushes[i].frame && r.dueUs >= pushes[i].breakStartUs && sentUs < pushes[i].messageEndUs) return;
+                }
+            }
             std::string reply = message;
             replies[(size_t) r.number - 1] = reply;
             if (damaged.count(r.number)) {
                 reply = damaged[r.number].empty() ? reply.substr(0, reply.size() / 2) : damaged[r.number];
             }
-            sendOnWire(reply, r.dueUs + BYTE_US);
+            sendOnWire(reply + trailer, r.dueUs + BYTE_US);
+            if (r.number == pushBehindAnswer) {
+                message = pushBehindMessage;
+                Push p{wireBusyUntilUs + pushBehindGapUs, 0, 0, message, true};
+                p.breakEndUs = breakOnWire(p.breakStartUs, breakUs);
+                p.messageEndUs = sendOnWire(message + trailer, p.breakEndUs + guardUs + BYTE_US);
+                pushes.push_back(p);
+            }
         }
     }
 };
 
 static FakeApp app;
+
+// How many requests the sign sent while the app was in chooser mode (the one that follows the
+// app's leaving is how the sign gets the next message, and is not counted)
+static size_t requestsWhileChoosing() {
+    size_t n = 0;
+    for (size_t i = 0; i < app.requests.size(); i++) n += app.requests[i].tUs < app.leftAtUs;
+    return n;
+}
 
 static void appAdvance(uint64_t toUs) {
     while (app.nextEventUs() <= toUs) app.fireNext();
@@ -519,6 +568,9 @@ static void arrive(FakeApp::Kind kind, const std::string& text, const std::strin
     wireBusyUntilUs = 0;
     lastLineReadUs = 0;
     longestLineBlindUs = 0;
+#if CHOOSER_DEBUG_PANEL_B
+    chooserDebug = ChooserDebug(); // as after a reset of the sign
+#endif
     std::string first = chooserJson(text, count);
     app.begin(kind, first);
     DeserializationError err = deserializeJson(json, first);
@@ -605,9 +657,9 @@ static bool panelTwoDark(const Frame& f) {
 }
 
 // The frame sent exactly n columns: panel 1's and no more. (With the measurements on panel 2, the
-// frame that brings them up to date is the whole strip.)
+// frame that brings them up to date goes on into panel 2.)
 static bool sentColumns(const Frame& f, size_t n) {
-    return f.columnsSent == n || (CHOOSER_DEBUG_PANEL_B && f.columnsSent == 120);
+    return f.columnsSent == n || (CHOOSER_DEBUG_PANEL_B && f.columnsSent == 119);
 }
 
 static int cycleOf(const std::string& text) {
@@ -660,7 +712,9 @@ static size_t firstStartOf(const std::string& text, const std::string& count, si
 
 static const std::string FIRST = "PLUR IS NOT DEAD";           // 16 characters = 95 columns, viewport 42
 static const std::string SECOND = "SECOND MESSAGE, ALSO LONG"; // 25 characters = 149 columns
-static const double FIRST_PASS_MS = CHOOSER_HOLD_MS + (95 + CHOOSER_GAP_COLS) * CHOOSER_SCROLL_DELAY_MS; // 4555
+// When FIRST has come round: the stand-still, then one step for each of its other 112 positions
+// (to which the few ms it takes to blank the strip and draw are added)
+static const double FIRST_PASS_MS = CHOOSER_HOLD_MS + (95 + CHOOSER_GAP_COLS - 1) * CHOOSER_SCROLL_DELAY_MS; // 4520
 
 // Every frame shows one of the known messages whole, at one of its scroll positions: never a
 // mixture, never part of a text that was not read to its end.
@@ -680,15 +734,15 @@ static void assertOnlyWholePictures(const std::string& a, const std::string& cou
 // A preview that fits: the blink
 // ---------------------------------------------------------------------------------------------
 
-static void previewThatFitsBlinksWithoutAPause() {
+static void previewThatFitsBlinksAndPausesInTheDark() {
     freshApp();
     app.at(1000, BYE, false);
     bool other = runChooser(FakeApp::V3_APP, "HELLO", "3/9");
     assert(other);
-    assert(frames.size() >= 58 * 4);
+    assert(frames.size() >= 58 * 3);
 
     // panel 2 is blanked once, on entry; then 58 frames per blink of count + blank column + text
-    // fading to black, one straight after the other
+    // fading to black, one straight after the other, and a pause in the dark before the next blink
     assert(clears == 1);
     assert(frames[0].afterClear);
     for (size_t i = 0; i < frames.size(); i++) {
@@ -697,19 +751,27 @@ static void previewThatFitsBlinksWithoutAPause() {
         assert(sentColumns(frames[i], 17 + 1 + 29)); // what the old sendString() calls sent
         assert(panelOneIs(frames[i], expectedPanel("HELLO", "3/9", 0, blinkLevel(count), false)));
         assert(panelTwoDark(frames[i]));
-        if (i > 0) assert(ms(frames[i].tUs - frames[i - 1].tUs) < 5); // no pause anywhere, not even between blinks
+        if (i == 0) continue;
+        double sinceLast = ms(frames[i].tUs - frames[i - 1].tUs);
+        if (i % 58 == 0) {
+            assert(frames[i - 1].leds[18].dark()); // the pause is spent in the dark (the count stays lit)
+            assert(!frames[i - 1].leds[0].dark());
+            assert(sinceLast >= CHOOSER_BLINK_PAUSE_MS && sinceLast < CHOOSER_BLINK_PAUSE_MS + 3);
+        } else {
+            assert(sinceLast < 5);
+        }
     }
     assert(frames[0].leds[0].r == 0x80 && frames[0].leds[0].g == 0); // the count is dim red
     assert(frames[0].leds[18].r == GAMMA(145));                       // the text starts at today's level
     assert(frames[57].leds[18].dark());                               // ... and ends black
-    assert(app.requests.empty());                                     // and the app was not asked anything
+    assert(requestsWhileChoosing() == 0);                                     // and the app was not asked anything
 
     if (wantShow) printFrame(frames[0], "a preview that fits: \"HELLO\" beside \"3/9\" (o = dim red, # = white)");
 }
 
 static void previewThatFitsIsReadAgainEveryRefresh() {
-    // An app that never pushes: the message itself is read again every CHOOSER_REFRESH_MS, with
-    // the text standing at its brightest. That read is what ends this run.
+    // An app that never pushes: the message itself is read again every CHOOSER_REFRESH_MS, in
+    // the dark pause of a blink, which is no longer for it. That read is what ends this run.
     freshApp();
     app.at(20000, BYE, false);
     assert(runChooser(FakeApp::V2_APP, "HELLO", "3/9"));
@@ -717,25 +779,74 @@ static void previewThatFitsIsReadAgainEveryRefresh() {
     uint64_t last = 0;
     for (size_t i = 0; i < app.requests.size(); i++) {
         double gap = ms(app.requests[i].tUs - last);
-        assert(gap >= CHOOSER_REFRESH_MS && gap < CHOOSER_REFRESH_MS + 300);
+        assert(gap >= CHOOSER_REFRESH_MS && gap < CHOOSER_REFRESH_MS + 400);
         last = app.requests[i].tUs;
-        const Frame& standing = frames[frameAt(app.requests[i].tUs)];
-        assert(panelOneIs(standing, expectedPanel("HELLO", "3/9", 0, blinkLevel(57), false)));
+        size_t standing = frameAt(app.requests[i].tUs);
+        assert(panelOneIs(frames[standing], expectedPanel("HELLO", "3/9", 0, blinkLevel(0), false)));
+        if (i + 1 < app.requests.size()) {
+            double pause = ms(frames[standing + 1].tUs - frames[standing].tUs);
+            assert(pause >= CHOOSER_BLINK_PAUSE_MS && pause < CHOOSER_BLINK_PAUSE_MS + 3);
+        }
     }
     assert(app.replies[0] == chooserJson("HELLO", "3/9") && app.replies[2] == BYE);
-    assert(ms(nowUs) < 3 * (CHOOSER_REFRESH_MS + 300));
+    assert(ms(nowUs) < 3 * (CHOOSER_REFRESH_MS + 400));
     assert(clears == 1); // the same message again: nothing is redrawn from scratch
 }
 
-static void leavingChooserHandsTheOtherMessageToLoop() {
+static void leavingChooserIsAttentionAndThenTheSignAsks() {
+    // Contract 3.1: when the app leaves chooser mode it holds the line LOW and sends nothing.
+    // The sign stops where it is, waits CHOOSER_ATTN_FIRST_BYTE_MS for a message that does not
+    // come, and asks; that request takes the next message from the app's list.
+    const char* const texts[] = {"HELLO", "PLUR IS NOT DEAD"};
+    for (size_t k = 0; k < 2; k++) {
+        for (double offset = 0; offset < 40; offset += 3.7) {
+            freshApp();
+            app.at(1500 + offset, BYE, false);
+            bool other = runChooser(FakeApp::V3_APP, texts[k], "3/9");
+            assert(other);
+            assert(strcmp(json["type"], "D") == 0);
+            assert(strcmp(json["str"], "bye") == 0);
+            assert(app.pushes.size() == 1 && !app.pushes[0].frame);
+            assert(requestsWhileChoosing() == 0);
+            assert(app.requests.size() == 1 && app.replies[0] == BYE);
+            double asked = ms(app.requests[0].tUs) - ms(app.pushes[0].breakEndUs);
+            assert(asked >= CHOOSER_ATTN_FIRST_BYTE_MS && asked < CHOOSER_ATTN_FIRST_BYTE_MS + 15);
+            // nothing was drawn after the line went LOW: the picture stood still until loop() took over
+            assert(frames.back().tUs < app.pushes[0].breakStartUs + 3000);
+            assert(ms(nowUs) - ms(app.requests[0].tUs) < 30);
+        }
+    }
+}
+
+static void leavingWhileTheReadAtTheHoldIsOnItsWay() {
+    // The text has come round and the sign has sent its '~'. Before the app sees that request it
+    // leaves chooser mode: the line goes LOW, nothing follows. Then the request arrives and is
+    // answered with the next message from the app's list. The sign is still in that read: the
+    // break does not end it, the message is taken, and no second request takes another one.
+    for (double offset = 0; offset < 240; offset += 17) {
+        freshApp();
+        app.latencyUs = 250000;
+        app.at(FIRST_PASS_MS + 5 + offset, BYE, false);
+        assert(runChooser(FakeApp::V3_APP, FIRST, "3/9"));
+        assert(strcmp(json["type"], "D") == 0 && strcmp(json["str"], "bye") == 0);
+        assert(app.pushes.size() == 1 && !app.pushes[0].frame);
+        assert(app.requests.size() == 1 && app.replies[0] == BYE);
+        assertOnlyWholePictures(FIRST, "3/9", FIRST, "3/9");
+    }
+}
+
+static void appThatLeavesWithAFrameIsStillUnderstood() {
+    // Contract 3.0: leaving chooser mode pushed the other message as a frame. A sign for 3.1
+    // takes that too, without asking.
     freshApp();
+    app.leaveWithFrame = true;
     app.at(1000, BYE, false);
     bool other = runChooser(FakeApp::V3_APP, "HELLO", "3/9");
     assert(other);
     assert(strcmp(json["type"], "D") == 0);
     assert(strcmp(json["str"], "bye") == 0);
-    assert(app.pushes.size() == 1);
-    assert(nowUs >= app.pushes[0].messageEndUs && nowUs < app.pushes[0].messageEndUs + 5000);
+    assert(app.pushes.size() == 1 && app.pushes[0].frame);
+    assert(nowUs >= app.pushes[0].messageEndUs && nowUs < app.pushes[0].messageEndUs + 8000);
     assert(app.requests.empty());
 }
 
@@ -754,7 +865,9 @@ static int assertSteadyScroll(const std::string& text, const std::string& count,
         assert(sentColumns(f, 60)); // the count, the blank column, the whole viewport: never more
         assert(panelTwoDark(f));
         assert(f.afterClear == (i == 0));
-        assert(positionOf(f, text, count) == expectPos);
+        // (compared with the one picture that is due: a text that repeats shows the same
+        // viewport at more than one position)
+        assert(panelOneIs(f, expectedPanel(text, count, expectPos, GAMMA(CHOOSER_TEXT_BRIGHTNESS), true)));
         if (i + 1 == frames.size()) break;
 
         double untilNext = ms(frames[i + 1].tUs - f.tUs);
@@ -793,8 +906,8 @@ static void noRequestByteWhileATextIsMoving() {
     // The request log: one '~' each time the text has come round, sent with the first frame of
     // that stand-still on the LEDs, and nothing else. Not in the first stand-still, which began
     // with the read that brought the text.
-    assert(app.requests.size() == 2);
-    for (size_t r = 0; r < app.requests.size(); r++) {
+    assert(requestsWhileChoosing() == 2);
+    for (size_t r = 0; r < requestsWhileChoosing(); r++) {
         assert(app.requests[r].byte == '~');
         size_t f = frameAt(app.requests[r].tUs);
         assert(f > 0 && positionOf(frames[f], FIRST, "3/9") == 0);
@@ -824,7 +937,7 @@ static void slowAnswerAtTheHoldCostsNothing() {
     app.at(12000, BYE, false);
     assert(runChooser(FakeApp::V3_APP, FIRST, "3/9"));
     assert(assertSteadyScroll(FIRST, "3/9") >= 2);
-    assert(app.requests.size() == 2);
+    assert(requestsWhileChoosing() == 2);
 
     // Slower than the stand-still itself: that one stand-still lasts until the answer is in, and
     // the scroll is still not touched.
@@ -842,7 +955,7 @@ static void sixtyFourCharacterTextBesideAFiveCharacterCount() {
     assert(runChooser(FakeApp::V3_APP, text, "12/34"));
     assert(cycleOf(text) == 64 * 6 - 1 + CHOOSER_GAP_COLS); // 401
     assert(assertSteadyScroll(text, "12/34") == 1);         // 401 columns x 35 ms = 14 s: once round
-    assert(app.requests.size() == 1);                       // the one read, at the stand-still
+    assert(requestsWhileChoosing() == 1);                       // the one read, at the stand-still
 }
 
 static void messageTheAppNeverPushedIsPickedUpAtTheNextHold() {
@@ -889,7 +1002,7 @@ static void pushedMessageMidScrollRestartsAtTheHold() {
     // on the display within 150 ms of the end of the break (in fact as soon as the message is in)
     assert(restart.tUs > app.pushes[0].messageEndUs);
     assert(ms(restart.tUs - app.pushes[0].breakEndUs) < 150);
-    assert(ms(restart.tUs - app.pushes[0].messageEndUs) < 10);
+    assert(ms(restart.tUs - app.pushes[0].messageEndUs) < 15);
     // it was mid-scroll before, not at the start, and stopped where it was when the line went LOW
     int before = positionOf(frames[change - 1], FIRST, "3/9");
     assert(before > 10);
@@ -899,7 +1012,7 @@ static void pushedMessageMidScrollRestartsAtTheHold() {
     assert(hold >= CHOOSER_HOLD_MS && hold < CHOOSER_HOLD_MS + 5);
     assert(positionOf(frames[change + 1], SECOND, "4/9") == 1);
     // and the sign did not send a single byte for any of it
-    assert(app.requests.empty());
+    assert(requestsWhileChoosing() == 0);
     assertOnlyWholePictures(FIRST, "3/9", SECOND, "4/9");
 }
 
@@ -926,7 +1039,7 @@ static void pushOfTheSameMessageStartsItAgain() {
     double hold = ms(frames[again + 1].tUs - frames[again].tUs);
     assert(hold >= CHOOSER_HOLD_MS && hold < CHOOSER_HOLD_MS + 5);
     assert(clears == 1); // nothing went dark for it: the picture is drawn over itself
-    assert(app.requests.empty());
+    assert(requestsWhileChoosing() == 0);
 }
 
 static void scrollingToShortMessageGoesBackToTheBlink() {
@@ -947,12 +1060,15 @@ static void scrollingToShortMessageGoesBackToTheBlink() {
 
 // One run with a single push at pushMs. Returns how long after the end of the break the pushed
 // message was on the LEDs, in ms; -1 if it never was.
-static double pushLatencyMs(const std::string& text, double pushMs, const std::string& pushedText) {
+static double pushLatencyMs(const std::string& text, double pushMs, const std::string& pushedText,
+                            bool mayCollideWithARead = false) {
     freshApp();
     app.at(pushMs, chooserJson(pushedText, "4/9"), true);
     app.at(pushMs + 900, BYE, false);
     assert(runChooser(FakeApp::V3_APP, text, "3/9"));
-    assert(app.requests.empty()); // the push was read as it came: nothing had to be asked
+    // the push was read as it came: nothing had to be asked (unless it ran into the read at the
+    // stand-still, whose own answer then comes in behind it and has to be cleared up)
+    if (!mayCollideWithARead) assert(requestsWhileChoosing() == 0);
     for (size_t i = 0; i < frames.size(); i++) {
         if (frames[i].tUs < app.pushes[0].breakStartUs) continue;
         bool shown = cycleOf(pushedText) - CHOOSER_GAP_COLS > 42
@@ -972,12 +1088,20 @@ static void attentionIsSeenInEveryPhaseWhereverTheBreakFalls() {
         double inScroll = pushLatencyMs(FIRST, 2000 + offset, SECOND);
         double inBlink = pushLatencyMs("HELLO", 500 + offset, SECOND);
         double blinkToBlink = pushLatencyMs("HELLO", 500 + offset, "HI");
-        double atTheWrap = pushLatencyMs(FIRST, FIRST_PASS_MS - 40 + offset, SECOND); // around the '~' of the hold
+        double atTheWrap = pushLatencyMs(FIRST, FIRST_PASS_MS - 30 + offset, SECOND, true); // around the '~' of the hold
         const double all[] = {inHold, inScroll, inBlink, blinkToBlink, atTheWrap};
         for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
             assert(all[i] >= 0 && all[i] < 150);
             if (all[i] > worst) worst = all[i];
         }
+    }
+    // the blink once more, through all of one fade and its dark pause
+    for (double offset = 0; offset < 110 + CHOOSER_BLINK_PAUSE_MS + 20; offset += 1.3) {
+        double toScroll = pushLatencyMs("HELLO", 500 + offset, SECOND);
+        double toBlink = pushLatencyMs("HELLO", 500 + offset, "HI");
+        assert(toScroll >= 0 && toScroll < 150 && toBlink >= 0 && toBlink < 150);
+        if (toScroll > worst) worst = toScroll;
+        if (toBlink > worst) worst = toBlink;
     }
     if (wantShow) printf("  a push is on the LEDs at most %.1f ms after the end of its break\n", worst);
 }
@@ -992,7 +1116,7 @@ static void shortBreakMayBeMissedButTheSignEndsUpRight() {
             freshApp();
             app.breakUs = (uint64_t) (lengthsMs[l] * 1000);
             app.at(2000 + offset, chooserJson(SECOND, "4/9"), true);
-            app.at(9000, BYE, false);
+            app.at(5000, BYE, false); // (a short break on leaving may be missed too: found when SECOND has come round)
             assert(runChooser(FakeApp::V3_APP, FIRST, "3/9"));
             assertOnlyWholePictures(FIRST, "3/9", SECOND, "4/9");
             size_t change = firstStartOf(SECOND, "4/9");
@@ -1024,7 +1148,7 @@ static void garbageAfterAttentionFallsBackToTilde() {
         // never a half-read text, never the damaged bytes
         assertOnlyWholePictures(FIRST, "3/9", SECOND, "4/9");
         // one '~', after the push had gone by, answered with the message itself
-        assert(app.requests.size() == 1 && app.requests[0].byte == '~');
+        assert(requestsWhileChoosing() == 1 && app.requests[0].byte == '~');
         assert(app.requests[0].tUs > app.pushes[0].messageEndUs);
         assert(app.replies[0] == chooserJson(SECOND, "4/9"));
         size_t change = firstStartOf(SECOND, "4/9");
@@ -1054,7 +1178,7 @@ static void secondChangeDuringAPushIsPushedNext() {
     assert(ms(frames[two].tUs - app.pushes[0].breakEndUs) < 150);
     assert(ms(frames[three].tUs - app.pushes[1].breakEndUs) < 150);
     assert(positionOf(frames.back(), third, "6/9") > 10);
-    assert(app.requests.empty());
+    assert(requestsWhileChoosing() == 0);
 }
 
 static void runOfZeroBytesWorksAsABreak() {
@@ -1069,7 +1193,7 @@ static void runOfZeroBytesWorksAsABreak() {
         size_t change = firstStartOf(SECOND, "4/9");
         assert(change < frames.size());
         assert(ms(frames[change].tUs - app.pushes[0].breakEndUs) < 150);
-        assert(app.requests.empty());
+        assert(requestsWhileChoosing() == 0);
         assertOnlyWholePictures(FIRST, "3/9", SECOND, "4/9");
     }
 }
@@ -1077,10 +1201,14 @@ static void runOfZeroBytesWorksAsABreak() {
 static void pushThatLandsInTheReadAtTheHoldIsStillTaken() {
     // The text has come round and the sign has just sent its '~'. The Pico is slow, so before the
     // app has even seen that request, it pushes. The break arrives where the answer was expected.
-    for (double offset = 0; offset < 240; offset += 13) {
+    // (twice: an app that answers the overtaken request with the pushed frame alone, as 3.1
+    // says, and one that sends a second frame for it, which then arrives unasked)
+    for (double offset = 0; offset < 480; offset += 13) {
         freshApp();
         app.latencyUs = 250000;
-        app.at(FIRST_PASS_MS + 5 + offset, chooserJson(SECOND, "4/9"), true);
+        app.oneFramePerRequest = offset < 240;
+        if (offset >= 240) offset += 0.5;
+        app.at(FIRST_PASS_MS + 5 + (offset >= 240 ? offset - 240 : offset), chooserJson(SECOND, "4/9"), true);
         app.at(FIRST_PASS_MS + 4000, BYE, false);
         assert(runChooser(FakeApp::V3_APP, FIRST, "3/9"));
         assertOnlyWholePictures(FIRST, "3/9", SECOND, "4/9");
@@ -1124,7 +1252,97 @@ static void strayMessageWithoutABreakKeepsThePlaceInTheScroll() {
         }
     }
     assert(hitches == 1);
-    assert(app.requests.size() == 1 && app.requests[0].tUs > strayEnd);
+    assert(requestsWhileChoosing() == 1 && app.requests[0].tUs > strayEnd);
+}
+
+static void pushThenTheSyncBringsTheSameMessageAgain() {
+    // The sign gets the same chooser message twice in a row: pushed, and then again from its own
+    // read when that text has come round. The second time changes nothing: no restart, no blanking.
+    freshApp();
+    app.at(2000, chooserJson(SECOND, "4/9"), true);
+    app.at(11000, BYE, false);
+    assert(runChooser(FakeApp::V3_APP, FIRST, "3/9"));
+    size_t change = firstStartOf(SECOND, "4/9");
+    assert(change < frames.size());
+    const int cycle = cycleOf(SECOND);
+    assert(frames.size() - change > (size_t) cycle + 20); // it came round and went on
+    for (size_t i = change; i < frames.size(); i++) {
+        int pos = (int) ((i - change) % (size_t) cycle);
+        assert(positionOf(frames[i], SECOND, "4/9") == pos);
+        assert(frames[i].afterClear == (i == change));
+        if (i + 1 == frames.size()) break;
+        double step = ms(frames[i + 1].tUs - frames[i].tUs);
+        if (pos == 0) {
+            assert(step >= CHOOSER_HOLD_MS && step < CHOOSER_HOLD_MS + 5);
+        } else {
+            assert(step >= CHOOSER_SCROLL_DELAY_MS - 0.5 && step < CHOOSER_SCROLL_DELAY_MS + 0.5);
+        }
+    }
+    assert(requestsWhileChoosing() == 1 && app.replies[0] == chooserJson(SECOND, "4/9"));
+}
+
+static void bytesBehindAMessageDoNotStopTheScroll() {
+    // An app that writes a newline behind every message. The byte behind the closing brace is
+    // not the app raising its hand.
+    freshApp();
+    app.trailer = "\n";
+    app.latencyUs = 200000;
+    app.at(11000, BYE, false);
+    assert(runChooser(FakeApp::V2_APP, FIRST, "3/9"));
+    assert(assertSteadyScroll(FIRST, "3/9", 5) >= 2);
+    assert(app.requests.size() == 3); // one read at each stand-still; the third brings the other message
+
+    // the same behind a pushed message
+    freshApp();
+    app.trailer = "\r\n";
+    app.at(2000, chooserJson(SECOND, "4/9"), true);
+    app.at(6000, BYE, false);
+    assert(runChooser(FakeApp::V3_APP, FIRST, "3/9"));
+    size_t change = firstStartOf(SECOND, "4/9");
+    assert(change < frames.size());
+    assert(ms(frames[change].tUs - app.pushes[0].breakEndUs) < 150);
+    for (size_t i = change; i < frames.size(); i++) assert(positionOf(frames[i], SECOND, "4/9") == (int) (i - change));
+    assert(requestsWhileChoosing() == 0);
+}
+
+static void breakRightBehindAnAnswerIsStillAttention() {
+    // The answer to the read at the stand-still, and straight behind it (with no gap at all,
+    // and with every gap up to a few ms) the app raises its hand for a new message. Letting a
+    // newline behind an answer go by must not let this go by.
+    for (double gapMs = 0; gapMs < 6; gapMs += 0.2) {
+        freshApp();
+        app.pushBehindAnswer = 1;
+        app.pushBehindGapUs = (uint64_t) (gapMs * 1000);
+        app.pushBehindMessage = chooserJson(SECOND, "4/9");
+        app.at(FIRST_PASS_MS + 3000, BYE, false);
+        assert(runChooser(FakeApp::V3_APP, FIRST, "3/9"));
+        size_t change = firstStartOf(SECOND, "4/9");
+        assert(change < frames.size());
+        assert(ms(frames[change].tUs - app.pushes[0].breakEndUs) < 150);
+        assert(requestsWhileChoosing() == 1); // the read at the stand-still, and nothing had to be asked after it
+        assertOnlyWholePictures(FIRST, "3/9", SECOND, "4/9");
+    }
+}
+
+static void glitchOnTheLineNeverMakesAColumnComeEarly() {
+    // A LOW too short to be anything (2 us). Whether the sign happens to see it or not, no
+    // column comes early and the text does not jump.
+    int seen = 0;
+    for (double offset = 0; offset < CHOOSER_SCROLL_DELAY_MS; offset += 0.37) {
+        freshApp();
+        app.at(4000, BYE, false);
+        arrive(FakeApp::V3_APP, FIRST, "3/9");
+        breakOnWire((uint64_t) ((2000 + offset) * 1000), 2);
+        assert(showAsChooser(json["str"], json["flashy"]));
+        for (size_t i = 0; i + 1 < frames.size(); i++) {
+            assert(positionOf(frames[i], FIRST, "3/9") == (int) i);
+            // (the bench build's frame with the numbers is 59 columns longer and latches 1.9 ms
+            // later in its step, so the step after it measures that much less)
+            if (i > 0) assert(ms(frames[i + 1].tUs - frames[i].tUs) >= CHOOSER_SCROLL_DELAY_MS - (CHOOSER_DEBUG_PANEL_B ? 2.5 : 0.5));
+        }
+        seen += requestsWhileChoosing() > 0;
+    }
+    assert(seen > 0); // (some of them were seen, or this test tested nothing)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1145,7 +1363,7 @@ static void silentAppIsNoticedOnlyAtTheHold() {
         assert(step >= CHOOSER_SCROLL_DELAY_MS - 0.5 && step < CHOOSER_SCROLL_DELAY_MS + 0.5);
     }
     // at the stand-still: the read, then the normal way once more, then loop() takes over
-    assert(app.requests.size() == 2);
+    assert(requestsWhileChoosing() == 2);
     assert(app.requests[0].byte == '~' && app.requests[1].byte == '~');
     assert(ms(app.requests[0].tUs) > FIRST_PASS_MS - 10);
     assert(ms(nowUs) < FIRST_PASS_MS + 2600);
@@ -1202,7 +1420,7 @@ static void oldAppWithSevenCharacterPreviewBlinks() {
         assert(sentColumns(frames[i], 17 + 1 + 41));
         assert(frames[i].afterClear == (i == 0));
     }
-    assert(ms(nowUs) > CHOOSER_REFRESH_MS && ms(nowUs) < CHOOSER_REFRESH_MS + 300); // it left at the first read
+    assert(ms(nowUs) > CHOOSER_REFRESH_MS && ms(nowUs) < CHOOSER_REFRESH_MS + 400); // it left at the first read
 }
 
 static void neverMoreThanSixtyColumnsWhateverTheCountAndText() {
@@ -1231,7 +1449,7 @@ static void textFromTheAppLongerThanSixtyFourCharactersIsCutNotOverrun() {
     assert(runChooser(FakeApp::V3_APP, text, "3/9"));
     assert(strlen(chooser.text) == CHOOSER_MAX_CHARS);
     // the cut copy equals what the app sends again at the stand-still: no restart
-    assert(app.requests.size() == 1);
+    assert(requestsWhileChoosing() == 1);
     assert(clears == 1);
 }
 
@@ -1255,13 +1473,13 @@ static void escapedSixtyFourCharacterMessageArrivesWholeInAPush() {
     assert(runChooser(FakeApp::V3_APP, "HELLO", "3/9"));
     assert(decoded == chooser.text);
     assert(strcmp(chooser.count, "<empty>") == 0);
-    assert(app.requests.empty());
+    assert(requestsWhileChoosing() == 0);
 
-    size_t change = 0;
-    while (change < frames.size() && !sentColumns(frames[change], 60)) change++;
+    size_t change = 1; // frames[0] is after a clear too
     while (change < frames.size() && !frames[change].afterClear) change++;
     assert(change < frames.size());
-    assert(ms(frames[change].tUs - app.pushes[0].messageEndUs) < 10);
+    assert(sentColumns(frames[change], 60));
+    assert(ms(frames[change].tUs - app.pushes[0].messageEndUs) < 15);
     int expectPos = 0;
     for (size_t i = change; i < frames.size(); i++) {
         // "<empty>" is 41 columns wide: the viewport is the last 18 columns
@@ -1311,7 +1529,7 @@ static void untypedObjectIsNeverAMessageForLoop() {
         assert(err == DeserializationError::Ok);
         assert(chooserDispatch() == 0);
         assert(frames.empty());
-        assert(app.requests.empty());
+        assert(requestsWhileChoosing() == 0);
         assert(!chooser.onScreen);
     }
     // a message with a type but nothing else is shown by loop() (which reads a missing str as "")
@@ -1357,6 +1575,47 @@ static void normalReadSkipsUntypedObjectsOnlySoFar() {
     stopSerial();
 }
 
+static void breakInANormalReadIsSteppedOver() {
+    // loop() has just sent its '~' (the sign is showing something else) and the app, which has
+    // not seen that request yet, raises its hand for a chooser message. A listening receiver
+    // gets the break as a 0x00 byte. That is not "no answer": the message comes behind it.
+    for (int variant = 0; variant < 2; variant++) {
+        freshApp();
+        app.silentFromUs = 0; // this test puts the app's bytes on the line itself
+        arrive(FakeApp::V3_APP, "HELLO", "1/1");
+        startSerial();
+        softSerial.print('~');
+        uint64_t lowEnd = variant == 0 ? breakOnWire(nowUs + 2000, 50000)
+                                       : sendOnWire(std::string(72, '\0'), nowUs + 2000);
+        uint64_t messageEnd = sendOnWire(chooserJson(FIRST, "3/9"), lowEnd + 20000);
+        assert(chooserReadMessage() == DeserializationError::Ok);
+        stopSerial();
+        assert(strcmp(json["type"], "H") == 0 && FIRST == (const char*) json["str"]);
+        assert(nowUs == messageEnd);
+    }
+    // a break and then nothing: "no answer", after the usual wait and not a moment longer
+    freshApp();
+    app.silentFromUs = 0;
+    arrive(FakeApp::V3_APP, "HELLO", "1/1");
+    startSerial();
+    softSerial.print('~');
+    uint64_t began = nowUs;
+    breakOnWire(nowUs + 2000, 50000);
+    assert(chooserReadMessage() == DeserializationError::EmptyInput);
+    stopSerial();
+    assert(ms(nowUs - began) > ANSWER_FIRST_BYTE_MS - 1 && ms(nowUs - began) < ANSWER_FIRST_BYTE_MS + 5);
+    // and with no break at all the wait is the same
+    freshApp();
+    app.silentFromUs = 0;
+    arrive(FakeApp::V3_APP, "HELLO", "1/1");
+    startSerial();
+    softSerial.print('~');
+    began = nowUs;
+    assert(chooserReadMessage() == DeserializationError::EmptyInput);
+    stopSerial();
+    assert(ms(nowUs - began) > ANSWER_FIRST_BYTE_MS - 1 && ms(nowUs - began) < ANSWER_FIRST_BYTE_MS + 5);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The measurements on panel 2 (only in the build with CHOOSER_DEBUG_PANEL_B)
 // ---------------------------------------------------------------------------------------------
@@ -1395,7 +1654,7 @@ static void measurementsAreShownOnPanelTwo() {
     // after the first push: one attention, no fallback, and the two times
     size_t change = firstStartOf(SECOND, "4/9");
     const Frame& f = frames[change];
-    assert(f.columnsSent == 120);
+    assert(f.columnsSent == 119); // panel 1, then 59 columns of numbers
     int firstByte = numberAt(f, 60, 3), end = numberAt(f, 78, 3);
     double seenMs = ms(frames[change - 1].tUs); // the line went LOW within a step of this frame
     double wantFirst = ms(app.pushes[0].breakEndUs + app.guardUs) - seenMs;
@@ -1424,9 +1683,11 @@ struct Test {
 #define TEST(name) {#name, name}
 
 static const Test tests[] = {
-    TEST(previewThatFitsBlinksWithoutAPause),
+    TEST(previewThatFitsBlinksAndPausesInTheDark),
     TEST(previewThatFitsIsReadAgainEveryRefresh),
-    TEST(leavingChooserHandsTheOtherMessageToLoop),
+    TEST(leavingChooserIsAttentionAndThenTheSignAsks),
+    TEST(leavingWhileTheReadAtTheHoldIsOnItsWay),
+    TEST(appThatLeavesWithAFrameIsStillUnderstood),
     TEST(longTextHoldsThenScrollsOneColumnPerDelay),
     TEST(noRequestByteWhileATextIsMoving),
     TEST(slowAnswerAtTheHoldCostsNothing),
@@ -1443,6 +1704,10 @@ static const Test tests[] = {
     TEST(runOfZeroBytesWorksAsABreak),
     TEST(pushThatLandsInTheReadAtTheHoldIsStillTaken),
     TEST(strayMessageWithoutABreakKeepsThePlaceInTheScroll),
+    TEST(pushThenTheSyncBringsTheSameMessageAgain),
+    TEST(bytesBehindAMessageDoNotStopTheScroll),
+    TEST(breakRightBehindAnAnswerIsStillAttention),
+    TEST(glitchOnTheLineNeverMakesAColumnComeEarly),
     TEST(silentAppIsNoticedOnlyAtTheHold),
     TEST(lineStuckLowIsGivenUpOn),
     TEST(readsThatFailThenTheSameMessageKeepThePicture),
@@ -1455,6 +1720,7 @@ static const Test tests[] = {
     TEST(bytesOutsideTheFontAreDrawnAsSpaces),
     TEST(untypedObjectIsNeverAMessageForLoop),
     TEST(normalReadSkipsUntypedObjectsOnlySoFar),
+    TEST(breakInANormalReadIsSteppedOver),
 #if CHOOSER_DEBUG_PANEL_B
     TEST(measurementsAreShownOnPanelTwo),
 #endif

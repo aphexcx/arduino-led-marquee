@@ -100,30 +100,42 @@ PROGMEM = "                    ";
 
 // ---- Chooser preview (MSGTYPE_CHOOSER): a message too wide for the space beside the count scrolls.
 // ---- (Contract VERSION 3: the app pushes changes; the sign asks nothing while a text moves. See ChooserDisplay.h)
-// ---- These five values are the ones to tune:
+// ---- These six values are the ones to tune:
 //How long the start of a scrolling message stands still before it moves (and again every time round), in ms
 #define CHOOSER_HOLD_MS 600
 //Time per scrolled LED column in ms, lower is faster. 35 is about 4.8 characters a second
-//(on the sign a step measures up to 1 ms more: the clock loses a tick while a frame is sent)
+//(on the sign a step measures 36 to 37 ms: the clock loses a tick or two while a frame is sent)
 #define CHOOSER_SCROLL_DELAY_MS 35
 //Blank columns between the end of the message and its start coming round again. 18 is three spaces. 1 to 240
 #define CHOOSER_GAP_COLS 18
 //Brightness of scrolling text, 0-255 before gamma correction. 145 is where the fade blink of a short message starts
 #define CHOOSER_TEXT_BRIGHTNESS 145
-//A message that fits (the blink) is read again from the app every this many ms, in case a push was lost;
-//the text stands at its brightest for the moment that takes. A scrolling message is read again each time it has
-//come round instead, at its stand-still. Lower corrects a wrong short preview sooner (and is how fast the sign
-//follows an app that does not push yet), higher pauses the blink less often. 1000 to 30000
+//A message that fits beside the count blinks: it fades to black in a tenth of a second and then stays dark for
+//this many ms before it starts again. (Until now the dark time was however long the app took to answer the read
+//after every blink, about this long on the sign.) Lower blinks faster. 0 to 60000
+#define CHOOSER_BLINK_PAUSE_MS 200
+//A message that fits is read again from the app every this many ms, in case a push was lost; the read is done in
+//the dark pause of the blink. A scrolling message is read again each time it has come round instead, at its
+//stand-still. Lower corrects a wrong short preview sooner (and is how fast the sign follows an app that does not
+//push yet). 1000 to 30000. (These are ms of the sign's own clock, which loses time while frames are sent one
+//after the other: 8000 measures about 9.7 s.)
 #define CHOOSER_REFRESH_MS 8000
 // ---- The rest rarely needs touching (the first three are the contract's numbers on the sign's side):
 //After the receive line was seen LOW (the app's "attention"), wait at most this long for it to be HIGH again, in ms
 #define CHOOSER_ATTN_HIGH_WAIT_MS 100
-//... then at most this long for the first byte of the message the app sends unasked (contract: ATTN_FIRST_BYTE_MS)
+//... then at most this long for the first byte of the message the app sends unasked (contract: ATTN_FIRST_BYTE_MS).
+//If none comes the sign asks with '~'. That is how the chooser ENDS (contract 3.1: on leaving chooser mode the app
+//gives attention and sends nothing), so this is also the pause before the next message after "leave chooser".
+//On the sign the app's first byte was measured 26 to 38 ms after the end of its break
 #define CHOOSER_ATTN_FIRST_BYTE_MS 150
 //... and this long for each byte after it
 #define CHOOSER_ATTN_BYTE_MS 60
 //The line counts as HIGH again once it has been HIGH for this long without a gap, in ms (one byte is 0.7 ms)
 #define CHOOSER_LINE_QUIET_MS 3
+//After a message has been read, wait at most this long for whatever the app writes behind it (a newline) to end
+#define CHOOSER_TRAILER_WAIT_MS 20
+//How long any '~' read waits for the first byte of its answer, in ms (the same as for every later byte)
+#define ANSWER_FIRST_BYTE_MS 1000
 //Before asking the normal way after an attention that brought nothing usable, let the line go quiet: at most this long
 #define CHOOSER_FALLBACK_QUIET_WAIT_MS 500
 //After this many reads in a row that brought nothing usable, go back to loop() and its normal '~'
@@ -181,9 +193,11 @@ static_assert(CHOOSER_CHAR_VT == VT && CHOOSER_CHAR_HEART == HEART, "ChooserScro
 static_assert(CHOOSER_GAP_COLS >= 1 && CHOOSER_GAP_COLS <= 240, "CHOOSER_GAP_COLS must be 1 to 240");
 static_assert(CHOOSER_REFRESH_MS >= 1000 && CHOOSER_REFRESH_MS <= 30000, "CHOOSER_REFRESH_MS must be 1000 to 30000");
 static_assert(CHOOSER_HOLD_MS >= 1 && CHOOSER_HOLD_MS <= 60000 && CHOOSER_SCROLL_DELAY_MS >= 1 &&
-              CHOOSER_SCROLL_DELAY_MS <= 1000, "the chooser's waits are counted in microseconds in 32 bits");
-static_assert(CHOOSER_LINE_QUIET_MS >= 2 && CHOOSER_LINE_QUIET_MS < CHOOSER_ATTN_HIGH_WAIT_MS,
-              "the line must be seen HIGH for longer than one byte (0.7 ms; the clock counts whole ms)");
+              CHOOSER_SCROLL_DELAY_MS <= 1000 && CHOOSER_BLINK_PAUSE_MS >= 0 && CHOOSER_BLINK_PAUSE_MS <= 60000,
+              "the chooser's waits are counted in microseconds in 32 bits");
+static_assert(CHOOSER_LINE_QUIET_MS >= 1 && CHOOSER_LINE_QUIET_MS < CHOOSER_ATTN_HIGH_WAIT_MS &&
+              CHOOSER_LINE_QUIET_MS < CHOOSER_TRAILER_WAIT_MS,
+              "the line must be seen HIGH for longer than it is inside a run of bytes (0.63 ms at most)");
 
 /* Calculates how many empty columns to pad this string on its start and on its end,
  * and stores the results in startPad and endPad. Helps get it to be in the middle of the panel.
@@ -909,8 +923,8 @@ bool readSerialData() {
 //
 //    }
 
-    // Read the JSON document from the serial port (stepping over a late answer to a chooser poll,
-    // which is an object without a "type" and not a message)
+    // Read the JSON document from the serial port (stepping over what is not a message: the 0x00 a
+    // break is received as, and an object without a "type")
     DeserializationError err = chooserReadMessage();
 
     if (err == DeserializationError::Ok) {
@@ -918,6 +932,10 @@ bool readSerialData() {
         diagnosticBlink();
         return true;
     } else if (err == DeserializationError::EmptyInput) {
+        // Stop listening here too. The stars that follow are drawn with interrupts off: a message
+        // that came in meanwhile (the app pushes without being asked now) would be received in
+        // pieces and make the next read fail with an error on the sign.
+        stopSerial();
         return false;
     } else {
         softSerial.print(err.c_str());
