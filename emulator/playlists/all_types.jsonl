@@ -1,0 +1,40 @@
+# One of every message type the firmware's loop() understands, in the order of
+# its switch (msgType). One JSON object per line; see fake_app.py for the format.
+# Fields are the ones loop() reads for that type.
+
+# O: characters appear one by one, centred, on both sides. r,g,b are gamma-corrected by the sign.
+{"type":"O","str":"HELLO","r":255,"g":120,"b":0,"dly":300}
+
+# C: chonky font with a colour cycle. dly is how long it stays; g,b are the base colour; scroll false = hold in place.
+{"type":"C","str":"CHONK","dly":200,"r":0,"g":0,"b":128,"scroll":false}
+
+# H: chooser. flashy is the dim red counter, str blinks beside it.
+{"type":"H","str":"HELLO W","flashy":"3/12","_polls":3}
+
+# U: utility. subtype B sets the brightness shift (0 = full), subtype M turns the beat input on (E) or off (D).
+{"type":"U","subtype":"B","str":"0"}
+{"type":"U","subtype":"M","str":"E"}
+
+# K: keyboard input echo. mode W makes every character blink (warning mode).
+{"type":"K","str":"TYPING_","mode":"N"}
+
+# F: flashy. The text fades out, centred on both sides, then a starfield.
+{"type":"F","str":"FLASHY"}
+
+# S: starfield with this many stars.
+{"type":"S","str":"","stars":40}
+
+# I: icon invaders. str picks the icon: 1, 2, X, A (Anjuna), B (BAAAHS), D (Dreamstate).
+{"type":"I","str":"D","r":255,"g":0,"b":255}
+
+# T: track id. A marquee that starts half way across.
+{"type":"T","str":"TRACK ID"}
+
+# N: marquee in the chonky font.
+{"type":"N","str":"CHONKY"}
+
+# D: the default scrolling marquee, with the colour cycle and the beat flash.
+{"type":"D","str":"I LIVE FOR THAT ENERGY"}
+
+# W: countdown. 600 frames of count beside the text, then a farewell blink and a starfield.
+{"type":"W","str":"NEW"}
