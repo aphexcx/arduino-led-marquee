@@ -124,6 +124,15 @@ PROGMEM = "                    ";
 //If the same chooser message comes back the scroll carries on from where it was
 #define CHOOSER_MAX_FAILED_POLLS 3
 
+// ---- Ads (MSGTYPE_ONE_BY_ONE, MSGTYPE_CHONKY_SLIDE): a text wider than a panel scrolls to its end by itself.
+// ---- Their "dly" is real milliseconds. These three values are the ones to tune (see AdDisplay.h):
+//How long the start of a too-wide chonky text stands still before it moves, in ms
+#define AD_SCROLL_HOLD_MS 600
+//Time per scrolled LED column in ms, lower is faster. 35 is the chooser's pace, about 4.8 one-by-one letters a second
+#define AD_SCROLL_STEP_MS 35
+//Time per frame of the chonky colour wave in ms. 10 is 100 frames a second, what a dly of 1000 always gave
+#define AD_WAVE_FRAME_MS 10
+
 // Change this to be at least as long as your pixel string (too long will work fine, just be a little slower)
 #define NUM_PANELS 2  // Number of panels. There are 2.
 #define COLUMNS_PER_PANEL 60  // Number of columns per panel, in my case, the # of pixels in each LED string. I am using 60LED/M
@@ -172,30 +181,20 @@ static_assert(CHOOSER_GAP_COLS >= 1 && CHOOSER_GAP_COLS <= 240, "CHOOSER_GAP_COL
 static_assert(CHOOSER_REFRESH_MS >= 1000 && CHOOSER_REFRESH_MS <= 30000, "CHOOSER_REFRESH_MS must be 1000 to 30000");
 static_assert(CHOOSER_POLL_EVERY_MS <= 250, "the app expects a chooser poll at least every 250 ms");
 
+// TextWindow.h (the column arithmetic) and AdDisplay.h keep their own copies of these so that they compile without the sketch
+static_assert(TEXT_CHAR_VT == VT && TEXT_CHAR_HEART == HEART && INTERCHAR_SPACE == 1, "TextWindow.h: special characters");
+
 /* Calculates how many empty columns to pad this string on its start and on its end,
  * and stores the results in startPad and endPad. Helps get it to be in the middle of the panel.
  * E.g.
  * (columns - total string width) = startPad, endPad
  * (60-6) = 27, 27
  * (60-5) = 27, 28
+ * The width is what the string senders really send: a vertical tab is one column, the heart is
+ * as wide as the font says. A string as wide as the panel or wider gets no padding.
  */
-void getColumnsToPadForString(const char* str, int fontWidth, uint* startPad, uint* endPad) {
-    uint stringColumns = 0;
-    while (*str++) {
-        if (*str != VT) {
-            stringColumns += (fontWidth + INTERCHAR_SPACE);
-        }
-    }
-    //Subtract 1 because we don't append an interchar space at the end of the string
-    stringColumns -= 1;
-
-    uint usedCols = COLUMNS_PER_PANEL - stringColumns;
-    *startPad = usedCols / 2;
-    if (usedCols % 2 == 0) {
-        *endPad = usedCols / 2;
-    } else {
-        *endPad = usedCols / 2 + 1;
-    }
+void getColumnsToPadForString(const char* str, const Font& font, uint* startPad, uint* endPad) {
+    textCentre(textCols(fontMetrics(font), str), COLUMNS_PER_PANEL, startPad, endPad);
 }
 
 // Just wait long enough without sending any bits to cause the pixels to latch and display the last sent frame
@@ -245,10 +244,14 @@ static void sendChar(
 
     // For the VT char, we only send a single column (so just the interchar space)
     if (ch != VT) {
-        const uint* charbase = font.data + ((ch - ' ') * font.width);
+        // A byte the font has no picture for is drawn as a space
+        const uint* charbase = font.data + ((textInFont(ch) ? ch - ' ' : 0) * font.width);
         uint col = font.width;
         if (ch == HEART) {
-            col = HEART_WIDTH;
+            col = font.heartWidth; // the heart can be wider than the other characters
+        }
+        if (skip > col) {
+            skip = col;
         }
 
         while (skip--) {
@@ -313,57 +316,10 @@ void sendEmptyColumns(int columns) {
 static inline void
 sendStringJustified(const char* s, const Font& font, uint skip, const uint r, const uint g, const uint b) {
     uint startPad, endPad;
-    getColumnsToPadForString(s, font.width, &startPad, &endPad);
+    getColumnsToPadForString(s, font, &startPad, &endPad);
     sendEmptyColumns(startPad);
     sendString(s, font, skip, r, g, b);
     sendEmptyColumns(endPad);
-}
-
-// Keep track of where we are in the color cycle between chars
-uint* cyclingColor = (uint * )(calloc(1, sizeof(uint)));
-
-// Send a char with a column-based color cycle
-static inline void sendCharColorCycle(const Font& font, uint c,
-                                      uint skip,
-                                      uint* r, uint* g, uint* b) {
-    const uint* charbase = font.data + ((c - ' ') * font.width);
-    uint col = font.width;
-
-    while (skip--) {
-        charbase++;
-        col--;
-    }
-
-    while (col--) {
-        sendColumnRGB(pgm_read_byte_near(charbase++), *r, *g, *b);
-        *cyclingColor += 10;
-    }
-//    if (sendTrailingSpace) {
-    sendColumnRGB(0, 0, 0, 0); // Interchar space
-//    }
-    *cyclingColor += 10;
-}
-
-// Show the passed string with the arcade font and a nice vertical color cycle effect
-// columnsPrefix: the # of empty columns to add before the string, useful for spacing
-static inline void
-sendStringColorCycle(const Font& font, const char* str, int columnsPrefix,
-                     uint skip,
-                     uint* r, uint* g, uint* b) {
-
-    unsigned int l = PIXELS / (font.width + INTERCHAR_SPACE);
-
-    while (columnsPrefix--) {
-        sendColumnRGB(0, 0x00, 0x00, 0x00);
-    }
-
-    sendCharColorCycle(font, *str, skip, r, g,
-                       b); // First char is special case because it can be stepped for smooth scrolling
-
-    // Send rest of string
-    while (*(++str) && l--) {
-        sendCharColorCycle(font, *str, 0, r, g, b);
-    }
 }
 
 void setupDiagnosticLed() {
@@ -599,92 +555,10 @@ static inline void sendIcon(const uint* fontbase, uint which, int8_t shift, uint
 
 }
 
-void showCharsOneByOneOnBothPanels(const char* str, Color textColor, int delayMs = 500) {
-    Color tc = textColor;
-    clear();
-    uint startPad, endPad;
-    getColumnsToPadForString(str, FONTSTD_WIDTH, &startPad, &endPad);
-
-    for (uint p = 0; p < strlen(str); p++) {
-        cli();
-
-        sendEmptyColumns(startPad);
-        for (uint i = 0; i <= p; i++) {
-            sendChar(*(str + i), 0, GAMMA(tc.r), GAMMA(tc.g), GAMMA(tc.b));
-        }
-        int usedCols = startPad + (p + 1) * (FONTSTD_WIDTH + INTERCHAR_SPACE);
-        sendEmptyColumns(COLUMNS_PER_PANEL - usedCols);
-
-        sendEmptyColumns(startPad);
-        for (uint i = 0; i <= p; i++) {
-            sendChar(*(str + i), 0, GAMMA(tc.r), GAMMA(tc.g), GAMMA(tc.b));
-        }
-        sendEmptyColumns(COLUMNS_PER_PANEL - usedCols);
-
-        sei();
-        delay(CHARS_ONEBYONE_DELAY);
-    }
-    delay(delayMs);
-}
-
-void showStringColorCycleOnBothPanels(const Font& font, const char* str, int delayMs, bool alignMiddle, uint skip,
-                                      uint* r, uint* g, uint* b) { //, uint slide) {
-    //TODO cycle color without slide
-    uint slide = delayMs;
-//    clear();
-    uint startPad = 0;
-    uint endPad = 0;
-    getColumnsToPadForString(str, font.width, &startPad, &endPad);
-    for (slide; slide; slide -= 10) {
-        *cyclingColor = (slide & 0xff);
-        cli();
-
-        if (alignMiddle) {
-            sendEmptyColumns(startPad);
-        }
-        sendStringColorCycle(font, str, 0, skip, r, g, b);
-        if (alignMiddle) {
-            sendEmptyColumns(endPad);
-            sendEmptyColumns(startPad);
-        } else {
-            sendEmptyColumns(startPad + endPad + font.width);
-        }
-        sendStringColorCycle(font, str, 0, skip, r, g, b);
-        if (alignMiddle) {
-            sendEmptyColumns(endPad);
-        } else {
-            sendEmptyColumns(startPad + endPad + font.width);
-        }
-        sei();
-        show();
-        delay(delayMs / 200);
-    }
-
-}
-
-void showChonkySlideStyleOnBothPanels(const char* str, int delayMs = ALLYOURBASE_DELAY,
-                                      Color colorFrom = Color{0, 0, 0x80}, bool scrollToLastChar = false) {
-//    const char *allyourbase = "CAT: ALL YOUR BASE ARE BELONG TO US !!!";
-    // TODO colorFrom, colorTo support
-    uint g = colorFrom.g;
-    uint b = colorFrom.b;
-//    delayMs = ALLYOURBASE_DELAY + 10; //FIXME rmove
-    if (scrollToLastChar) {
-        uint charWidth = fontChonk.width;
-        int l = 1; //or infinite loop to end of str
-        while (l--) {
-            for (uint skip = 0; skip <= charWidth; skip++) {
-                showStringColorCycleOnBothPanels(fontChonk, str, delayMs, false, skip, cyclingColor, &g, &b);
-            }
-            str++;
-            if (*(str + 1) == '|') {
-                break;
-            }
-        }
-    } else {
-        showStringColorCycleOnBothPanels(fontChonk, str, delayMs, false, 0, cyclingColor, &g, &b);//1250);
-    }
-}
+// The ads' two styles: showCharsOneByOneOnBothPanels() and showChonkySlideStyleOnBothPanels(), with
+// the clock that makes their "dly" real milliseconds and the scrolling of a text wider than a panel.
+// They are in their own file so that the host test can run them against a fake sign and a fake timer.
+#include "AdDisplay.h"
 
 void showIconInvaders(const Icon* icon, Color iconColor) {
     Color ic = iconColor;
@@ -813,7 +687,7 @@ void marquee(const char* marqueePtr, const Font& font = fontStd, bool pad = true
         };
 
         if (!*paddingPtr && *marqueePtr == HEART) {
-            charWidth = HEART_WIDTH;
+            charWidth = font.heartWidth;
         } else {
             charWidth = font.width;
         }
@@ -934,6 +808,7 @@ void setup() {
     delay(100); //Try to introduce a bit of a delay to clear out serial noise on boot
     setupDiagnosticLed();
     setupLeds();
+    adClockSetup(); // Timer1 becomes the clock of the ads (AdDisplay.h)
 
     showAsFlashyStyle("I", 60);
     showAsFlashyStyle("LIVE", 60);
