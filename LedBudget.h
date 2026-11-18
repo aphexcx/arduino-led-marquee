@@ -31,6 +31,15 @@
 // The load that a current of `ma` mA stands for
 #define LED_LOAD_OF_MA(ma) ((uint32_t) (ma) * 255 / LED_MA_PER_CHANNEL)
 
+// How many bits of a byte are set: the lit LEDs of a column
+static inline uint8_t ledBits(uint8_t v) {
+    uint8_t n = 0;
+    for (; v; v &= v - 1) {
+        n++;
+    }
+    return n;
+}
+
 // What goes out for a colour byte that sendBitx8 starts with the carry flag set
 static inline uint8_t ledCarried(uint8_t v) {
     return v | (v >> 1);
@@ -68,7 +77,7 @@ static inline uint16_t ledSent(uint8_t r, uint8_t g, uint8_t b, uint8_t scale, b
 }
 
 // What one lit LED may send, its three values added up, when `litPerSide` LEDs are lit on each
-// side of the sign (both sides show the same picture) and the supply has these two limits, each a
+// side of the sign (or, where the two sides differ, on the fuller one) and the supply has these two limits, each a
 // load (see LED_LOAD_OF_MA) and each 0 when there is no such limit: `limitBoth` for the two sides
 // together, `limitSide` for one side. 765 (3 x 255) means "anything".
 static inline uint16_t ledAllowance(uint16_t litPerSide, uint32_t limitBoth, uint32_t limitSide) {
@@ -97,7 +106,7 @@ static inline uint16_t ledAllowance(uint16_t litPerSide, uint32_t limitBoth, uin
 // that comes on over a ramp, a fade). Then the answer is the brightest dimming BELOW WHICH EVERY
 // DIMMING FITS, see above. False for a picture that is only ever shown at its own dimming: then it
 // is simply the brightest dimming that fits.
-// Under 1 ms on the sign; call it before a message's first frame.
+// About 1.5 ms on the sign when there is something to search for; call it before a frame, not in one.
 static inline uint8_t ledBudgetScale(uint16_t allowed, uint8_t r, uint8_t g, uint8_t b, bool waveRed,
                                      bool greenCarried, uint8_t shift, bool everyDimmingBelow) {
     if (allowed >= 765) {

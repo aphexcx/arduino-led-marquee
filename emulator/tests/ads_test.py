@@ -31,14 +31,32 @@ brightness from its first frame to its last (worked out here the slow way, not c
 firmware), and with a ramp no rise between two frames of a chonky text larger than a frame's share
 of its peak plus the wave's own flicker.
 
+The limits hold for every style but the chooser (H) and the starfield (S, and the stars the sketch
+draws after F, W, D and N): those are measured and never asserted. For every other style, on an
+image with limits, every frame from the message's request to the next must write all 120 columns of
+the strip and be within the limits. What is measured is the strip as latched: a column that a frame
+does not write keeps what the frame before put there, and is counted. On such an image every style
+is also run straight after every style (121 pairs, the beat input on), and the result printed as a
+table.
+
 usage: ads_test.py <sign-emu> <firmware.hex> <repo root> <work dir> [port]
                    [--limit-ma N] [--limit-side-ma N] [--ramp-ms N] [--also playlist.jsonl]
+                   [--random N [--seed S]]
 --also: more messages (one JSON object per line) to run and put in the table, for example the
 sign's own ad list; O and C messages in it get all the checks.
-Python 3 standard library only. Uses seven TCP ports from `port` (default 14440).
+--random: N more messages of the limited styles with random texts and colours (seed S, default 1),
+held to the limits like the rest.
+--same-as: a second image (the one built without limits) to hold this one to, for an image whose
+limit is so high that it is never reached: every frame the same, LED for LED, wherever the other
+image's frame writes (see same_pictures).
+Python 3 standard library only. Uses a TCP port per group of messages from `port` (default 14440):
+8 groups (9 on an image with limits), and one more for every 20 random messages and for --also;
+with --same-as the same again 100 higher.
 """
+import itertools
 import json
 import os
+import random
 import re
 import socket
 import subprocess
@@ -55,6 +73,12 @@ MAX_PAUSE_US = 26
 failures = []
 measured = []            # (style, text, dly asked, hold measured in ms, time on the sign in s)
 supply = []              # (order, label, peak both sides, peak one side, biggest rise both, biggest rise one side) in A
+transitions = {}         # (style before, style after): the most one side asked for during the style after, in A
+# The styles the supply's limits do not hold for (the chooser, the starfield): measured, never asserted
+EXEMPT = ("H", "S")
+# The starfield that the sketch draws straight after some styles, in frames (one star each): not limited either
+STARS_AFTER = {"F": 300, "W": 300, "D": 100, "N": 100, "-": 300}
+KNOWN = ("O", "C", "U", "K", "F", "W", "S", "I", "T", "N", "D", "H", "-")
 AMPS = 20.0 / 255 / 1000 # what one unit of load (a value of 1 on one channel of one LED) is in A
 print_lock = threading.Lock()
 
@@ -128,7 +152,7 @@ def carried(v):
 # ---- running the emulator ---------------------------------------------------------------------
 class Frame:
     """One latched frame, kept small: a run of the long texts is tens of thousands of them."""
-    __slots__ = ("t", "bits", "clean", "pause", "mask", "colours", "equal", "load")
+    __slots__ = ("t", "bits", "clean", "pause", "mask", "colours", "equal", "load", "lit")
 
     def __init__(self, d, cache):
         self.t = d["t"]
@@ -141,6 +165,7 @@ class Frame:
         self.mask = mask = [0] * COLS
         self.colours = colours = [None] * COLS
         load = [0, 0]                             # the values sent, added up, side A and side B
+        self.lit = 0                              # how many LEDs are lit
         for r, row in enumerate(rows):
             if row.count("0") == COLS * 6:
                 continue
@@ -149,6 +174,7 @@ class Frame:
                 px = row[c * 6:c * 6 + 6]
                 if px != "000000":
                     mask[c] |= bit
+                    self.lit += 1
                     px, value = cache.setdefault(px, (px, int(px[0:2], 16) + int(px[2:4], 16) + int(px[4:6], 16)))
                     load[c >= PANEL] += value
                     if colours[c] is None:
@@ -230,12 +256,15 @@ def run_group(env, name, messages, port, flags=()):
                            % (name, status, open(log).read().strip()[-300:]))
     requests, frames, cache = [], [], {}
     app = Replies(messages)                               # the same answers again, to tell the requests apart
+    unreadable = any(m.get("_error") for m in messages)   # the sign then writes the error's name on the wire
     for line in open(dump, encoding="utf-8"):
         d = json.loads(line)
         if d["type"] == "frame":
             frames.append(Frame(d, cache))
         elif d["type"] == "tx":
             if d.get("char") not in ("~", "?"):
+                if unreadable:
+                    continue
                 raise RuntimeError("%s: the sign sent %r: it could not read a message" % (name, d.get("char")))
             # a request that was answered with a message starts that message; the one after the
             # last message ends the run; a poll answered with {} is neither
@@ -257,6 +286,63 @@ def run_group(env, name, messages, port, flags=()):
         out.append((requests[i], requests[i + 1], frames[first:at], before))
     # ... and what the sign drew by itself before it asked for anything: the startup words
     return out, [f for f in frames if f.t <= requests[0]]
+
+
+# ---- an image whose limit is never reached draws what the image without limits draws ---------------
+# The groups that are compared (in the others the pictures depend on when the beat input fires, or on
+# when the chooser's requests are answered, and the two images take different times over a frame)
+SAME_GROUPS = ("one_by_one", "chonky", "rest", "notices", "shift", "frames_not_texts")
+
+
+def by_message(dump, windows):
+    """Yields (number of the message, its frames as the dump has them) for every message with
+    frames, in order. windows: (after, up to) in seconds for each message."""
+    def frames():
+        i = 0
+        for line in open(dump, encoding="utf-8"):
+            d = json.loads(line)
+            if d["type"] != "frame":
+                continue
+            while i < len(windows) and d["t"] > windows[i][1]:
+                i += 1
+            if i == len(windows):
+                return
+            if d["t"] > windows[i][0]:
+                yield i, d
+    for i, group in itertools.groupby(frames(), key=lambda x: x[0]):
+        yield i, [d for _, d in group]
+
+
+def same_pictures(cases, runs, dump, ref_runs, ref_dump, ref_name):
+    """Holds this image's frames to the reference image's, message by message and frame by frame:
+    every LED of every column the reference frame wrote has the same three values here. Where a
+    reference frame is shorter than the strip (it leaves what was there before), this image's
+    frame, when it writes the whole strip, is black."""
+    log = []
+    labels = ["the startup words and the stars after them"] + [label(m) for m, _ in cases]
+    windows = lambda rs: [(0.0, rs[0][0])] + [(start, end) for start, end, _, _ in rs]
+    ref, got = by_message(ref_dump, windows(ref_runs)), by_message(dump, windows(runs))
+    a, b = next(ref, None), next(got, None)
+    while a or b:
+        i = min(x[0] for x in (a, b) if x)
+        fa = a[1] if a and a[0] == i else []
+        fb = b[1] if b and b[0] == i else []
+        equal, short = len(fa) == len(fb), 0
+        for x, y in zip(fa, fb):
+            n = min(x["bits"] // 24, COLS) * 6            # what the reference frame wrote
+            short += n < COLS * 6
+            padded = y["bits"] >= COLS * 24
+            for rx, ry in zip(x["rows"], y["rows"]):
+                if rx[:n] != ry[:n] or (padded and ry[n:].strip("0")):
+                    equal = False
+        check(log, equal, "%s: LED for LED what %s draws (%d frames, %d there%s)"
+              % (labels[i], ref_name, len(fb), len(fa),
+                 "; %d of them shorter than the strip there, and black beyond that here" % short if short else ""))
+        if a and a[0] == i:
+            a = next(ref, None)
+        if b and b[0] == i:
+            b = next(got, None)
+    return log
 
 
 def text_bytes(message):
@@ -333,10 +419,13 @@ def check_dark(env, message, start, end, frames):
     return log
 
 
-def check_table_only(env, message, start, end, frames):
+def check_style(env, message, start, end, frames):
     """A message that is run for the table of what it asks of the supply, and for the limits."""
     log = [label(message), "  ok    ran to its end (%d frames, %.2f s)" % (len(frames), end - start)]
     limit_check(log, env, message, frames)
+    if "_after" in message:
+        style = style_frames(message, frames)[0]
+        transitions[(message["_after"], message["type"])] = max([max(f.load) for f in style] or [0]) * AMPS
     return log
 
 
@@ -355,15 +444,56 @@ def supply_row(message, frames):
     return max(both), max(one)
 
 
+def style_frames(message, frames):
+    """(the frames of the message's own style, the frames of the starfield the sketch draws after
+    it). A star is a frame of 121 columns with at most one LED lit; how many follow which style is
+    the sketch's (STARS_AFTER). None for the second when the last frames are not that starfield."""
+    kind = message["type"]
+    stars = STARS_AFTER.get(kind, 0 if kind in KNOWN else STARS_AFTER["D"])  # an unknown type is shown as D
+    stars = message.get("_stars", stars)
+    if not stars:
+        return frames, []
+    tail = frames[-stars:]
+    if len(tail) != stars or not all(f.bits == (COLS + 1) * 24 and f.lit <= 1 for f in tail):
+        return frames, None
+    return frames[:-stars], tail
+
+
 def limit_check(log, env, message, frames):
-    """Every style: the table, and on an image with limits: no frame above them."""
-    both, one = supply_row(message, frames)
+    """Every style: its row in the table (all the frames from the message's request to the next).
+    On an image with limits, for every style the limits hold for: each of its frames writes the
+    whole strip (so nothing of an earlier picture stays lit beside it), and none asks more than a
+    limit. The frame a test sees is the strip as it is latched, whatever part of it the frame
+    wrote. The chooser, the starfield, and the starfield after a style are measured only."""
+    supply_row(message, frames)
+    if message["type"] in EXEMPT:
+        log.append("  note  this style is not limited: measured only")
+        return
+    style, stars = style_frames(message, frames)
+    check(log, stars is not None, "the starfield follows the style (its last frames are stars: 121 columns, one LED)")
+    if not (env["limit_both"] or env["limit_side"]):
+        return
+    check(log, all(f.bits >= COLS * 24 for f in style),
+          "every frame writes all 120 columns of the strip (shortest: %d columns; %d frames)"
+          % (min([f.bits for f in style] or [COLS * 24]) // 24, len(style)))
+    both = max([f.load[0] + f.load[1] for f in style] or [0])
+    one = max([max(f.load) for f in style] or [0])
     if env["limit_both"]:
         check(log, both <= env["limit_both"], "no frame asks more than %d mA of the supply, both sides together "
               "(most: %.0f mA)" % (env["limit_ma"], both * AMPS * 1000))
     if env["limit_side"]:
         check(log, one <= env["limit_side"], "no frame asks more than %d mA on one side (most: %.0f mA)"
               % (env["limit_side_ma"], one * AMPS * 1000))
+
+
+def allowance(env, lit):
+    """What one lit LED may send, its three values added up, when a side has `lit` LEDs lit."""
+    allowed = 765
+    if lit and env["limit_both"]:
+        allowed = min(allowed, env["limit_both"] // (2 * lit))
+    if lit and env["limit_side"]:
+        allowed = min(allowed, env["limit_side"] // lit)
+    return allowed
 
 
 def dimmed(v, scale):
@@ -676,17 +806,29 @@ def check_marquee(env, message, start, end, frames, font_name, what, probe):
     log = [label(message)]
     limit_check(log, env, message, frames)
     font = env[font_name]
+    # A limit can be so low that little or nothing is left of the text's colours: then there are no
+    # pictures to look at (a marquee's colours run through all values; with less than 24 for the
+    # three channels of an LED together, whole stretches of it are dark)
+    lit = [bin(v).count("1") for v in font.columns(text_bytes(message))]
+    allowed = allowance(env, max([sum(lit[i:i + PANEL]) for i in range(len(lit))] or [0]))
+    if allowed < 24:
+        log.append("  note  this image's limit leaves an LED of this text %d of 765: too faint to follow, the "
+                   "pictures are not checked" % allowed)
+        return log
     cols = font.columns(text_bytes(message)[:probe])[:-1]
     check(log, any(find(f.mask, [0] + cols + [0]) for f in frames),
           "%s: a frame shows %s as Fonts.h has it, the heart %d columns wide"
           % (what, json.dumps(message["str"][:probe]), font.heart_cols))
     # Pairs of whole frames with text in them, one straight after the other. (A marquee frame can
-    # be a few columns longer or shorter than the strip, and a shorter one leaves the columns it
-    # does not reach as they were; the starfield after the marquee lights one LED per frame.)
+    # be a few columns longer or shorter than the strip. A shorter one leaves the columns it does
+    # not reach as they were, or, on an image with limits, black: the chonky marquee sends 14
+    # characters, which at the end of each character's move is 118 and 119 columns. So the last
+    # two columns are left out of the comparison. The starfield after the marquee lights one LED
+    # per frame.)
     def whole(f):
-        return f.bits >= COLS * 24 and sum(bin(m).count("1") for m in f.mask) >= 2
+        return f.bits >= COLS * 24 and f.lit >= 2
     pairs = [(a, b) for a, b in zip(frames, frames[1:]) if whole(a) and whole(b)]
-    left = sum(1 for a, b in pairs if b.mask[:COLS - 1] == a.mask[1:])
+    left = sum(1 for a, b in pairs if b.mask[:COLS - 3] == a.mask[1:COLS - 2])
     check(log, len(pairs) > 30 and left == len(pairs),
           "it moves one column per frame, through the hearts too (%d of %d pairs of whole frames)"
           % (left, len(pairs)))
@@ -699,11 +841,92 @@ def check_flashy(env, message, start, end, frames, what):
     font, text = env["std"], text_bytes(message)
     cols = font.columns(text)[:-1]
     pad = (PANEL - len(cols)) // 2 if len(cols) < PANEL else 0
-    lit = [f for f in frames if f.bits == COLS * 24 and sum(bin(m).count("1") for m in f.mask) >= 2]
+    lit = [f for f in frames if f.bits == COLS * 24 and f.lit >= 2]
     expected = side(cols, 0, pad)
     hits = [f for f in lit if f.mask[:PANEL] == expected and f.mask[PANEL:] == expected]
-    check(log, len(hits) > 20, "%s (%d frames)" % (what, len(hits)))
+    # The text fades from white. Under a limit its top is the brightest white below which every
+    # white fits (a fade passes through them all); a limit that allows an LED less than 3 leaves
+    # nothing of it, and the sign is then rightly dark.
+    allowed = allowance(env, sum(bin(v).count("1") for v in expected))
+    top = 0
+    while top < 255 and 3 * carried(top + 1) <= allowed:
+        top += 1
+    if top == 0:
+        check(log, not any(f.lit for f in style_frames(message, frames)[0]),
+              "the limit leaves nothing of this text (an LED may send %d of 765): every frame is dark" % allowed)
+        return log
+    # the frames of the fade in which something of a white dimmed to `top` is left
+    seen = 3 * sum(1 for count in range(100) if dimmed(env["gamma"][count * 256 // 100], top))
+    check(log, len(hits) > min(20, seen // 2), "%s (%d frames)" % (what, len(hits)))
     pause_check(log, lit)
+    # The frame that asks most is the fade's step that goes out largest, with its top dimmed to
+    # `top`, on every LED of the text: not above it, and not dimmed further than the limit asks
+    # either. (Red and blue go out carried; green may or may not.)
+    fade = fade_values(env, top)
+    leds = sum(bin(m).count("1") for m in expected)
+    peak = max([f.load[0] for f in style_frames(message, frames)[0]] or [0])
+    check(log, leds * max(2 * carried(v) + v for v in fade) <= peak <= leds * max(3 * carried(v) for v in fade),
+          "at its brightest every LED of the text is white %d of 255 as sent (%s): %.2f A a side"
+          % (max(carried(v) for v in fade), dim_note(top), peak * AMPS))
+    return log
+
+
+def fade_values(env, top):
+    """The whites of the 100 steps of the flashy fade when its top is dimmed to `top`, before they
+    are sent. (What is sent does not fall evenly with them: 124 goes out as 126, 119 as 127. So
+    the frame that asks most is not always the first.)"""
+    return [dimmed(env["gamma"][step * 256 // 100], top) for step in range(100)]
+
+
+def countdown_string(font, text):
+    """The columns of a string as sendString() draws it: 21 characters at most, a blank column
+    after each but the string's last (after the first always)."""
+    string = []
+    for i, ch in enumerate(text[:21]):
+        string += font.columns(bytes([ch]))[:-1]
+        if i == 0 or i + 1 < len(text):
+            string.append(0)
+    return string
+
+
+def countdown_frame(font, text, digits):
+    """The 120 columns of a countdown frame as the sketch sends them: the string, the count as
+    "d.dd", and both again; what is beyond the strip falls off. digits: three bytes."""
+    string = countdown_string(font, text)
+    count = []
+    for i, ch in enumerate([digits[0], ord("."), digits[1], digits[2]]):
+        count += font.columns(bytes([ch]))[:None if i < 3 else -1]
+    return ((string + count) * 2 + [0] * COLS)[:COLS]
+
+
+def check_countdown(env, message, start, end, frames):
+    """W: within the limits like every style, and dimmed by exactly what the rule says: a side
+    counts as the LEDs of its string and point, and half of what the digits add (every digit each
+    place can show, laid over each other); white's top is the brightest below which every white
+    fits. So a count of the digits that is too small or too large shows here."""
+    log = check_style(env, message, start, end, frames)
+    text = text_bytes(message)
+    if not text or not (env["limit_both"] or env["limit_side"]):
+        return log                                        # (an empty string is drawn past its end)
+    font = env["std"]
+    lit = lambda cols, a: sum(bin(v & 0xFE).count("1") for v in cols[a:a + PANEL])
+    blank = countdown_frame(font, text, b"   ")
+    union = list(blank)
+    for d in b"0123456789":
+        union = [u | v for u, v in zip(union, countdown_frame(font, text, bytes([d, d, d])))]
+    counted = max(lit(blank, a) + (lit(union, a) - lit(blank, a) + 1) // 2 for a in (0, PANEL))
+    allowed = allowance(env, counted)
+    top = 0
+    while top < 255 and 3 * carried(top + 1) <= allowed:
+        top += 1
+    if not any(countdown_string(font, text)):
+        return log                                        # a string that lights nothing: only the count is there
+    style = style_frames(message, frames)[0]
+    # blue is in the string's LEDs only (the count is red) and always goes out carried
+    blue = max([int(px[4:6], 16) for f in style for px in f.colours if px and px != "mixed"] or [0])
+    expected = max(carried(v) for v in fade_values(env, top))
+    check(log, blue == expected, "the string's white is at most %d of 255 as sent in the fade, as the rule gives "
+          "for %d LEDs counted on the fuller side (%s): it is %d" % (expected, counted, dim_note(top), blue))
     return log
 
 
@@ -771,13 +994,91 @@ def long_text(n):
     return out[:-1] + "!" if out.endswith(" ") else out
 
 
+# One message per style, each as full as the style gets and bright where the next style might
+# leave it: for the table of what a style shows when it follows another
+WHITE = {"r": 255, "g": 255, "b": 255}
+EACH_STYLE = [
+    dict({"type": "O", "str": "BBBBBBBBBB", "dly": 60}, **WHITE),
+    {"type": "C", "str": "BBBBBBB", "dly": 60, "g": 255, "b": 255},
+    {"type": "K", "str": "BBBBBBBBB_", "mode": "N"},
+    {"type": "F", "str": "BBBBB     BBBBB"},
+    {"type": "W", "str": "NEW"},
+    {"type": "D", "str": "B"},
+    {"type": "N", "str": "B"},
+    {"type": "T", "str": "B"},
+    dict({"type": "I", "str": "D"}, **WHITE),
+    {"type": "H", "str": "BBBBBB", "flashy": "8/8"},  # fits beside the count: it blinks, and asks with '~' only
+    {"type": "S", "str": "", "stars": 5},
+]
+
+
+def every_pair(n):
+    """A walk through 0..n-1 in which every one follows every one (itself too) exactly once: n * n
+    + 1 places. (The cycle that takes every arrow of the complete graph once, by Hierholzer.)"""
+    arrows = {a: list(range(n)) for a in range(n)}
+    stack, walk = [0], []
+    while stack:
+        a = stack[-1]
+        if arrows[a]:
+            stack.append(arrows[a].pop())
+        else:
+            walk.append(stack.pop())
+    return walk[::-1]
+
+
+def transition_cases():
+    walk = every_pair(len(EACH_STYLE))
+    assert len(walk) == len(EACH_STYLE) ** 2 + 1 and \
+        len(set(zip(walk, walk[1:]))) == len(EACH_STYLE) ** 2, "every style after every style, once"
+    cases = [(dict(EACH_STYLE[walk[0]], _note="(first)"), check_style)]
+    for a, b in zip(walk, walk[1:]):
+        before = EACH_STYLE[a]["type"]
+        cases.append((dict(EACH_STYLE[b], _after=before, _note="(after %s)" % before), check_style))
+    return cases
+
+
+def fuzz_cases(n, seed):
+    """n messages of the styles the limits hold for, with texts and colours drawn at random: full
+    characters, hearts, tabs, bytes outside the font, any length a style takes in a few seconds."""
+    rnd = random.Random(seed)
+    glyphs = "B#8MW@ .!|ABXYZ0189" + "\u007f\u000b\u0001\u00e9"
+
+    def text(most, least=0):
+        full = rnd.random() < 0.4                         # often nothing but the fullest characters
+        return "".join(rnd.choice("B#8M\u007f" if full and rnd.random() < 0.8 else glyphs)
+                       for _ in range(rnd.randint(least, most)))
+
+    def colour():
+        return dict(zip("rgb", rnd.choice([(255, 255, 255), (255, 255, 255), (255, 0, 0), (4, 255, 25),
+                                           tuple(rnd.randrange(256) for _ in range(3))])))
+    cases = []
+    for k in range(n):
+        kind = rnd.choice("FFFWWDNTTIKKOC")
+        if kind in "FW":
+            m = {"type": kind, "str": text(30)}
+        elif kind in "DNT":
+            m = {"type": kind, "str": text(14)}
+        elif kind == "I":
+            m = dict({"type": "I", "str": rnd.choice("12XABD")}, **colour())
+        elif kind == "K":
+            m = {"type": "K", "str": text(rnd.choice((15, 15, 40))) + "_", "mode": rnd.choice("NW")}
+        elif kind == "O":
+            m = dict({"type": "O", "str": text(14), "dly": rnd.randint(20, 120)}, **colour())
+        else:
+            m = dict({"type": "C", "str": text(9), "dly": rnd.randint(20, 120), "scroll": False}, **colour())
+        cases.append((dict(m, _note="(random %d of seed %d)" % (k, seed)),
+                      check_countdown if kind == "W" else check_style))
+    return cases
+
+
 def options(argv):
     """Takes the --name value pairs out of argv. Returns (the other arguments, {name: value})."""
-    known = {"--limit-ma": 0, "--limit-side-ma": 0, "--ramp-ms": 0, "--also": None}
+    known = {"--limit-ma": 0, "--limit-side-ma": 0, "--ramp-ms": 0, "--also": None, "--random": 0, "--seed": 1,
+             "--same-as": None}
     rest, i = [], 0
     while i < len(argv):
         if argv[i] in known and i + 1 < len(argv):
-            known[argv[i]] = argv[i + 1] if argv[i] == "--also" else int(argv[i + 1])
+            known[argv[i]] = argv[i + 1] if argv[i] in ("--also", "--same-as") else int(argv[i + 1])
             i += 2
         elif argv[i].startswith("--"):
             sys.exit("ads_test.py: unknown option %s\n%s" % (argv[i], __doc__))
@@ -843,6 +1144,45 @@ def main():
     ]
     rest = [
         (c(long_text(300), 1000), check_chonky),
+    ]
+    # What a side shows is not always one stretch of 60 columns of the text. Each of these was over
+    # a limit when the estimate counted the text and not the frame; `also` in the same run.
+    tab = "\u000b"
+    frames_not_texts = [(m, check_style) for m in (
+        # two copies back to back, and side B spans the join: twice the LEDs of any 60 columns
+        {"type": "F", "str": "BBBBB     BBBBB", "_note": "(side B spans the join of the two copies)"},
+        {"type": "F", "str": "#####     #####", "_note": "(side B spans the join)"},
+        {"type": "F", "str": "MMMMM      MMMMM", "_note": "(side B spans the join)"},
+        # sendString() stops after 21 characters: the copies are shorter than the text and side A shows two
+        {"type": "F", "str": "###" + tab * 42, "_note": "(3 characters and 42 tabs: side A shows the text twice)"},
+        # nothing but the count, twice on side A (an empty string is drawn past its end: whatever
+        # follows it in memory; a tab is one blank column)
+        {"type": "W", "str": "", "_note": "(no text: the count and what follows the string)"},
+        {"type": "W", "str": tab, "_note": "(a tab: side A shows the count twice and nothing else)"},
+        # a short text with the count: side A shows the text twice and the digits
+        {"type": "W", "str": "NEW", "_note": "(side A shows text, count, text)"},
+        {"type": "W", "str": "\u007f\u007f\u007f", "_note": "(side A shows text, count, text)"},
+        {"type": "W", "str": "NEW" + tab + "MSG" + tab, "_note": "(the notice)"},
+        # the keyboard echo, which had no limit at all; a line longer than a panel is drawn past its end
+        {"type": "K", "str": "BBBBBBBBB_", "mode": "N", "_note": "(keyboard echo)"},
+        {"type": "K", "str": "BBBBBBBBB_", "mode": "W", "_note": "(keyboard echo, warning)"},
+        {"type": "K", "str": "BBBBBBBBBBBBB_", "mode": "N", "_note": "(keyboard echo, 14 characters)"},
+        # frames shorter than the strip: what the picture before left in the columns they do not reach
+        dict({"type": "O", "str": "         B", "dly": 100, "_note": "(leaves a B at the right edge)"}, **WHITE),
+        {"type": "T", "str": "B", "_note": "(66 columns a frame; after the O)"},
+        dict({"type": "O", "str": "     #####", "dly": 100, "_note": "(leaves ##### on the right)"}, **WHITE),
+        {"type": "T", "str": "#####", "_note": "(90 columns a frame; after the O)"},
+        {"type": "C", "str": "     ||", "dly": 100, "g": 255, "b": 255, "_note": "(leaves || at the right edge)"},
+        dict({"type": "I", "str": "D", "_note": "(103 to 109 columns a frame; after the C)"}, **WHITE),
+        dict({"type": "O", "str": "         B", "dly": 100, "_note": "(leaves a B at the right edge)"}, **WHITE),
+        dict({"type": "I", "str": "B", "_note": "(106 to 112 columns a frame; after the O)"}, **WHITE),
+        dict({"type": "I", "str": "A", "_note": "(an icon with the unused bottom bit set)"}, **WHITE),
+        dict({"type": "O", "str": "         B", "dly": 100, "_note": "(leaves a B at the right edge)"}, **WHITE),
+        {"type": "N", "str": tab + tab + "B", "_note": "(119 columns a frame; after the O)"},
+        dict({"type": "O", "str": "         B", "dly": 100, "_note": "(leaves a B at the right edge)"}, **WHITE),
+        {"type": "D", "str": "B", "_note": "(its last frames shrink to nothing; after the O)"})]
+    frames_not_texts = [(m, check_countdown if m["type"] == "W" else checker) for m, checker in frames_not_texts]
+    rest += [
         (c("ABCDEF", 333, scroll=True), check_nudge),             # an odd dly never ended before
         (c("\u000bAB", 333, scroll=True), check_nudge),           # a tab first: one position, not nine
         ({"type": "N", "str": "I \u007f DREAMSTATE \u007f"},
@@ -868,33 +1208,83 @@ def main():
         n(".|    ", 250, pink), n("...|  ", 250, pink), n("......", 150, pink),
         n("NO", 650, red), n("NO BARS", 650, red), n("TRYING", 400, red), n("AGAIN", 400, red), n("LATER!", 400, red))]
     # The beat input flashing a marquee white: the largest loads the firmware makes.
-    beat = [(dict(m, _note="(beat at 128 a minute)"), check_table_only) for m in (
+    beat = [(dict(m, _note="(beat at 128 a minute)"), check_style) for m in (
         {"type": "D", "str": "I LIVE FOR THAT ENERGY"}, {"type": "N", "str": "CHONKY MARQUEE"},
         {"type": "T", "str": "TRACK ID GOES HERE"})]
-    quiet = [(dict(m, _note="(no beat)"), check_table_only) for m in (
+    quiet = [(dict(m, _note="(no beat)"), check_style) for m in (
         {"type": "D", "str": "I LIVE FOR THAT ENERGY"}, {"type": "N", "str": "CHONKY MARQUEE"},
         {"type": "W", "str": "NEW MSG"}, {"type": "F", "str": "MIC ON"},
         {"type": "I", "str": "1", "r": 79, "g": 98, "b": 210}, {"type": "I", "str": "2", "r": 79, "g": 98, "b": 210})]
+    quiet = [(m, check_countdown if m["type"] == "W" else checker) for m, checker in quiet]
     # The sign's brightness shift ('B' utility message), which halves every value: two short
     # texts that are over this test's limits as they are and under them at shift 1
     shifted = [
-        ({"type": "U", "subtype": "B", "str": "1", "_note": "(sets brightness shift 1)"}, check_table_only),
+        ({"type": "U", "subtype": "B", "str": "1", "_note": "(sets brightness shift 1)"}, check_style),
         (dict(c("HI", 400), g=255, b=25, _shift=1, _note="(at brightness shift 1)"), check_shifted),
         (dict(o("HI THERE!", 400), r=255, g=0, b=0, _shift=1, _note="(at brightness shift 1)"), check_shifted),
+    ] + [(dict(m, _note="(at brightness shift 1)"), check_style) for m in (
+        {"type": "F", "str": "BBBBB     BBBBB"}, {"type": "W", "str": "NEW"},
+        {"type": "K", "str": "BBBBBBBBB_", "mode": "N"}, {"type": "D", "str": "B#B"},
+        dict({"type": "I", "str": "1"}, **WHITE))
+    ] + [
+        ({"type": "U", "subtype": "B", "str": "5", "_note": "(sets brightness shift 5)"}, check_style),
+    ] + [(dict(m, _note="(at brightness shift 5)"), check_style) for m in (
+        {"type": "F", "str": "BBBBB     BBBBB"}, {"type": "K", "str": "BBBBBBBBB_", "mode": "W"},
+        {"type": "N", "str": "B#"}, dict({"type": "I", "str": "D"}, **WHITE))
+    ] + [
         ({"type": "U", "subtype": "B", "str": "200", "_note": "(asks for shift 200: stored as 8, dark)"},
          check_dark),
         (dict(o("HI THERE!", 400), r=255, g=0, b=0, _note="(after shift 200 was asked for: dark)"), check_dark),
-        ({"type": "U", "subtype": "B", "str": "0", "_note": "(back to no shift)"}, check_table_only),
+        ({"type": "U", "subtype": "B", "str": "0", "_note": "(back to no shift)"}, check_style),
         (dict(c("HI", 400), g=255, b=25, _note="(no shift again)"), check_chonky),
     ]
+    # the beat flash onto a frame shorter than the strip, with a bright picture left by the style before
+    beat += [(dict(m, _note="(beat at 128 a minute; %s)" % note), check_style) for m, note in (
+        (dict({"type": "O", "str": "     #####", "dly": 100}, **WHITE), "leaves ##### on the right"),
+        ({"type": "T", "str": "#####"}, "90 columns a frame; after the O"))]
+    # Messages that are not what the app usually sends: no text, a style's own notices, nothing to
+    # draw, a message the sign cannot read (it is nested deeper than the sign's reader goes)
+    odd = [(m, check_style) for m in (
+        {"type": "F", "_note": "(no text at all)"},
+        {"type": "W", "_note": "(no text at all)"},
+        {"type": "U", "subtype": "M", "str": "D", "_note": "(the microphone off: MIC OFF)"},
+        {"type": "U", "subtype": "M", "str": "E", "_note": "(the microphone on: MIC ON)"},
+        {"type": "U", "subtype": "Z", "str": "1", "_note": "(no such utility message: draws nothing)"},
+        {"type": "T", "str": "", "_note": "(an empty text: draws nothing)"},
+        {"type": "D", "_note": "(no text at all: only the stars)"},
+        {"type": "K", "str": "", "mode": "N", "_note": "(an empty line)"},
+        {"type": "Z", "str": "B#B", "_note": "(no such type: shown as a marquee)"},
+        {"type": "F", "str": "X", "x": [[[[[[[[[[[[1]]]]]]]]]]]], "_error": True, "_stars": 600,
+         "_note": "(cannot be read: the sign flashes the error's name, TooDeep, then stars)"})]
+    if env["limit_both"] or env["limit_side"]:
+        # An icon the sign does not have, with its text: INVALID ICON and the text, as a countdown.
+        # (Without limits that text is written into the memory after a string constant and the
+        # sign's memory goes: the fonts, the brightness shift. These cases would end that run.)
+        odd += [(m, check_style) for m in (
+            dict({"type": "I", "str": "Q", "_note": "(no such icon)"}, **WHITE),
+            dict({"type": "I", "str": "#" * 321 + "\u00e9", "_note": "(no such icon, a long text)"}, **WHITE),
+            {"type": "F", "str": "##########", "_note": "(after the long text of an unknown icon)"})]
+        odd += [(dict({"type": "I", "str": "QQQQQQQQQ", "_note": "(no such icon, %d of 8)" % (k + 1)}, **WHITE),
+                 check_style) for k in range(8)]
+        odd += [({"type": "F", "str": "##########", "_note": "(after eight unknown icons)"}, check_style),
+                (dict(c("8888888", 100), g=255, b=255, _note="(after eight unknown icons)"), check_chonky)]
     groups = [("one_by_one", one_by_one, ()), ("chonky", chonky, ()), ("rest", rest + quiet, ()),
-              ("notices", notices, ()), ("beat", beat, ("--bpm", "128")), ("shift", shifted, ())]
+              ("notices", notices, ()), ("beat", beat, ("--bpm", "128")), ("shift", shifted, ()),
+              ("frames_not_texts", frames_not_texts, ()), ("odd", odd, ())]
+    if env["limit_both"] or env["limit_side"]:
+        # every style after every style, with the beat input running: only an image with limits has
+        # anything to hold there (the table of the transitions is printed for it)
+        groups.append(("transitions", transition_cases(), ("--bpm", "128")))
+    if opts["--random"]:
+        cases = fuzz_cases(opts["--random"], opts["--seed"])
+        for i in range(0, len(cases), 20):                # 20 to a run, the runs side by side
+            groups.append(("random_%d" % (i // 20), cases[i:i + 20], ("--bpm", "128")))
     if opts["--also"]:
         also = []
         for line in open(opts["--also"], encoding="utf-8"):
             if line.strip().startswith("{"):
                 m = dict(json.loads(line), _note="(from %s)" % os.path.basename(opts["--also"]))
-                also.append((m, {"O": check_one_by_one, "C": check_chonky}.get(m["type"], check_table_only)
+                also.append((m, {"O": check_one_by_one, "C": check_chonky}.get(m["type"], check_style)
                              if not m.get("scroll") else check_nudge))
         groups.append(("also", also, ()))
     results = [None] * len(groups)
@@ -910,6 +1300,7 @@ def main():
             runs, startup = run_group(env, name, [m for m, _ in cases], port + i, flags)
             logs = []
             if i == 0:
+                # (the starfield after the words is taken off them in limit_check, like any other)
                 words = {"type": "-", "str": "I LIVE FOR THAT ENERGY!", "_order": -1,
                          "_note": "(the startup words, before the first request)"}
                 logs.append(label(words))
@@ -917,6 +1308,15 @@ def main():
             for (message, checker), (start, end, frames, before) in zip(cases, runs):
                 message["_before"] = before
                 logs += checker(env, message, start, end, frames)
+            if opts["--same-as"] and name in SAME_GROUPS:
+                # the same messages again on the reference image, and the two dumps side by side
+                ref_env = dict(env, hex=opts["--same-as"], work=os.path.join(env["work"], "same-as"))
+                os.makedirs(ref_env["work"], exist_ok=True)
+                ref_runs, _ = run_group(ref_env, name, [m for m, _ in cases], port + 100 + i, flags)
+                logs.append("-- the same pictures as %s" % opts["--same-as"])
+                logs += same_pictures(cases, runs, os.path.join(env["work"], name + ".jsonl"), ref_runs,
+                                      os.path.join(ref_env["work"], name + ".jsonl"),
+                                      "the image without limits")
             results[i] = logs
         except Exception as e:  # a run that could not be made or read is a failed test, not a crash
             failures.append("%s: %s" % (name, e))
@@ -950,6 +1350,15 @@ def main():
         for _, name, both, one, rise, rise_one in sorted(supply):
             print("  %-52s %8.2f A %8.2f A %12.2f A %12.2f A" % (name[:52], both, one, rise, rise_one))
             out.write("%s\t%.3f\t%.3f\t%.3f\t%.3f\n" % (name, both, one, rise, rise_one))
+
+    if transitions:
+        kinds = [m["type"] for m in EACH_STYLE]
+        print("== every style after every style: the most one side asks for, in A, while the style of the COLUMN is "
+              "shown straight after the style of the ROW (%s are not limited)" % " and ".join(EXEMPT))
+        print("  %-8s %s" % ("after \\", " ".join("%5s" % k for k in kinds)))
+        for a in kinds:
+            print("  %-8s %s" % (a, " ".join("%5.2f" % transitions[(a, b)] if (a, b) in transitions else "    -"
+                                              for b in kinds)))
 
     if failures:
         print("FAILED: %d check(s)" % len(failures))

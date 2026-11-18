@@ -4,9 +4,12 @@
 #   make firmware   build only the firmware (build/firmware/LED_Marquee.elf and .hex)
 #   make run        live terminal view (start ./fake_app.py in another terminal)
 #   make test       the smoke test (no human needed)
-#   make test-ads   only the ads' test: the O and C styles on the real firmware (half a minute)
+#   make test-ads   only the ads' test: the O and C styles on the real firmware (half a minute);
+#                   ADS_PORT=n for other TCP ports than 14440 and up (also for test-ads-budget)
 #   make test-ads-budget   the same test on images built with a current limit and a ramp (the
-#                   sketch has neither): FW_BUDGET_LIMIT_MA, FW_BUDGET_RAMP_MS, FW_BUDGET_SIDE_MA
+#                   sketch has neither): FW_BUDGET_LIMIT_MA, FW_BUDGET_RAMP_MS, FW_BUDGET_SIDE_MA,
+#                   and on one whose limit is never reached, against the image without limits
+#                   (three and a half minutes for the three)
 #   make sign-images   the images for trying the supply's settings on the sign: ramp only, a limit
 #                   only, both, and a limit per side (SIGN_RAMP_MS, SIGN_CAP_MA, SIGN_SIDE_MA);
 #                   each in build/firmware-<name>/, the name says the settings
@@ -109,8 +112,11 @@ run: all
 test:
 	./test.sh
 
+# ADS_PORT: the first of the TCP ports on 127.0.0.1 the ads' tests listen on (ads_test.py says how many)
+ADS_PORT ?= 14440
+
 test-ads: all
-	python3 tests/ads_test.py $(EMU) $(FW_HEX) .. $(BUILD)/tests/ads
+	python3 tests/ads_test.py $(EMU) $(FW_HEX) .. $(BUILD)/tests/ads $(ADS_PORT)
 
 # The same sketch with the supply's settings on (in the sketch they are all 0 = off), each in its
 # own build tree: build/firmware-<name>/. $(1) = name, $(2) = the settings, separated by ;
@@ -134,23 +140,35 @@ firmware-$(1): $(BUILD)/firmware-$(1)/Makefile
 	    { echo "$(BUILD)/firmware-$(1) was configured with other settings than $(2): delete it"; exit 1; }
 endef
 
-# Two images for the tests: a limit for the two sides together with a ramp, and a limit per side.
-# The numbers are low so that most of the test's texts are dimmed; they are not a recommendation.
+# Three images for the tests: a limit for the two sides together with a ramp, a limit per side, and
+# a limit so high that no picture reaches it (60 A: that image must draw what the image without
+# limits draws). The other numbers are low so that most of the test's texts are dimmed; they are
+# not a recommendation. FW_BUDGET_RANDOM: how many messages with random texts each run adds;
+# FW_BUDGET_SEED: which ones (the same seed gives the same messages).
 FW_BUDGET_LIMIT_MA ?= 3000
 FW_BUDGET_RAMP_MS  ?= 100
 FW_BUDGET_SIDE_MA  ?= 1200
+FW_BUDGET_RANDOM   ?= 40
+FW_BUDGET_SEED     ?= 1
 BUDGET      := budget-$(FW_BUDGET_LIMIT_MA)-ramp$(FW_BUDGET_RAMP_MS)
 BUDGET_SIDE := budget-side$(FW_BUDGET_SIDE_MA)
+BUDGET_HIGH := budget-60000
 $(eval $(call SIGN_IMAGE,$(BUDGET),-DLED_CURRENT_LIMIT_MA=$(FW_BUDGET_LIMIT_MA);-DAD_RAMP_MS=$(FW_BUDGET_RAMP_MS)))
 $(eval $(call SIGN_IMAGE,$(BUDGET_SIDE),-DLED_CURRENT_LIMIT_SIDE_MA=$(FW_BUDGET_SIDE_MA)))
+$(eval $(call SIGN_IMAGE,$(BUDGET_HIGH),-DLED_CURRENT_LIMIT_MA=60000))
 
-firmware-budget: firmware-$(BUDGET) firmware-$(BUDGET_SIDE)
+firmware-budget: firmware-$(BUDGET) firmware-$(BUDGET_SIDE) firmware-$(BUDGET_HIGH)
 
-test-ads-budget: emu firmware-budget
+# (one run after the other, so the three can use the same ports)
+test-ads-budget: emu firmware firmware-budget
 	python3 tests/ads_test.py $(EMU) $(BUILD)/firmware-$(BUDGET)/LED_Marquee.hex .. $(BUILD)/tests/ads-$(BUDGET) \
-	    14445 --limit-ma $(FW_BUDGET_LIMIT_MA) --ramp-ms $(FW_BUDGET_RAMP_MS)
+	    $(ADS_PORT) --limit-ma $(FW_BUDGET_LIMIT_MA) --ramp-ms $(FW_BUDGET_RAMP_MS) --random $(FW_BUDGET_RANDOM) \
+	    --seed $(FW_BUDGET_SEED)
 	python3 tests/ads_test.py $(EMU) $(BUILD)/firmware-$(BUDGET_SIDE)/LED_Marquee.hex .. \
-	    $(BUILD)/tests/ads-$(BUDGET_SIDE) 14451 --limit-side-ma $(FW_BUDGET_SIDE_MA)
+	    $(BUILD)/tests/ads-$(BUDGET_SIDE) $(ADS_PORT) --limit-side-ma $(FW_BUDGET_SIDE_MA) --random $(FW_BUDGET_RANDOM) \
+	    --seed $(FW_BUDGET_SEED)
+	python3 tests/ads_test.py $(EMU) $(BUILD)/firmware-$(BUDGET_HIGH)/LED_Marquee.hex .. \
+	    $(BUILD)/tests/ads-$(BUDGET_HIGH) $(ADS_PORT) --limit-ma 60000 --same-as $(FW_HEX)
 
 # Images for trying the settings on the sign: build/firmware-ramp100, -cap6000, -cap6000-ramp100
 # and -side5500 with these numbers. What a setting should be has to be found on the sign.

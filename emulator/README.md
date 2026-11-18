@@ -322,12 +322,93 @@ sign dark (about 1 mA per LED, some 0.84 A) is not in it. A message's first
 rise is counted from what the sign was showing when it came. `tests/ads_test.py --also file.jsonl` adds the messages of another
 list to the run and to the table.
 
-The sketch can hold every style except the chooser and the starfield under a
-limit, and let a `C` text come on over a ramp (`LED_CURRENT_LIMIT_MA`,
-`LED_CURRENT_LIMIT_SIDE_MA`, `AD_RAMP_MS` at the top of the sketch; all 0,
-off, unless set there or given at build time).
-`make test-ads-budget` builds two images with low limits and runs the same
-test on them with the limits asserted. `make sign-images` builds four images
+The sketch can hold what the LEDs draw under a limit, and let a `C` text come
+on over a ramp (`LED_CURRENT_LIMIT_MA`, `LED_CURRENT_LIMIT_SIDE_MA`,
+`AD_RAMP_MS` at the top of the sketch; all 0, off, unless set there or given at
+build time). With both limits 0 none of it is compiled.
+
+A limit is about what a side of the sign shows once a frame is latched. Two
+things make it hold:
+
+- **What is counted is what a side shows.** `O`, `C`, the marquees and the
+  icons are counted from their text or picture (the fullest 60 columns in a
+  row; an icon as often as it fits on a side and once more). Flashy, countdown
+  and keyboard echo draw their frame once "dry" before the first real one: the
+  same code runs with nothing sent, and the LEDs of each side are counted from
+  what it drew. So two copies of a text back to back, a side that spans their
+  join, the count's digits, the 21 characters `sendString()` stops after are
+  counted as they are drawn.
+- **The strip is the frame.** Every frame of a limited style writes all 120
+  columns; where its own columns are fewer, the rest are sent black. Nothing
+  of an earlier picture, of the same style or another, stays lit beside it.
+
+Everything in the firmware that lights LEDs, and what holds it to the limits.
+The two columns of figures are one side, estimated, for the fullest pictures
+tried here (white; hearts or `#` in every place of the standard font, `8` or
+`|` in the chonky one; the beat input on): the most seen, not a proven maximum.
+
+| what draws | shown for | held to the limits by | no limit | 5500 mA a side |
+|---|---|---|---|---|
+| `showCharsOneByOneOnBothPanels` | `O` | fullest 60 columns of the text; one dimming for the message; every frame is 120 columns | 14.10 A | 5.36 A |
+| `showChonkySlideStyleOnBothPanels` | `C` | the same, red taken at its largest (the wave) | 15.85 A | 4.55 A |
+| `showAsCountdownStyle` without the count (`showAsFlashyStyle`) | `F`, the startup words, `MIC ON`, `MIC OFF`, `BRIGHT=n`, the flash of a message that could not be read | dry run of the frame; the top of the fade dimmed so that every brightness below fits | 14.21 A | 4.87 A |
+| `showAsCountdownStyle` with the count | `W`, `INVALID ICON` and the text of an icon message the sign has no icon for | dry run: the string, and every digit each place can show (a digit's LED, red only, counts as half a white one) | 10.27 A | 4.11 A |
+| `showAsInputStyle` | `K` | dry run of the frame; white and the blinking colour each dimmed to what an LED may send | 13.10 A | 5.41 A |
+| `marquee` | `D`, `N`, `T`, an unknown type, with the beat flash | fullest 60 columns of the text; the colour of every scroll step dimmed to what an LED may send | 17.48 A | 5.47 A |
+| `showIconInvaders` | `I` | the fuller of the icon's two pictures, as often as it fits on a side and once more | 13.44 A | 5.50 A |
+| the chooser (`ChooserDisplay.h`) | `H` | **not limited.** One side only, after its own `clear()` | 3.54 A | 3.54 A |
+| `showstarfieldcustom` | `S`; after `F`, `W`, `D`, `N` and the startup words; when there is no message | **not limited.** 121 columns a frame, one LED | 0.04 A | 0.04 A |
+| `clear()` | before `O`, `F`, `W`, `K`, the chooser | 120 black columns | 0 | 0 |
+
+So a limit below about 3.5 A a side is not kept while the chooser is on (its
+fullest picture is a count made of hearts; with a count like `8/8` and a text
+of `#` it is 2.6 A). The limited styles send their columns through
+`supplyColumn()` in the sketch (or, `O` and `C`, through `adSendSide()`); the
+three unlimited ones are the only other callers of `sendColumnRGB()`.
+
+A message that draws nothing (`T` with an empty text, a `U` the sign does not
+know) leaves the picture before it on the sign, the chooser's too.
+
+With a limit set, the text of an icon message the sign has no icon for is put
+together in a buffer of its own. Without limits it is written into the memory
+after a string constant, as it always was, more of it with every such message:
+by that image's memory map the 62nd character lands on the fonts and the 197th
+on the brightness shift. (The image without limits is not changed by anything
+here; that defect is still to be fixed there.)
+
+What a limit costs in time, measured here:
+
+- A frame of the sketch's own styles takes 0.08 ms longer (1.5 percent), and
+  the longest pause inside a frame is 21.2 us where it was 20.4 (the strips
+  latch at 50). `O` and `C` are not touched.
+- A frame that was shorter than the strip now takes as long as a whole one
+  (4.4 ms for 120 columns). A marquee moves one column a step as before, but
+  the steps in which the text leaves the sign (and, for `T`, enters it) no
+  longer get shorter with the frame: a 22 character `D` takes 6.64 s where it
+  took 6.36 s, an 18 character `T` 5.83 s (5.56 s), a 14 character `N` 4.96 s
+  (4.68 s). A countdown whose text and count are less than a panel wide slows
+  down with its longer frames: `W "NEW"` (80 columns a frame) takes 5.0 s where
+  it took 4.0 s; `W "NEW MSG"` (120 columns) 5.09 s where it took 4.99 s. The
+  keyboard echo's two frames take 5 ms each where they took 2. Icons: 54.4 ms a
+  frame where it was 54.1.
+- A marquee step whose colour is over what an LED may send is 1.5 ms longer:
+  that is what the search for its dimming takes (26.1 ms a step where it is
+  24.6 for `D`, 20.0 where it is 18.5 for `N`). At a limit the text's own colour
+  is under, that is the steps of a beat flash only (a quarter of a second per
+  beat); at a limit below the text's own colour it is every step, 6 to 8
+  percent slower.
+- Before a flashy or countdown message's first frame: its dry runs, 1 to 11 of
+  them, 1.4 to 6.5 ms together.
+
+`make test-ads-budget` builds three images (3000 mA with a 100 ms ramp, 1200 mA
+a side, and 60 A, which no picture reaches) and runs the same test on them with
+the limits asserted: every frame of every limited style writes the whole strip
+and is within the limits; every style is shown straight after every style (121
+pairs, with the beat input on) and the result printed as a table; 40 more
+messages have random texts and colours (`FW_BUDGET_SEED=n` for other ones); and
+the 60 A image must draw, LED for LED, what the image without limits draws
+wherever that one's frames write.
+`make sign-images` builds four images
 for trying on the sign: `ramp100`, `cap6000`, `cap6000-ramp100`, `side5500`
 (other numbers: `make sign-images SIGN_SIDE_MA=7000`). Every such image has
 its own build tree, named after its settings.
@@ -431,7 +512,7 @@ Seen while building this; the firmware is not changed by this directory.
 | `tests/gif_check.py` | what a recording must be, stated from the rules above in exact arithmetic: a strict GIF decoder, and the GIF and PNG pictures and their times against the frames dump |
 | `tests/gif_cases.py`, `tests/gif_case.c` | chosen, random and very long-held pictures through the GIF encoder |
 | `tests/link_test.py` | the serial link's timing model against the real firmware, with clients that come and go |
-| `tests/ads_test.py` | the ads (`O` and `C`) on the real firmware: every frame against `Fonts.h`, both sides equal, 120 columns, the scroll of a text wider than a panel, `dly` as real time, and what each message asks of the supply (with a limit or a ramp built in: that it is kept) |
+| `tests/ads_test.py` | the ads (`O` and `C`) on the real firmware: every frame against `Fonts.h`, both sides equal, 120 columns, the scroll of a text wider than a panel, `dly` as real time, and what each message of every style asks of the supply. On an image built with a limit: every frame of every limited style writes the whole strip and keeps the limit, also straight after every other style and for random texts |
 | `tests/record_fail_test.py` | recordings that cannot be created, written or closed |
 | `tests/cli_test.py` | command line values that are refused |
 | `tests/test_ihex.c` | the firmware image reader, built with the address and undefined-behaviour sanitizers |

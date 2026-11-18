@@ -274,25 +274,6 @@ static uint16_t adMostLit(const Font& font, const TextMetrics& m, const char* s)
     return most;
 }
 
-// For the styles in the sketch itself (flashy, countdown, marquee, icons). There a frame's first
-// green byte starts with whatever is in the carry flag, so green is taken as carried: the most
-// it can be.
-static uint16_t supplyMostLit(const Font& font, const char* s) {
-    return adMostLit(font, fontMetrics(font), s);
-}
-
-// What one lit LED may send, its three values added up, when a side has litPerSide LEDs lit
-static uint16_t supplyAllowed(uint16_t litPerSide) {
-    return ledAllowance(litPerSide, LED_LOAD_OF_MA(LED_CURRENT_LIMIT_MA), LED_LOAD_OF_MA(LED_CURRENT_LIMIT_SIDE_MA));
-}
-
-// How far a picture with litPerSide LEDs lit on a side, all in this colour, has to be dimmed
-// (255 = not at all). `fades`: the picture is also shown at every brightness below this one (the
-// flashy fade), so each of those has to fit too.
-static uint supplyScale(uint16_t litPerSide, uint r, uint g, uint b, bool fades) {
-    return ledBudgetScale(supplyAllowed(litPerSide), r, g, b, false, true, BRIGHTNESS_SHIFT, fades);
-}
-
 // How far this text in this colour has to be dimmed to stay within the supply's limits (255 = not
 // at all). With `wave` it is a chonky text: red is the wave, green goes out carried.
 static uint adBudgetScale(const Font& font, const TextMetrics& m, const char* s, uint r, uint g, uint b, bool wave) {

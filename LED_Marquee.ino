@@ -134,9 +134,11 @@ PROGMEM = "                    ";
 #define AD_WAVE_FRAME_MS 10
 
 // ---- The supply: what the LEDs may draw (see LedBudget.h for the model). 0 = no limit, as it always was.
-// ---- A picture that would draw more is dimmed, as a whole, by just as much as it takes. The limits are on what
-// ---- the lit LEDs add (the 0.84 A or so that flows with the sign dark is not counted). They hold for every style
-// ---- except the chooser and the starfield, which light too little to matter.
+// ---- A picture that would draw more is dimmed, as a whole, so that it does not. The limits are on what the lit
+// ---- LEDs add (the 0.84 A or so that flows with the sign dark is not counted). They hold for every frame of
+// ---- every style except two, which are sent as they always were whatever the limits are: the chooser (one
+// ---- side only; at most about 3.5 A by the same model) and the starfield (one LED). emulator/README.md has
+// ---- the list of everything that lights LEDs and what holds it to the limits.
 //The most the LEDs of one frame may draw, both sides of the sign together, in mA
 #ifndef LED_CURRENT_LIMIT_MA
 #define LED_CURRENT_LIMIT_MA 0
@@ -237,6 +239,98 @@ static inline void sendColumnRGB(uint row, uint r, uint g, uint b) {
 
 }
 
+#if LED_LIMITS
+// ---- The supply and the styles in this file (flashy, countdown, keyboard echo, marquee, icons).
+// ---- The arithmetic is in LedBudget.h. Two things make a limit hold for them:
+//
+// 1. WHAT IS COUNTED IS WHAT A SIDE OF THE STRIP SHOWS. Flashy, countdown and keyboard echo draw a
+//    frame "dry" first: the same code that will send the frame runs once with supplyDry set, and
+//    its columns go into supplyPicture (one byte per column of the strip, the rows that are lit)
+//    instead of to the LEDs. The lit LEDs of each side are then counted from that picture, and the
+//    fuller side decides. So whatever the frame code does (two copies of a text back to back, a
+//    side that spans the join, the 21 characters sendString() stops after, the count's digits, a
+//    string that is read past its end) is counted as it is drawn, not as the text reads.
+//    The marquee and the icons count without a dry run: see there.
+//
+// 2. THE STRIP IS THE FRAME. Every frame of these styles writes all 120 columns: when the frame's
+//    own columns are fewer, the rest are sent black (supplyFrameEnd). So no LED of an earlier
+//    picture, of this style or of another, stays lit beside what was counted.
+//
+// Everything that lights LEDs sends its columns through supplyColumn(), or is one of the ads'
+// two styles (AdDisplay.h, which has its own count and always sends 120 columns), or is not
+// limited: the chooser (ChooserDisplay.h), the starfield and clear(). The list is in the README.
+#include "LedBudget.h"
+static bool supplyDry = false;         // a frame is being drawn to be counted: nothing is sent
+static uint supplyLeft = 0;            // columns of the strip that the frame being drawn has not written yet
+static uint supplyPicture[PIXELS];     // dry: the rows lit in each column of the strip
+
+// A column of a frame of one of these styles.
+// The flags are put back the way the caller left them before the column is sent: sendBitx8 sends a
+// colour byte that starts with the carry flag set as v | v >> 1 (see AdDisplay.h), a column's green
+// starts with whatever the code before it left in the flag, and the counting here must not change
+// what that is. emulator/tests/ads_test.py holds an image whose limit is never reached to the
+// colours of the image without limits, LED for LED.
+static void supplyColumn(uint row, uint r, uint g, uint b) {
+    const uint flags = SREG;
+    if (supplyDry) {
+        if (supplyLeft) { // (what a frame sends beyond the strip's 120 columns falls off its end)
+            supplyPicture[PIXELS - supplyLeft] |= row;
+            supplyLeft--;
+        }
+        return;
+    }
+    if (supplyLeft) {
+        supplyLeft--;
+    }
+    SREG = flags; // (interrupts are off here, and stay off)
+    sendColumnRGB(row, r, g, b);
+}
+
+// Before the columns of a frame, dry or sent
+static inline void supplyFrameBegin() {
+    supplyLeft = PIXELS;
+}
+
+// After the columns of a frame that is sent: black for the columns it did not reach
+static void supplyFrameEnd() {
+    while (supplyLeft) {
+        supplyColumn(0, 0, 0, 0);
+    }
+}
+
+// Starts a dry run: frames drawn from here on are laid over each other in supplyPicture
+static void supplyDryBegin() {
+    memset(supplyPicture, 0, sizeof(supplyPicture));
+    supplyDry = true;
+    supplyFrameBegin();
+}
+
+// The lit LEDs of each side of what the dry run has drawn so far
+static void supplyDryLit(uint16_t lit[NUM_PANELS]) {
+    lit[0] = lit[1] = 0;
+    for (uint c = 0; c < PIXELS; c++) {
+        lit[c >= COLUMNS_PER_PANEL] += ledBits(supplyPicture[c] & onBits);
+    }
+}
+
+// Ends the dry run. Returns the lit LEDs of the fuller side of what was drawn.
+static uint16_t supplyDryEnd() {
+    uint16_t lit[NUM_PANELS];
+    supplyDry = false;
+    supplyDryLit(lit);
+    return lit[0] > lit[1] ? lit[0] : lit[1];
+}
+
+#define SEND_COLUMN supplyColumn
+#define SUPPLY_FRAME_BEGIN() supplyFrameBegin()
+#define SUPPLY_FRAME_END() supplyFrameEnd()
+#else
+// No limit: the styles in this file send their columns as they always did
+#define SEND_COLUMN sendColumnRGB
+#define SUPPLY_FRAME_BEGIN()
+#define SUPPLY_FRAME_END()
+#endif
+
 // Turn off all pixels
 static inline void clear() {
 
@@ -282,13 +376,13 @@ static void sendChar(
         }
 
         while (col--) {
-            sendColumnRGB(pgm_read_byte_near(charbase++), r, g, b);
+            SEND_COLUMN(pgm_read_byte_near(charbase++), r, g, b);
         }
 
         // TODO: FLexible interchar spacing
     }
     if (sendTrailingSpace) {
-        sendColumnRGB(0, r, g, b);    // Interchar space
+        SEND_COLUMN(0, r, g, b);    // Interchar space
     }
 
 }
@@ -331,7 +425,7 @@ sendPaddedString(const char* padding, const char* str, const Font& font, uint sk
 
 void sendEmptyColumns(int columns) {
     while (columns--) {
-        sendColumnRGB(0, 0, 0, 0);
+        SEND_COLUMN(0, 0, 0, 0);
     }
 }
 
@@ -372,6 +466,40 @@ void setupSerial() {
     pinMode(txPin, OUTPUT);
 }
 
+#if LED_LIMITS
+// (defined further down, after AdDisplay.h, whose count of a text's LEDs the marquee uses)
+static uint16_t supplyAllowed(uint16_t litPerSide);
+static uint16_t supplyMostLit(const Font& font, const char* s);
+static uint supplyScale(uint16_t litPerSide, uint r, uint g, uint b, bool fades);
+
+// Dims a colour by just as much as it takes for one LED of it to send no more than `allowed`.
+// A colour that is within it is left as it is, at no cost; the search for a dimming takes about
+// 1.5 ms. Call it before a frame, not in one.
+static void supplyFit(uint16_t allowed, uint& r, uint& g, uint& b) {
+    if ((uint16_t) ledCarried(r) + ledCarried(g) + ledCarried(b) > allowed) {
+        const uint supply = ledBudgetScale(allowed, r, g, b, false, true, BRIGHTNESS_SHIFT, false);
+        r = ledScaled(r, supply);
+        g = ledScaled(g, supply);
+        b = ledScaled(b, supply);
+    }
+}
+#endif
+
+// The columns of one frame of the keyboard echo, from showAsInputStyle()'s own variables: the
+// characters in white (the string, except for its last char, which is '_'), the one at idxToBlink
+// (or all of them in input warning mode) in the blinking colour, and one dark column.
+// It is a macro, not a function, so that the image without limits stays the one it was, byte for
+// byte: the same statements in the same place. Use it with interrupts off, or dry (see supplyColumn).
+#define INPUT_FRAME(blinkR, blinkG, blinkB, whiteR, whiteG, whiteB) \
+    for (uint i = 0; i < length; i++) { \
+        if (i == idxToBlink || mode == KEYBOARD_MODE_WARNING) { \
+            sendChar(str[i], 0, blinkR, blinkG, blinkB); \
+        } else { \
+            sendChar(str[i], 0, whiteR, whiteG, whiteB); \
+        } \
+    } \
+    SEND_COLUMN(0x00, 0, 0, 0xff)
+
 // TODO idxToBlink that isn't always last char
 void showAsInputStyle(const char* str, int idxToBlink, const char mode) {
 
@@ -400,50 +528,97 @@ void showAsInputStyle(const char* str, int idxToBlink, const char mode) {
 ////        }
 //    }
 
+#if LED_LIMITS
+    // What the frame lights on a side is counted from a dry run of it; white, the brightest colour
+    // in it, is brought down to what that many LEDs may send, and so is the blinking colour.
+    supplyDryBegin();
+    INPUT_FRAME(0, 0, 0, 0, 0, 0);
+    const uint16_t allowed = supplyAllowed(supplyDryEnd());
+    uint whiteR = GAMMA(0xff), whiteG = GAMMA(0xff), whiteB = GAMMA(0xff);
+    supplyFit(allowed, whiteR, whiteG, whiteB);
+#endif
+
     while (count > 0) {
         count--;
         uint brightness = ((count % 100) * 256) / 100;
+#if LED_LIMITS
+        uint blinkR = 0xff, blinkG = brightness, blinkB = brightness;
+        supplyFit(allowed, blinkR, blinkG, blinkB);
+#endif
 
         cli();
-        // Send string, except for last char (which is '_')
-        for (uint i = 0; i < length; i++) {
-            int r = 0xff;
-            int g = 0xff;
-            int b = 0xff;
-            // Blink idxToBlink char, or all chars if we're in input warning mode
-            if (i == idxToBlink || mode == KEYBOARD_MODE_WARNING) {
-                sendChar(str[i], 0, 0xff, brightness, brightness);
-            } else {
-                sendChar(str[i], 0, GAMMA(r), GAMMA(g), GAMMA(b));
-            }
-        }
-
-        sendColumnRGB(0x00, 0, 0, 0xff);
-
+        SUPPLY_FRAME_BEGIN();
+#if LED_LIMITS
+        INPUT_FRAME(blinkR, blinkG, blinkB, whiteR, whiteG, whiteB);
+#else
+        INPUT_FRAME(0xff, brightness, brightness, GAMMA(0xff), GAMMA(0xff), GAMMA(0xff));
+#endif
+        SUPPLY_FRAME_END();
         sei();
         show();
     }
 }
 
-#if LED_LIMITS
-// The supply's limits for the styles in this file. The arithmetic is in LedBudget.h; the three
-// functions are defined in AdDisplay.h, further down.
-#include "LedBudget.h"
-static uint16_t supplyMostLit(const Font& font, const char* s);
-static uint16_t supplyAllowed(uint16_t litPerSide);
-static uint supplyScale(uint16_t litPerSide, uint r, uint g, uint b, bool fades);
-// The most LEDs the three digits and the point of the countdown light ("0.00" is 59)
-#define COUNTDOWN_DIGITS_LIT 64
-#endif
+// The columns of one frame of the flashy and countdown styles, from showAsCountdownStyle()'s own
+// variables: the string (in the middle of the panel when the count is not shown), then, with
+// showCount, the count as "d1.d2d3" in digitRed; and the same again for the other panel.
+// It is a macro, not a function, so that the image without limits stays the one it was, byte for
+// byte: the same statements in the same place. Use it with interrupts off, or dry (see supplyColumn).
+#define COUNTDOWN_FRAME(d1, d2, d3, digitRed) \
+    if (showCount) { \
+        sendString(countdownstr, fontStd, 0, brightness, brightness, brightness); \
+    } else { \
+        sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness, startPad, endPad); \
+    } \
+    if (showCount) { \
+        sendChar(d1, 0, digitRed, 0, 0); \
+        sendChar('.', 0, digitRed, 0, 0); \
+        sendChar(d2, 0, digitRed, 0, 0); \
+        sendChar(d3, 0, digitRed, 0, 0, false); \
+        sendString(countdownstr, fontStd, 0, brightness, brightness, brightness); \
+        sendChar(d1, 0, digitRed, 0, 0); \
+        sendChar('.', 0, digitRed, 0, 0); \
+        sendChar(d2, 0, digitRed, 0, 0); \
+        sendChar(d3, 0, digitRed, 0, 0, false); \
+    } else { \
+        sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness, startPad, endPad); \
+    }
 
+// count: at most 1000, so that the first digit of the count is a digit (the callers pass 600 at most)
 void showAsCountdownStyle(const char* countdownstr, unsigned int count = 600, boolean showCount = true) {
     uint startPad, endPad; // for the string in the middle of a panel (when the count is not shown)
     getColumnsToPadForString(countdownstr, fontStd, &startPad, &endPad);
 #if LED_LIMITS
-    // Each side shows the string (and the count): at its brightest it is white. How far that has to
-    // come down is worked out here, once, before any frame; the fade then runs below it.
-    const uint supply = supplyScale(supplyMostLit(fontStd, countdownstr) + (showCount ? COUNTDOWN_DIGITS_LIT : 0),
-                                    0xff, 0xff, 0xff, true);
+    // What a frame lights on a side is counted from dry runs of it. The picture is the same in
+    // every frame but for the count's digits. First the frame with blanks for digits: the string,
+    // which at its brightest is white (the count's point is counted with it). Then, with a count, ten frames
+    // laid over that, "0.00" to "9.99", so that each place holds every digit it will ever show:
+    // what they add are the digits' LEDs.
+    // A digit's LED is red only, and never more than half of what a white LED may send:
+    //  - while the count runs it is 0x80 dimmed like the string's white: with the white's top at
+    //    s, at most 0.75 (s + 1) as sent (half of s + 1, and sendBitx8 can make it half as much
+    //    again), where a white LED may send 3 s or more; and nothing at all when s is 0;
+    //  - in the farewell blink it is the red of the string's white: a third of it.
+    // So a side counts as its string's LEDs and half of its digits' (rounded up). How far white
+    // has to come down for that many is worked out here, once, before any frame; the fade then
+    // runs below it (so every brightness below has to fit as well).
+    uint16_t litString[NUM_PANELS], litAll[NUM_PANELS];
+    supplyDryBegin();
+    {
+        const uint brightness = 0; // dry: the colours do not matter
+        COUNTDOWN_FRAME(' ', ' ', ' ', 0)
+        supplyDryLit(litString);
+        for (uint digit = '0'; showCount && digit <= '9'; digit++) {
+            supplyFrameBegin();
+            COUNTDOWN_FRAME(digit, digit, digit, 0)
+        }
+    }
+    supplyDryLit(litAll);
+    supplyDryEnd();
+    for (uint side = 0; side < NUM_PANELS; side++) {
+        litAll[side] = litString[side] + (litAll[side] - litString[side] + 1) / 2;
+    }
+    const uint supply = supplyScale(litAll[0] > litAll[1] ? litAll[0] : litAll[1], 0xff, 0xff, 0xff, true);
     const uint countRed = ledScaled(0x80, supply);
 #else
     const uint countRed = 0x80;
@@ -469,35 +644,9 @@ void showAsCountdownStyle(const char* countdownstr, unsigned int count = 600, bo
 #endif
 
         cli();
-        if (showCount) {
-            sendString(countdownstr, fontStd, 0, brightness, brightness, brightness);
-        } else {
-            // align string to middle if we're not showing the countdown.
-            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness, startPad, endPad);
-        }
-
-        //  sendChar( '0' , 0 , 0x80, 0 , 0 );
-
-        if (showCount) {
-//            sendColumnRGB(0x00, 0, 0, 0xff);
-            //Panel A:
-            sendChar(char1, 0, countRed, 0, 0);
-            sendChar('.', 0, countRed, 0, 0);
-            sendChar(char2, 0, countRed, 0, 0);
-            sendChar(char3, 0, countRed, 0, 0, false);
-
-            //Other panel:
-            sendString(countdownstr, fontStd, 0, brightness, brightness, brightness);
-            sendChar(char1, 0, countRed, 0, 0);
-            sendChar('.', 0, countRed, 0, 0);
-            sendChar(char2, 0, countRed, 0, 0);
-            sendChar(char3, 0, countRed, 0, 0, false);
-
-        } else {
-            // show the string on the other panel too if we're not showing the count
-            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness, startPad, endPad);
-        }
-
+        SUPPLY_FRAME_BEGIN();
+        COUNTDOWN_FRAME(char1, char2, char3, countRed)
+        SUPPLY_FRAME_END();
         sei();
         delayMicroseconds(COUNTDOWN_DELAY);
         show();
@@ -516,35 +665,9 @@ void showAsCountdownStyle(const char* countdownstr, unsigned int count = 600, bo
 #endif
 
         cli();
-        if (showCount) {
-            sendString(countdownstr, fontStd, 0, brightness, brightness, brightness);
-        } else {
-            // align string to middle if we're not showing the countdown.
-            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness, startPad, endPad);
-        }
-
-//        sendColumnRGB(0x00, 0, 0, 0xff);
-
-        if (showCount) {
-//            sendColumnRGB(0x00, 0, 0,
-//                          0xff);   // We need to quickly send a blank byte just to keep from missing our deadlne.
-
-            sendChar('0', 0, brightness, 0, 0);
-            sendChar('.', 0, brightness, 0, 0);
-            sendChar('0', 0, brightness, 0, 0);
-            sendChar('0', 0, brightness, 0, 0, false);
-
-            //Other panel:
-            sendString(countdownstr, fontStd, 0, brightness, brightness, brightness);
-            sendChar('0', 0, brightness, 0, 0);
-            sendChar('.', 0, brightness, 0, 0);
-            sendChar('0', 0, brightness, 0, 0);
-            sendChar('0', 0, brightness, 0, 0, false);
-        } else {
-            // show the string on the other panel too if we're not showing the count
-            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness, startPad, endPad);
-        }
-
+        SUPPLY_FRAME_BEGIN();
+        COUNTDOWN_FRAME('0', '0', '0', brightness)
+        SUPPLY_FRAME_END();
         sei();
         delayMicroseconds(COUNTDOWN_DELAY);
         show();
@@ -597,11 +720,11 @@ static inline void sendIcon(const uint* fontbase, uint which, int8_t shift, uint
         uint shiftabs = -1 * shift;
         while (width--) {
             uint col = pgm_read_byte_near(charbase++);
-            sendColumnRGB(col << shiftabs, r, g, b);
+            SEND_COLUMN(col << shiftabs, r, g, b);
         }
     } else {
         while (width--) {
-            sendColumnRGB((pgm_read_byte_near(charbase++) >> shift) & onBits, r, g, b);
+            SEND_COLUMN((pgm_read_byte_near(charbase++) >> shift) & onBits, r, g, b);
         }
     }
 
@@ -611,6 +734,31 @@ static inline void sendIcon(const uint* fontbase, uint which, int8_t shift, uint
 // the clock that makes their "dly" real milliseconds and the scrolling of a text wider than a panel.
 // They are in their own file so that the host test can run them against a fake sign and a fake timer.
 #include "AdDisplay.h"
+
+#if LED_LIMITS
+// For the styles in this file a frame's first green byte starts with whatever is in the carry
+// flag, so green is taken as carried: the most it can be.
+
+// The most LEDs one side can have lit while a marquee scrolls this text: the fullest 60 columns
+// in a row of it. A marquee frame is one run of consecutive columns of "blank padding, then the
+// text" (sendPaddedString() starts somewhere in it and stops after some characters), a side shows
+// 60 consecutive columns of the frame, and the columns the frame does not reach are sent black.
+static uint16_t supplyMostLit(const Font& font, const char* s) {
+    return adMostLit(font, fontMetrics(font), s);
+}
+
+// What one lit LED may send, its three values added up, when a side has litPerSide LEDs lit
+static uint16_t supplyAllowed(uint16_t litPerSide) {
+    return ledAllowance(litPerSide, LED_LOAD_OF_MA(LED_CURRENT_LIMIT_MA), LED_LOAD_OF_MA(LED_CURRENT_LIMIT_SIDE_MA));
+}
+
+// How far a picture with litPerSide LEDs lit on a side, all in this colour, has to be dimmed
+// (255 = not at all). `fades`: the picture is also shown at every brightness below this one (the
+// flashy fade), so each of those has to fit too.
+static uint supplyScale(uint16_t litPerSide, uint r, uint g, uint b, bool fades) {
+    return ledBudgetScale(supplyAllowed(litPerSide), r, g, b, false, true, BRIGHTNESS_SHIFT, fades);
+}
+#endif
 
 void showIconInvaders(const Icon* icon, Color iconColor) {
     Color ic = iconColor;
@@ -624,10 +772,12 @@ void showIconInvaders(const Icon* icon, Color iconColor) {
 #if LED_LIMITS
     // The most LEDs a side can have lit: the fuller of the icon's two pictures, as often as an icon
     // (with the 4 dark columns after it) fits on a side, and one more that is cut by the edge.
+    // (All eight bits of a column are counted: the bottom one drives no LED where it is, but the
+    // rows move up as the icons come in, and it then lights the one above.)
     uint16_t iconLit[2] = {0, 0};
     for (uint f = 0; f < 2; f++) {
         for (uint c = 0; c < iconWidth; c++) {
-            iconLit[f] += adBits(pgm_read_byte_near(icon->data + f * iconWidth + c));
+            iconLit[f] += ledBits(pgm_read_byte_near(icon->data + f * iconWidth + c));
         }
     }
     const uint16_t litPerSide = (iconLit[0] > iconLit[1] ? iconLit[0] : iconLit[1]) *
@@ -658,12 +808,13 @@ void showIconInvaders(const Icon* icon, Color iconColor) {
             // Now slowly move aliens
             // work our way though the aliens moving each one to the left
             cli();
+            SUPPLY_FRAME_BEGIN();
 
             // Start with margin
             uint margin = p;
 
             while (margin--) {
-                sendColumnRGB(0, 0x00, 0x00, 0x00);
+                SEND_COLUMN(0, 0x00, 0x00, 0x00);
             }
 
             for (uint l = 0; l < acount; l++) {
@@ -680,6 +831,7 @@ void showIconInvaders(const Icon* icon, Color iconColor) {
                 sendEmptyColumns(4);
             }
 
+            SUPPLY_FRAME_END();
             sei();
 
             delay(INVADER_DELAY);
@@ -724,7 +876,7 @@ void marquee(const char* marqueePtr, const Font& font = fontStd, bool pad = true
     unsigned long delta;
     uint charWidth;
 #if LED_LIMITS
-    // What one lit LED may send when a side shows the fullest 60 columns of this text
+    // What one lit LED may send when a side shows the fullest 60 columns of this text (see supplyMostLit)
     const uint16_t allowed = supplyAllowed(supplyMostLit(font, marqueePtr));
 #endif
 
@@ -795,20 +947,18 @@ void marquee(const char* marqueePtr, const Font& font = fontStd, bool pad = true
             }
 #if LED_LIMITS
             // The text's own colour is seldom over the limit; the white of a beat flash is. Only then
-            // is the dimming worked out (under 1 ms, before the frame): the flash stays a flash, as
-            // bright as the supply allows, and fades into the text's colour as before.
-            if ((uint16_t) ledCarried(r) + ledCarried(g) + ledCarried(b) > allowed) {
-                const uint supply = ledBudgetScale(allowed, r, g, b, false, true, BRIGHTNESS_SHIFT, false);
-                r = ledScaled(r, supply);
-                g = ledScaled(g, supply);
-                b = ledScaled(b, supply);
-            }
+            // is the dimming worked out (about 1.5 ms, before the frame, so such a step is that much
+            // longer): the flash stays a flash, as bright as the supply allows, and fades into the
+            // text's colour as before.
+            supplyFit(allowed, r, g, b);
 #endif
 
             cli();
+            SUPPLY_FRAME_BEGIN();
 
             sendPaddedString(paddingPtr, marqueePtr, font, step, r, g, b);
 
+            SUPPLY_FRAME_END();
             sei();
 
             delay(marqueeDelay); // speed. higher = slower
@@ -1035,7 +1185,19 @@ void loop() {
                         break;
                     }
                     default: {
+#if LED_LIMITS
+                        // The text is put together in a buffer of its own. (The line below writes
+                        // the message's text into the memory after a string constant, more of it
+                        // with every such message: over the fonts, over the brightness shift. A
+                        // limit cannot hold on a sign whose memory is overwritten. It is left as it
+                        // is where there are no limits, so that that image stays the one it was.)
+                        char invalid[14 + 21 + 1];
+                        strcpy_P(invalid, PSTR("INVALID ICON: "));
+                        strncat(invalid, str, 21);
+                        showAsCountdownStyle(invalid, 100);
+#else
                         showAsCountdownStyle(strcat("INVALID ICON: ", str), 100);
+#endif
                         break;
                     }
                 }
