@@ -2,6 +2,8 @@
 #
 #   make            build the firmware image and the emulator
 #   make firmware   build only the firmware (build/firmware/LED_Marquee.elf and .hex)
+#   make firmware-debug   the same sketch with FW_DEBUG_FLAGS (the chooser's measurements
+#                   on panel B), in build/firmware-debug/. For the bench, not for a show
 #   make run        live terminal view (start ./fake_app.py in another terminal)
 #   make test       the smoke test (no human needed)
 #   make clean      delete build/ (third_party/ is kept)
@@ -41,7 +43,7 @@ SIM_WARN  := -w
 EMU_NAMES := main ihex reply ws2812 softuart link view record
 EMU_OBJS  := $(EMU_NAMES:%=$(OBJ)/%.o)
 
-.PHONY: all firmware emu run test clean
+.PHONY: all firmware firmware-debug emu run test clean
 all: firmware emu
 
 # ---- firmware ---------------------------------------------------------------
@@ -54,6 +56,19 @@ firmware: $(FW_DIR)/Makefile
 	$(MAKE) --no-print-directory -C $(FW_DIR) LED_Marquee
 	@$(AVR_SIZE) $(FW_ELF)
 	@shasum -a 256 $(FW_HEX)
+
+# The same sketch with extra compiler flags, in its own build tree.
+FW_DEBUG_FLAGS ?= -DCHOOSER_DEBUG_PANEL_B=1
+FW_DEBUG_DIR   := $(BUILD)/firmware-debug
+
+$(FW_DEBUG_DIR)/Makefile: firmware/CMakeLists.txt firmware/toolchain.cmake
+	cmake -S firmware -B $(FW_DEBUG_DIR) -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Debug \
+	      -DARDUINO_SDK_PATH=$(ARDUINO_SDK) "-DSIGN_FLAGS=$(FW_DEBUG_FLAGS)"
+
+firmware-debug: $(FW_DEBUG_DIR)/Makefile
+	$(MAKE) --no-print-directory -C $(FW_DEBUG_DIR) LED_Marquee
+	@$(AVR_SIZE) $(FW_DEBUG_DIR)/LED_Marquee.elf
+	@shasum -a 256 $(FW_DEBUG_DIR)/LED_Marquee.hex
 
 # ---- emulator ---------------------------------------------------------------
 emu: $(EMU)

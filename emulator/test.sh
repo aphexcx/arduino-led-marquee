@@ -12,9 +12,13 @@
 #      (tests/cli_test.py, tests/record_fail_test.py)
 #   4. the serial link's timing model against the real firmware, with clients
 #      that come and go (tests/link_test.py)
+#   5. chooser contract version 3 on the real firmware, if this firmware has it:
+#      a scripted app that pushes (tests/push_test.py), then fake_app.py
+#      --contract 3 at real-time speed, checked the same way
 #
 # The TCP ports can be moved with SIGN_EMU_TEST_PORT (default 14417; the link
-# tests use the eleven after it) so two lanes can run the tests at once.
+# tests use the eleven after it, the push tests the two after those) so two
+# lanes can run the tests at once.
 set -eu
 cd "$(dirname "$0")"
 
@@ -81,5 +85,37 @@ python3 tests/record_fail_test.py build/sign-emu "$HEX" build/tests/recfail
 
 echo "== serial link timing"
 python3 tests/link_test.py build/sign-emu "$HEX" build/tests/link $((PORT + 1))
+
+if grep -q CHOOSER_ATTN_FIRST_BYTE_MS ../LED_Marquee.ino; then
+    echo "== chooser contract 3: a scripted app that pushes"
+    python3 tests/push_test.py run build/sign-emu "$HEX" ../Fonts.h build/tests/push $((PORT + 12))
+
+    echo "== chooser contract 3: fake_app.py --contract 3, at real-time speed"
+    # The fake app counts this computer's seconds, so the run is paced. Request 1
+    # brings the first chooser message, request 2 is the sign asking after the
+    # app left chooser mode, request 3 ends the run.
+    build/sign-emu --headless --speed 1 --link-directives --port $((PORT + 13)) --wait-client 30 \
+        --until-requests 3 --duration 120 --frames "$OUT/chooser_push.jsonl" \
+        "$HEX" 2> "$OUT/chooser_push.log" &
+    emu=$!
+    if ! ./fake_app.py --quiet --contract 3 --port $((PORT + 13)) --connect-timeout 30 \
+            playlists/chooser_push.jsonl; then
+        kill "$emu" 2>/dev/null || true
+        echo "FAILED: the fake app could not run"
+        exit 1
+    fi
+    status=0
+    wait "$emu" || status=$?
+    cat "$OUT/chooser_push.log"
+    if [ "$status" -ne 0 ]; then
+        echo "FAILED: sign-emu exited with status $status"
+        exit 1
+    fi
+    python3 tests/push_test.py check ../Fonts.h "$OUT/chooser_push.jsonl"
+else
+    echo "== chooser contract 3: SKIPPED, this firmware does not have it (no"
+    echo "   CHOOSER_ATTN_FIRST_BYTE_MS in ../LED_Marquee.ino). The break directive itself was"
+    echo "   tested above, on the wire."
+fi
 
 echo "ALL TESTS PASSED"

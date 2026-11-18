@@ -162,9 +162,16 @@ def main():
         n = len(expected)
         inside = [f for f in frames if start < f.t <= end + 0.001]
         exact = [f for f in inside if f.mask[:n] == expected]
-        check(bool(exact), 'a frame shows "%s", one blank column, then "%s" from column 0 '
-                           '(%d of %d frames; the rest are the fade to black)'
-              % (m["flashy"], m["str"], len(exact), len(inside)))
+        how = "%d of %d frames; the rest are the fade to black" % (len(exact), len(inside))
+        if not exact and n > PANEL:
+            # Firmware with the scrolling chooser keeps it on side A: a text too
+            # wide for the space beside the count is cut at column 59 and scrolls.
+            exact = [f for f in inside if f.mask[:PANEL] == expected[:PANEL]
+                     and not any(f.mask[PANEL:])]
+            how = ("cut at the edge of side A, where this firmware scrolls it: %d of %d frames"
+                   % (len(exact), len(inside)))
+        check(bool(exact), 'a frame shows "%s", one blank column, then "%s" from its first '
+                           'column (%s)' % (m["flashy"], m["str"], how))
         if exact:
             red = exact[0].colours(0, len(count_cols))
             check(all(c[2:] == "0000" and c[:2] != "00" for c in red),
