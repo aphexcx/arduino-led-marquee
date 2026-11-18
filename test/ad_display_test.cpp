@@ -14,6 +14,11 @@
 // column arithmetic under test.
 // Not covered here: AVR integer widths (int is 32 bits on the host), real pixel timing, the colour
 // quirk of sendBitx8. emulator/tests/ads_test.py runs the real firmware image for those.
+//
+// The supply's settings are off, as in the sketch. To run everything with them on, add for example
+//   -DLED_CURRENT_LIMIT_MA=3000 -DAD_RAMP_MS=100     or     -DLED_CURRENT_LIMIT_SIDE_MA=1200
+// (test/run.sh does): every frame's load is then added up and held to the limits, and the colours
+// are compared with a dimming worked out here the slow way.
 
 #undef NDEBUG
 
@@ -46,6 +51,15 @@
 #define AD_SCROLL_HOLD_MS 600
 #define AD_SCROLL_STEP_MS 35
 #define AD_WAVE_FRAME_MS 10
+#ifndef LED_CURRENT_LIMIT_MA
+#define LED_CURRENT_LIMIT_MA 0
+#endif
+#ifndef LED_CURRENT_LIMIT_SIDE_MA
+#define LED_CURRENT_LIMIT_SIDE_MA 0
+#endif
+#ifndef AD_RAMP_MS
+#define AD_RAMP_MS 0
+#endif
 
 // The font tables are what they should be: 96 characters each, the standard heart 2 columns wider
 static_assert(sizeof(FontStd5x7) == 95 * 5 + 7, "standard font: 0x20 to 0x7E and the heart");
@@ -217,6 +231,72 @@ static void printSide(const std::vector<uint8_t>& side) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The model of the supply's settings: written again here, the slow way, not taken from LedBudget.h
+// ---------------------------------------------------------------------------------------------
+static int modelDim(int v, int scale) { return v * (scale + 1) / 256; }
+
+static int modelCarried(int v) { return v | (v >> 1); }
+
+static int modelBits(uint8_t v) {
+    int n = 0;
+    for (int bit = 0; bit < 8; bit++) n += (v >> bit) & 1;
+    return n;
+}
+
+// What a frame asks of the supply on one side: every lit LED's three values as they go out (red
+// and blue carried; green carried when the code asked for the carry before that column)
+static long sideLoad(const Frame& f, int side) {
+    long load = 0;
+    for (size_t c = 0; c < 60; c++) {
+        const Led& led = f.cols[side * 60 + c];
+        if (!led.row) continue;
+        int green = led.carry == 1 ? modelCarried(led.g) : led.g;
+        load += (long) modelBits(led.row) * (modelCarried(led.r) + green + modelCarried(led.b));
+    }
+    return load;
+}
+
+static const long LIMIT_BOTH = (long) LED_CURRENT_LIMIT_MA * 255 / 20;
+static const long LIMIT_SIDE = (long) LED_CURRENT_LIMIT_SIDE_MA * 255 / 20;
+static const int RAMP_FRAMES = AD_RAMP_MS / AD_WAVE_FRAME_MS;
+static long dimmedRuns = 0, undimmedRuns = 0;
+
+// How far a text in this colour must be dimmed (255 = not at all): the most LEDs any 60 columns
+// of it light, what each may send under the limits, and the brightest dimming that sends no more.
+// wave: a chonky text, whose red can be any value and whose green goes out carried.
+static int modelScale(const std::vector<uint8_t>& cols, int r, int g, int b, bool wave) {
+    long most = 0;
+    for (size_t from = 0; from < cols.size(); from++) {
+        long lit = 0;
+        for (size_t c = from; c < cols.size() && c < from + 60; c++) lit += modelBits(cols[c]);
+        if (lit > most) most = lit;
+    }
+    long allowed = 765;
+    if (most > 0 && LIMIT_BOTH > 0 && LIMIT_BOTH / (2 * most) < allowed) allowed = LIMIT_BOTH / (2 * most);
+    if (most > 0 && LIMIT_SIDE > 0 && LIMIT_SIDE / most < allowed) allowed = LIMIT_SIDE / most;
+    int best = 0;
+    for (int scale = 0; scale <= 255; scale++) {
+        int red = modelCarried(modelDim(r, scale));
+        if (wave) {
+            red = 0;
+            for (int v = 0; v <= 255; v++) {
+                if (modelCarried(modelDim(v, scale)) > red) red = modelCarried(modelDim(v, scale));
+            }
+        }
+        int green = wave ? modelCarried(modelDim(g, scale)) : modelDim(g, scale);
+        if (red + green + modelCarried(modelDim(b, scale)) <= allowed) best = scale;
+    }
+    (best < 255 ? dimmedRuns : undimmedRuns)++;
+    return best;
+}
+
+// The dimming of frame number `frame` of a chonky text that comes on over the ramp
+static int modelRamp(int scale, size_t frame) {
+    if (RAMP_FRAMES < 2 || frame + 1 >= (size_t) RAMP_FRAMES) return scale;
+    return scale * (int) (frame + 1) / RAMP_FRAMES;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Running a message
 // ---------------------------------------------------------------------------------------------
 struct Run {
@@ -256,6 +336,9 @@ static Run runWith(void (*show)(const char*, unsigned int), const char* text, un
             assert(a.row == b.row);
             if (a.row) assert(a.r == b.r && a.g == b.g && a.b == b.b && a.carry == b.carry);
         }
+        // ... and no frame asks more of the supply than the limits allow, one side or both
+        if (LIMIT_SIDE > 0) assert(sideLoad(f, 0) <= LIMIT_SIDE && sideLoad(f, 1) <= LIMIT_SIDE);
+        if (LIMIT_BOTH > 0) assert(sideLoad(f, 0) + sideLoad(f, 1) <= LIMIT_BOTH);
     }
     return r;
 }
@@ -321,6 +404,8 @@ static void checkOneByOne(const std::string& text, unsigned int dly) {
     size_t width = whole.empty() ? 0 : whole.size() - 1;
     size_t pad = width < 60 ? (60 - width) / 2 : 0;
     std::vector<Step> steps = modelOneByOne(text);
+    // one brightness for the whole message: the finished text must be within the limits
+    const int dim = modelScale(whole, GAMMA(255), GAMMA(120), GAMMA(0), false);
 
     assert(r.clears == 1);
     assert(r.frames.size() == steps.size());
@@ -335,7 +420,8 @@ static void checkOneByOne(const std::string& text, unsigned int dly) {
         // without the carry, as this style always sent it
         for (size_t c = 0; c < 120; c++) {
             if (f.cols[c].row) {
-                assert(f.cols[c].r == GAMMA(255) && f.cols[c].g == GAMMA(120) && f.cols[c].b == GAMMA(0));
+                assert(f.cols[c].r == modelDim(GAMMA(255), dim) && f.cols[c].g == modelDim(GAMMA(120), dim) &&
+                       f.cols[c].b == modelDim(GAMMA(0), dim));
                 assert(f.cols[c].carry == 0);
             }
         }
@@ -436,13 +522,15 @@ static void testOneByOneLong() {
 // Checks frame number `k` of a run: the picture at `offset`, and the wave: red is the low byte of
 // dly, less 10 per frame, plus 10 per column; green and blue are the message's; green starts with
 // the carry, as this style always sent it.
-static void checkWaveFrame(const Frame& f, const std::vector<uint8_t>& text, size_t offset, unsigned int dly, size_t k) {
+// `dim` is how far this frame is dimmed (255 = not at all).
+static void checkWaveFrame(const Frame& f, const std::vector<uint8_t>& text, size_t offset, unsigned int dly, size_t k,
+                           int dim) {
     assert(rowsOfSide(f, 0) == modelSide(text, offset, 0));
     for (size_t c = 0; c < 120; c++) {
         const Led& led = f.cols[c];
         if (!led.row) continue;
-        assert(led.r == (uint8_t) (dly - 10 * k + 10 * (c % 60)));
-        assert(led.g == 161 && led.b == 242);
+        assert(led.r == modelDim((uint8_t) (dly - 10 * k + 10 * (c % 60)), dim));
+        assert(led.g == modelDim(161, dim) && led.b == modelDim(242, dim));
         assert(led.carry == 1);
     }
 }
@@ -452,6 +540,8 @@ static void checkChonky(const std::string& text, unsigned int dly) {
     std::vector<uint8_t> cols = modelColumns(MODEL_CHONK, text);
     size_t ink = modelInk(cols);
     size_t last = ink > 60 ? ink - 60 : 0; // where the text ends up: its last lit column in the panel's last
+    // one brightness for the whole message, reached over the ramp
+    const int dim = modelScale(cols, 0, 161, 242, true);
 
     assert(r.clears == 0);
     assert(!r.frames.empty());
@@ -474,7 +564,7 @@ static void checkChonky(const std::string& text, unsigned int dly) {
             movedUs = f.sentUs;
             if (offset == last) firstAtEnd = k;
         }
-        checkWaveFrame(f, cols, offset, dly, k);
+        checkWaveFrame(f, cols, offset, dly, k, modelRamp(dim, k));
         // the wave never stops: a frame every 10 ms, or every 8.75 ms while the text moves
         if (k > 0) {
             uint64_t gap = f.sentUs - r.frames[k - 1].sentUs;
@@ -577,6 +667,7 @@ static void checkNudge(const std::string& text, unsigned int dly) {
     // its blank column, and so is an empty text: 1 position
     size_t positions = text.empty() || text[0] == '\x0B' ? 1 : 9;
     Run r = runWith(showCNudge, text.c_str(), dly);
+    const int dim = modelScale(cols, 0, 161, 242, true);
     size_t k = 0;
     for (size_t skip = 0; skip < positions; skip++) {
         assert(k < r.frames.size());
@@ -586,7 +677,8 @@ static void checkNudge(const std::string& text, unsigned int dly) {
         // position has no next one: every frame that is left must be its own)
         while (k < r.frames.size() &&
                (n == 0 || skip + 1 == positions || rowsOfSide(r.frames[k], 0) != modelSide(cols, skip + 1, 0))) {
-            checkWaveFrame(r.frames[k], cols, skip, dly, n); // the wave starts again at every position
+            // the wave starts again at every position; the text comes on (the ramp) only at the first
+            checkWaveFrame(r.frames[k], cols, skip, dly, n, skip == 0 ? modelRamp(dim, n) : dim);
             k++;
             n++;
         }
@@ -641,7 +733,16 @@ int main(int argc, char** argv) {
     testChonkyLong();
     testChonkyNudge();
     testRandom();
-    printf("ad_display_test: all %d tests passed (%llu looks at the timer, %.0f s of sign time)\n", tests,
+    // with a limit set, the texts above it were dimmed and those under it were not
+    const bool limits = LIMIT_BOTH + LIMIT_SIDE > 0;
+    if (limits) assert(dimmedRuns > 100 && undimmedRuns > 100);
+    else assert(dimmedRuns == 0);
+    printf("ad_display_test: all %d tests passed (%llu looks at the timer, %.0f s of sign time)", tests,
            (unsigned long long) timerReads, ms(nowUs) / 1000);
+    if (limits || RAMP_FRAMES > 1) {
+        printf("; limit %d mA, a side %d mA, ramp %d ms: %ld messages dimmed, %ld not", LED_CURRENT_LIMIT_MA,
+               LED_CURRENT_LIMIT_SIDE_MA, AD_RAMP_MS, dimmedRuns, undimmedRuns);
+    }
+    printf("\n");
     return 0;
 }

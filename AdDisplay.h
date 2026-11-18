@@ -20,6 +20,7 @@
 #define LED_MARQUEE_ADDISPLAY_H
 
 #include "TextWindow.h"
+#include "LedBudget.h"
 
 // Sending a frame and latching it takes 4.9 ms, so nothing can be paced faster than that
 static_assert(AD_WAVE_FRAME_MS >= 6 && AD_WAVE_FRAME_MS <= 100, "AD_WAVE_FRAME_MS must be 6 to 100");
@@ -42,6 +43,41 @@ static_assert(AD_SCROLL_SUBFRAMES >= 1, "AD_SCROLL_STEP_MS must be at least half
 
 // "All the characters" for adDrawFrame's `shown`
 #define AD_SHOW_ALL 0xFFFF
+
+// ---------------------------------------------------------------------------------------------
+// The supply. Two settings, both off (0) unless the sketch says otherwise; with both off none of
+// the code below them is compiled and the ads are sent exactly as without it.
+//
+// LED_CURRENT_LIMIT_MA: the most current the LEDs of one frame of an ad may draw, both sides
+// together, by the model in LedBudget.h. LED_CURRENT_LIMIT_SIDE_MA: the most for one side. (Both
+// sides show the same picture, so one side is half the frame; which of the two limits bites
+// depends on how the sign is fed.) Before a message's first frame the fullest 60 columns of its
+// text are counted, and if that many LEDs in the message's colour would be above a limit, the
+// colour is dimmed for the whole message (one brightness from its first frame to its last) by
+// just as much as it takes.
+//
+// AD_RAMP_MS: a chonky text does not come on in one frame but rises to its brightness over this
+// long, a step every frame. (One-by-one texts come on a letter at a time anyway.)
+// ---------------------------------------------------------------------------------------------
+#ifndef LED_CURRENT_LIMIT_MA
+#define LED_CURRENT_LIMIT_MA 0
+#endif
+#ifndef LED_CURRENT_LIMIT_SIDE_MA
+#define LED_CURRENT_LIMIT_SIDE_MA 0
+#endif
+#ifndef AD_RAMP_MS
+#define AD_RAMP_MS 0
+#endif
+static_assert(LED_CURRENT_LIMIT_MA >= 0 && LED_CURRENT_LIMIT_MA <= 60000, "LED_CURRENT_LIMIT_MA must be 0 (off) to 60000");
+static_assert(LED_CURRENT_LIMIT_SIDE_MA >= 0 && LED_CURRENT_LIMIT_SIDE_MA <= 60000,
+              "LED_CURRENT_LIMIT_SIDE_MA must be 0 (off) to 60000");
+static_assert(AD_RAMP_MS >= 0 && AD_RAMP_MS / AD_WAVE_FRAME_MS <= 255,
+              "AD_RAMP_MS must be 0 (off) to 255 frames of the wave");
+
+#define AD_LIMITS (LED_CURRENT_LIMIT_MA > 0 || LED_CURRENT_LIMIT_SIDE_MA > 0)
+#define AD_RAMP_FRAMES (AD_RAMP_MS / AD_WAVE_FRAME_MS)
+// true when the values of an ad can be other than the message's
+#define AD_DIMS (AD_LIMITS || AD_RAMP_FRAMES > 1)
 
 // ---------------------------------------------------------------------------------------------
 // The clock: Timer1, free running, 16 MHz / 64 = 250 counts a millisecond. No interrupt. The
@@ -99,6 +135,14 @@ static void adWaitUntil(uint32_t ticks) {
 #define AD_GREEN_STARTS_WITH_CARRY(set) do { if (set) { asm volatile("sec"); } else { asm volatile("clc"); } } while (0)
 #endif
 
+#if AD_DIMS
+// How far the supply's limit dims the chonky text being shown (255 = not at all), whether it
+// comes up over AD_RAMP_MS, and what that makes of the frame being sent
+static uint adTextScale = 255;
+static bool adRamp = false;
+static uint adWaveScale = 255;
+#endif
+
 // Sends one side of the sign: `pad` blank columns, then the text from the cursor on, up to the
 // panel's edge. Characters from number `shown` on are not drawn yet (blank). With `wave`, red goes
 // up by 10 from one column to the next, as the chonky style always did. Blank columns are black.
@@ -117,8 +161,16 @@ static void adSendSide(const Font& font, const TextMetrics& m, const char* s, Te
                 row = pgm_read_byte_near(font.data + ch * font.width + cur.col);
             }
         }
+#if AD_DIMS
+        // The wave's red is dimmed here, column by column; the caller has dimmed everything else.
+        // This has to come before the carry flag is set for the column: the arithmetic changes it.
+        const uint red = wave ? ledScaled(r, adWaveScale) : r;
+        AD_GREEN_STARTS_WITH_CARRY(wave);
+        sendColumnRGB(row, red, g, b);
+#else
         AD_GREEN_STARTS_WITH_CARRY(wave);
         sendColumnRGB(row, r, g, b);
+#endif
         if (wave) {
             r += 10;
         }
@@ -162,6 +214,56 @@ static uint16_t adInkCols(const Font& font, const TextMetrics& m, const char* s)
     return ink;
 }
 
+#if AD_LIMITS
+static uint adBits(uint v) {
+    uint n = 0;
+    for (; v; v &= v - 1) {
+        n++;
+    }
+    return n;
+}
+
+// The lit LEDs of the cursor's column of the text
+static uint adLitInColumn(const Font& font, const char* s, const TextCursor& cur) {
+    if (!textCursorLit(cur) || !textInFont(s[cur.index])) {
+        return 0;
+    }
+    return adBits(pgm_read_byte_near(font.data + (uint) ((uint) s[cur.index] - TEXT_CHAR_FIRST) * font.width + cur.col));
+}
+
+// The most LEDs one side of the sign can have lit while it shows this text: the fullest 60
+// columns of the text (wherever it scrolls to, it never shows more). Walks the whole text once.
+static uint16_t adMostLit(const Font& font, const TextMetrics& m, const char* s) {
+    TextCursor lead = textSeek(m, s, 0); // the column that comes into the window
+    TextCursor trail = lead;             // the column that leaves it
+    uint16_t cols = 0;
+    uint16_t lit = 0;
+    uint16_t most = 0;
+    while (s[lead.index]) {
+        lit += adLitInColumn(font, s, lead);
+        textCursorNext(m, s, lead);
+        if (cols >= COLUMNS_PER_PANEL) {
+            lit -= adLitInColumn(font, s, trail);
+            textCursorNext(m, s, trail);
+        } else {
+            cols++;
+        }
+        if (lit > most) {
+            most = lit;
+        }
+    }
+    return most;
+}
+
+// How far this text in this colour has to be dimmed to stay within the supply's limits (255 = not
+// at all). With `wave` it is a chonky text: red is the wave, green goes out carried.
+static uint adBudgetScale(const Font& font, const TextMetrics& m, const char* s, uint r, uint g, uint b, bool wave) {
+    const uint16_t allowed = ledAllowance(adMostLit(font, m, s), LED_LOAD_OF_MA(LED_CURRENT_LIMIT_MA),
+                                          LED_LOAD_OF_MA(LED_CURRENT_LIMIT_SIDE_MA));
+    return ledBudgetScale(allowed, r, g, b, wave, wave);
+}
+#endif
+
 // ---------------------------------------------------------------------------------------------
 // 'O': the letters appear one at a time (CHARS_ONEBYONE_DELAY ms each), centred when the text fits.
 // When the next letter does not fit any more, the text moves left a column at a time
@@ -171,9 +273,18 @@ static uint16_t adInkCols(const Font& font, const TextMetrics& m, const char* s)
 // ---------------------------------------------------------------------------------------------
 void showCharsOneByOneOnBothPanels(const char* str, Color textColor, unsigned int delayMs) {
     const TextMetrics m = fontMetrics(fontStd);
-    const uint r = GAMMA(textColor.r);
-    const uint g = GAMMA(textColor.g);
-    const uint b = GAMMA(textColor.b);
+    uint r = GAMMA(textColor.r);
+    uint g = GAMMA(textColor.g);
+    uint b = GAMMA(textColor.b);
+#if AD_LIMITS
+    {
+        // the finished text (or the fullest stretch of a long one) must be within the supply's limits
+        const uint scale = adBudgetScale(fontStd, m, str, r, g, b, false);
+        r = ledScaled(r, scale);
+        g = ledScaled(g, scale);
+        b = ledScaled(b, scale);
+    }
+#endif
     uint startPad, endPad; // no padding when the text is wider than a panel
     textCentre(textCols(m, str), COLUMNS_PER_PANEL, &startPad, &endPad);
 
@@ -223,6 +334,8 @@ void showCharsOneByOneOnBothPanels(const char* str, Color textColor, unsigned in
 // With `another`, the caller draws a different picture straight after this one (scrollCols is 0
 // then). The return then comes delayMs after this call began, so that the next picture, which
 // takes as long to send as this one did, appears delayMs after this one appeared.
+// (With the supply's settings on: the text is dimmed by adTextScale, and when adRamp is set it
+// comes up to that over AD_RAMP_MS. The caller sets both.)
 static void adShowWave(const TextMetrics& m, const char* s, TextCursor left, uint16_t scrollCols,
                        unsigned int delayMs, uint g, uint b, bool another) {
     uint phase = (uint) delayMs; // where the wave starts, as it always has: the low byte of dly
@@ -232,6 +345,11 @@ static void adShowWave(const TextMetrics& m, const char* s, TextCursor left, uin
     uint sub = 0;                // while scrolling: which of the frames of this column comes next
     bool scrolling = false;
     bool atEnd = false;
+#if AD_DIMS
+    const uint fullG = g;
+    const uint fullB = b;
+    uint frame = adRamp ? 0 : AD_RAMP_FRAMES; // which frame of the ramp comes next
+#endif
 
     adClockStart();
     for (;;) {
@@ -250,6 +368,15 @@ static void adShowWave(const TextMetrics& m, const char* s, TextCursor left, uin
             textCursorNext(m, s, left);
             scrollCols--;
         }
+#if AD_DIMS
+        // this frame's brightness, worked out before the frame, not in it
+        adWaveScale = ledRampScale(adTextScale, frame, AD_RAMP_FRAMES);
+        g = ledScaled(fullG, adWaveScale);
+        b = ledScaled(fullB, adWaveScale);
+        if (frame < AD_RAMP_FRAMES) {
+            frame++;
+        }
+#endif
         uint32_t sent = adDrawFrame(fontChonk, m, s, left, AD_SHOW_ALL, 0, true, phase, g, b);
         phase -= 10;
         if (!atEnd && scrollCols == 0) {
@@ -288,11 +415,21 @@ void showChonkySlideStyleOnBothPanels(const char* str, unsigned int delayMs, Col
     // TODO colorFrom, colorTo support (red is the wave)
     const TextMetrics m = fontMetrics(fontChonk);
     TextCursor left = textSeek(m, str, 0);
+#if AD_LIMITS
+    // green and blue are the message's, red is the wave: every value comes up somewhere along the text
+    adTextScale = adBudgetScale(fontChonk, m, str, 0, colorFrom.g, colorFrom.b, true);
+#endif
+#if AD_DIMS
+    adRamp = true; // the text comes on once, at its first position
+#endif
     if (nudge) {
         const uint last = left.glyphCols; // the first character's own width, not the font's
         for (uint skip = 0; skip <= last; skip++) {
             adShowWave(m, str, left, 0, delayMs, colorFrom.g, colorFrom.b, skip < last);
             textCursorNext(m, str, left);
+#if AD_DIMS
+            adRamp = false;
+#endif
         }
     } else {
         adShowWave(m, str, left, textOffsetToShow(adInkCols(fontChonk, m, str), COLUMNS_PER_PANEL), delayMs,
