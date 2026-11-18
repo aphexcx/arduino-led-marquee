@@ -66,7 +66,9 @@ static_assert(AD_SCROLL_SUBFRAME_TICKS >= AD_FRAME_TICKS,
 // taken into account: a text that the shift already brings under a limit is not dimmed again.
 //
 // AD_RAMP_MS: a chonky text does not come on in one frame but rises to its brightness over this
-// long, a step every frame. (One-by-one texts come on a letter at a time anyway.)
+// long, a step every frame. (One-by-one texts come on a letter at a time anyway.) The time is cut
+// into parts as long as a frame of the wave (a rest is dropped: 105 ms are 10 parts of 10 ms), and
+// the text is at its brightness in the last part: 90 ms after its first frame for a ramp of 100.
 // ---------------------------------------------------------------------------------------------
 #ifndef LED_CURRENT_LIMIT_MA
 #define LED_CURRENT_LIMIT_MA 0
@@ -82,6 +84,8 @@ static_assert(LED_CURRENT_LIMIT_SIDE_MA >= 0 && LED_CURRENT_LIMIT_SIDE_MA <= 600
               "LED_CURRENT_LIMIT_SIDE_MA must be 0 (off) to 60000");
 static_assert(AD_RAMP_MS >= 0 && AD_RAMP_MS / AD_WAVE_FRAME_MS <= 255,
               "AD_RAMP_MS must be 0 (off) to 255 frames of the wave");
+static_assert(AD_RAMP_MS == 0 || AD_RAMP_MS >= 2 * AD_WAVE_FRAME_MS,
+              "AD_RAMP_MS must be 0 (off) or at least two frames of the wave: a shorter ramp would do nothing");
 
 #define AD_LIMITS (LED_CURRENT_LIMIT_MA > 0 || LED_CURRENT_LIMIT_SIDE_MA > 0)
 #define AD_RAMP_FRAMES (AD_RAMP_MS / AD_WAVE_FRAME_MS)

@@ -301,14 +301,17 @@ def check_shifted(env, message, start, end, frames):
     width = max(0, len(cols) - 1)
     pad = 0 if wave else (PANEL - width) // 2
     ok, low_seen, high_seen = True, 0, 0
+    dims = ramp_dims(env, dim, frames, len(frames)) if wave else None  # a text that fits: every frame is paced
     for k, f in enumerate(frames if wave else frames[-1:]):
-        d = ramp_scale(env, dim, k) if wave else dim
         low = high = 0
         for c, v in enumerate(side(cols, 0, pad)):
-            red = dimmed((dly - 10 * k + 10 * c) & 0xFF, d) if wave else dimmed(r, d)
-            values = [red >> shift, dimmed(g, d) >> shift, dimmed(b, d) >> shift]
-            low += bin(v).count("1") * sum(values)
-            high += bin(v).count("1") * sum(carried(x) for x in values)
+            for d, top in ((dims[k][0], False), (dims[k][-1], True)) if wave else ((dim, False), (dim, True)):
+                red = dimmed((dly - 10 * k + 10 * c) & 0xFF, d) if wave else dimmed(r, d)
+                values = [red >> shift, dimmed(g, d) >> shift, dimmed(b, d) >> shift]
+                if top:
+                    high += bin(v).count("1") * sum(carried(x) for x in values)
+                else:
+                    low += bin(v).count("1") * sum(values)
         ok = ok and low <= f.load[0] <= high
         low_seen, high_seen = max(low_seen, low), max(high_seen, high)
     check(log, ok, "at brightness shift %d it is sent as the shift alone makes it, not dimmed again: every "
@@ -394,8 +397,25 @@ def model_scale(env, cols, r, g, b, wave, shift=0):
     return best
 
 
+def ramp_dims(env, scale, frames, paced):
+    """For each frame of a chonky message, the dimmings it may have while the text comes on: the
+    ramp is a stretch of TIME cut into parts as long as a frame of the wave, and the part a frame
+    is in comes from when it is drawn, counted from the message's first frame.
+    The first `paced` frames are drawn one per frame of the wave, so frame k is in part k. Later
+    frames (a text that scrolls: they come faster) are placed by the time they were latched; that
+    is the time they were drawn give or take 0.3 ms (the firmware's sums before a frame take a
+    little longer for some values than for others), so a frame within 0.3 ms of the edge of two
+    parts may be in either and gets two candidates."""
+    out = []
+    for k, f in enumerate(frames):
+        ms = (f.t - frames[0].t) * 1000
+        parts = {k} if k < paced else {int(max(0.0, ms - 0.3) // env["wave"]), int((ms + 0.3) // env["wave"])}
+        out.append(sorted({ramp_scale(env, scale, part) for part in parts}))
+    return out
+
+
 def ramp_scale(env, scale, frame):
-    """The dimming of frame number `frame` of a chonky text that comes on over the ramp."""
+    """The dimming of a frame in part number `frame` of the ramp over which a chonky text comes on."""
     n = env["ramp_frames"]
     return scale if n < 2 or frame + 1 >= n else scale * (frame + 1) // n
 
@@ -545,12 +565,22 @@ def check_chonky(env, message, start, end, frames):
         return log
     offset, at_end, moves, pictures, colours = 0, 0, [], True, True
     dim = model_scale(env, cols, 0, message["g"], message["b"], True)
+    # a text that fits is drawn a frame of the wave apart all the time; one that scrolls, until it moves
+    dims = ramp_dims(env, dim, frames, -(-env["hold"] // env["wave"]) if last else len(frames))
+
     def seen(k, at):
         """What can be seen of the text at `at` in frame k: a column whose colour comes to nothing
-        (a dimmed text where the wave's red is at 0, the first frame of a ramp) is dark."""
-        d = ramp_scale(env, dim, k)
-        rest = carried(dimmed(message["g"], d)) + carried(dimmed(message["b"], d))
-        return [v if rest or dimmed((dly - 10 * k + 10 * c) & 0xFF, d) else 0 for c, v in enumerate(side(cols, at))]
+        (a dimmed text where the wave's red is at 0, the first frame of a ramp) is dark. One
+        picture per dimming the frame may have."""
+        out = []
+        for d in dims[k]:
+            rest = carried(dimmed(message["g"], d)) + carried(dimmed(message["b"], d))
+            out.append([v if rest or dimmed((dly - 10 * k + 10 * c) & 0xFF, d) else 0
+                        for c, v in enumerate(side(cols, at))])
+        return out
+
+    def colours_ok(k, f):
+        return any(wave_colours_ok(f, k, dly, message["g"], message["b"], d) for d in dims[k])
 
     # A text dimmed nearly to nothing shows too little to follow its scroll by eye. Its frames are
     # then compared with where the clock says the text is (one column either way), and the pace,
@@ -561,7 +591,7 @@ def check_chonky(env, message, start, end, frames):
         for k, f in enumerate(frames):
             since = (f.t - t0) * 1000 - env["hold"]
             at = 0 if since < -1 else min(last, 1 + int((since + 1) // env["step"]))
-            ok = ok and any(f.mask[:PANEL] == seen(k, o) for o in (at, max(0, at - 1), min(last, at + 1)))
+            ok = ok and any(f.mask[:PANEL] in seen(k, o) for o in (at, max(0, at - 1), min(last, at + 1)))
             if at >= last and not at_end:
                 at_end = k
         check(log, ok, "dimmed to %d/256 the text is too faint to follow; every frame is the text as Fonts.h has "
@@ -570,22 +600,22 @@ def check_chonky(env, message, start, end, frames):
     else:
         common_done = False
     for k, f in enumerate(frames if not common_done else []):
-        if offset < last and f.mask[:PANEL] == seen(k, offset + 1) and f.mask[:PANEL] != seen(k, offset):
+        if offset < last and f.mask[:PANEL] in seen(k, offset + 1) and f.mask[:PANEL] not in seen(k, offset):
             offset += 1
             moves.append(f.t)
             if offset == last:
                 at_end = k
-        pictures = pictures and f.mask[:PANEL] == seen(k, offset)
-        colours = colours and wave_colours_ok(f, k, dly, message["g"], message["b"], ramp_scale(env, dim, k))
+        pictures = pictures and f.mask[:PANEL] in seen(k, offset)
+        colours = colours and colours_ok(k, f)
     if not common_done:
         check(log, pictures, "every frame is the text as Fonts.h has it, from column 0%s"
               % (", then moved left one column at a time, never back" if last else ""))
     else:
-        colours = all(wave_colours_ok(f, k, dly, message["g"], message["b"], ramp_scale(env, dim, k))
-                      for k, f in enumerate(frames))
+        colours = all(colours_ok(k, f) for k, f in enumerate(frames))
     check(log, colours, "the wave: red starts at the low byte of dly, less 10 per frame, plus 10 per "
           "column; green and blue are the message's; all as this style has always sent them, %s%s"
-          % (dim_note(dim), ", coming on over %d frames" % env["ramp_frames"] if env["ramp_frames"] > 1 else ""))
+          % (dim_note(dim), ", coming on over %d ms" % (env["ramp_frames"] * env["wave"])
+             if env["ramp_frames"] > 1 else ""))
     limit_check(log, env, message, frames)
     n = env["ramp_frames"]
     if n > 1 and len(frames) > 2 * n:
@@ -689,8 +719,16 @@ def check_nudge(env, message, start, end, frames):
             log.append("  note  dimmed to %d/256 the text is too faint to tell its positions apart" % (dim + 1))
         check(log, end - start < 9 * (message["dly"] / 1000 + 0.02) + 0.1, "the message ends (%.2f s)" % (end - start))
         return log
+    # With a ramp the message's first frames can be dark (a small part of a dimmed colour comes to
+    # nothing). They are the first position's: a text dimmed to 32/256 or more is dark for at most
+    # a 32nd of the ramp. They are left out when the positions are told apart by their pictures.
+    lead = 0
+    if env["ramp_frames"] > 1:
+        while lead < len(frames) - 1 and not any(frames[lead].mask):
+            lead += 1
+    lit = frames[lead:]
     seen = []
-    for f in frames:
+    for f in lit:
         for skip in range(10):
             if f.mask[:PANEL] == side(cols, skip):
                 if not seen or seen[-1] != skip:
@@ -704,8 +742,8 @@ def check_nudge(env, message, start, end, frames):
     check(log, seen == list(range(positions)), "the text moves left by its first character, a column at a "
           "time, no further, and the message ends (positions seen: %s)" % seen)
     # when each position first appears; the last one stays until the next request
-    appear = [f.t for f, before in zip(frames, [None] + frames[:-1])
-              if before is None or f.mask[:PANEL] != before.mask[:PANEL]] + [end]
+    appear = ([frames[0].t] + [f.t for before, f in zip(lit, lit[1:]) if f.mask[:PANEL] != before.mask[:PANEL]]
+              + [end])
     shown = [(b - a) * 1000 for a, b in zip(appear, appear[1:])]
     # one position to the next is the firmware's own pacing; the last one ends with the sign's next
     # request, which is held to the same tolerance as every hold (2 percent or 10 ms)

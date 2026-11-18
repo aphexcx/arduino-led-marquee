@@ -550,11 +550,6 @@ static bool waveFrameIs(const Frame& f, const std::vector<uint8_t>& text, size_t
     return true;
 }
 
-static void checkWaveFrame(const Frame& f, const std::vector<uint8_t>& text, size_t offset, unsigned int dly, size_t k,
-                           int dim) {
-    assert(waveFrameIs(f, text, offset, dly, k, dim));
-}
-
 static void checkChonky(const std::string& text, unsigned int dly) {
     Run r = runWith(showC, text.c_str(), dly);
     std::vector<uint8_t> cols = modelColumns(MODEL_CHONK, text);
@@ -584,7 +579,13 @@ static void checkChonky(const std::string& text, unsigned int dly) {
             movedUs = f.sentUs;
             if (offset == last) firstAtEnd = k;
         }
-        checkWaveFrame(f, cols, offset, dly, k, modelRamp(dim, k));
+        // The text comes on over the ramp's TIME, not over a number of frames: while it scrolls its
+        // frames come every 8.75 ms, and a ramp longer than the hold at the start runs into that.
+        // The frame is drawn FRAME_US before it is out; one right on the edge of two parts of the
+        // ramp may be in either.
+        const uint64_t drawn = f.sentUs - FRAME_US - r.startUs;
+        assert(waveFrameIs(f, cols, offset, dly, k, modelRamp(dim, modelRampPart(drawn > 100 ? drawn - 100 : 0))) ||
+               waveFrameIs(f, cols, offset, dly, k, modelRamp(dim, modelRampPart(drawn + 100))));
         // the wave never stops: a frame every 10 ms, or every 8.75 ms while the text moves
         if (k > 0) {
             uint64_t gap = f.sentUs - r.frames[k - 1].sentUs;
@@ -788,6 +789,7 @@ static void testSupplyRandom() {
 
 int main(int argc, char** argv) {
     showArt = argc > 1 && strcmp(argv[1], "--show") == 0;
+    (void) BRIGHTNESS_SHIFT; // read only by the code that limits
     testOneByOneFits();
     testOneByOneLong();
     testChonkyFits();
@@ -797,8 +799,8 @@ int main(int argc, char** argv) {
     testSupplyRandom();
     // with a limit set, the texts above it were dimmed and those under it were not
     const bool limits = LIMIT_BOTH + LIMIT_SIDE > 0;
-    if (limits) assert(dimmedRuns > 100 && undimmedRuns > 100);
-    else assert(dimmedRuns == 0);
+    // (how many were dimmed is printed, not asserted: at 1 mA all are, at 60 A none)
+    if (!limits) assert(dimmedRuns == 0);
     printf("ad_display_test: all %d tests passed (%llu looks at the timer, %.0f s of sign time)", tests,
            (unsigned long long) timerReads, ms(nowUs) / 1000);
     if (limits || RAMP_FRAMES > 1) {
