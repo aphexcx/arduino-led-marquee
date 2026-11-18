@@ -156,7 +156,11 @@ The link is exposed as a TCP port on localhost, default `127.0.0.1:14400`
 carries, nothing added:
 
 - the sign sends one request byte: `~` ("send the next message") or `?`
-  (chooser poll)
+  (chooser poll). The bench build of the contract 3 firmware
+  (`make firmware-debug`) may send 27 characters of text in front of a `~`,
+  `#SSS fFFF eEEE aAA bBB lLLL`: what it measured at the last attention (see
+  `ChooserDisplay.h`). They are not a request; the `~` behind them is, and is
+  answered as usual. `fake_app.py` logs them as "sign said"
 - the peer answers with one JSON object and no newline, for example
   `{"type":"F","str":"HELLO"}`; to `?` it may answer with a checksum report,
   `{"c":13345}` (chooser contract version 2; version 1 used `{}`)
@@ -457,7 +461,7 @@ Seen while building this; the firmware is not changed by this directory.
 | `tests/gif_check.py` | what a recording must be, stated from the rules above in exact arithmetic: a strict GIF decoder, and the GIF and PNG pictures and their times against the frames dump |
 | `tests/gif_cases.py`, `tests/gif_case.c` | chosen, random and very long-held pictures through the GIF encoder |
 | `tests/link_test.py` | the serial link's timing model against the real firmware, with clients that come and go; the line held LOW |
-| `tests/push_test.py` | chooser contract version 3.1 measured on the real firmware: how soon a push is on the LEDs (also one that falls into the sign's own read), how steady the scroll is between pushes, that nothing is sent while a text moves, that a change that was not pushed is found at the next stand-still, that the sign asks when the app leaves chooser mode. `run` plays a scripted app; `check` reads the dump of any run. Skipped by `test.sh` for firmware without that contract |
+| `tests/push_test.py` | chooser contract version 3.1 measured on the real firmware: how soon a push is on the LEDs (also one that falls into the sign's own read), how steady the scroll is between pushes, that nothing is sent while a text moves, that a change that was not pushed is found at the next stand-still, that the sign asks when the app leaves chooser mode. `run` plays a scripted app; `check` reads the dump of any run. For the bench image it also reads the numbers on panel B and the lines of numbers sent to the app, and holds them against what was on the wire. Skipped by `test.sh` for firmware without that contract |
 | `tests/record_fail_test.py` | recordings that cannot be created, written or closed |
 | `tests/cli_test.py` | command line values that are refused |
 | `tests/test_ihex.c` | the firmware image reader, built with the address and undefined-behaviour sanitizers |

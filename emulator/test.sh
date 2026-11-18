@@ -13,11 +13,13 @@
 #   4. the serial link's timing model against the real firmware, with clients
 #      that come and go (tests/link_test.py)
 #   5. chooser contract version 3 on the real firmware, if this firmware has it:
-#      a scripted app that pushes (tests/push_test.py), then fake_app.py
+#      a scripted app that pushes (tests/push_test.py), the same against the
+#      bench image (make firmware-debug: its numbers on panel B and its line of
+#      numbers to the app are read and held against the wire), then fake_app.py
 #      --contract 3 at real-time speed, checked the same way
 #
 # The TCP ports can be moved with SIGN_EMU_TEST_PORT (default 14417; the link
-# tests use the eleven after it, the push tests the two after those) so two
+# tests use the eleven after it, the push tests the three after those) so two
 # lanes can run the tests at once.
 set -eu
 cd "$(dirname "$0")"
@@ -89,6 +91,11 @@ python3 tests/link_test.py build/sign-emu "$HEX" build/tests/link $((PORT + 1))
 if grep -q CHOOSER_ATTN_FIRST_BYTE_MS ../LED_Marquee.ino; then
     echo "== chooser contract 3: a scripted app that pushes"
     python3 tests/push_test.py run build/sign-emu "$HEX" ../Fonts.h build/tests/push $((PORT + 12))
+
+    echo "== chooser contract 3: the same against the bench image (numbers on panel B and to the app)"
+    make --no-print-directory firmware-debug
+    python3 tests/push_test.py run build/sign-emu build/firmware-debug/LED_Marquee.hex ../Fonts.h \
+        build/tests/push-debug $((PORT + 14))
 
     echo "== chooser contract 3: fake_app.py --contract 3, at real-time speed"
     # The fake app counts this computer's seconds, so the run is paced. Request 1

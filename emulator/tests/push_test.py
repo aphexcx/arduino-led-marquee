@@ -22,10 +22,16 @@ The checks, all from the dump (sign-emu --frames):
   - when the line goes LOW and no message follows, the sign asks 150 ms later
   - chooser frames are panel A only (60 columns); panel B stays dark
 
+The bench build of the firmware (make firmware-debug, CHOOSER_DEBUG_PANEL_B)
+also draws what it measured on panel B and sends the same numbers to the app
+as a line of text in front of a request, "#SSS fFFF eEEE aAA bBB lLLL~". Both
+are read here and held against what was on the wire.
+
 Expected pictures are computed from Fonts.h. Python 3 standard library only.
 """
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -35,6 +41,9 @@ from check_frames import PANEL, Frame, find_on_both_sides, load_font_std, text_c
 
 CYCLES_PER_MS = 16000
 GAP_COLS = 18                 # CHOOSER_GAP_COLS in the sketch
+STEP_MS = 37                  # the longest the sign goes between two looks at the line while it scrolls
+BENCH_LINE = re.compile(r"#(\d{3}) f(\d{3}) e(\d{3}) a(\d{2}) b(\d{2}) l(\d{3})(?=~)")
+BENCH_COLS = (PANEL - 1) * 24 + PANEL * 24      # bits of the frame that brings panel B up to date
 PUSH_LIMIT_MS = 150.0
 STEP_SPREAD_LIMIT_MS = 2.0
 failures = []
@@ -108,6 +117,16 @@ class Dump:
                 self.end_t = d["t"]
         self.rx.sort(key=lambda d: d["cycle"])
         self.breaks.sort(key=lambda d: d["cycle"])
+        self.tx.sort(key=lambda d: d["cycle"])
+        # What the sign sent that is not a request: the bench build's lines of numbers.
+        # self.said: (the tx event of the '#', the six numbers). self.tx keeps only the rest.
+        text = "".join(d.get("char", "\x00") for d in self.tx)
+        self.said, line_bytes = [], set()
+        for m in BENCH_LINE.finditer(text):
+            self.said.append((self.tx[m.start()], [int(g) for g in m.groups()]))
+            line_bytes.update(range(m.start(), m.end()))
+        self.all_tx = self.tx
+        self.tx = [d for k, d in enumerate(self.tx) if k not in line_bytes]
 
     def objects(self):
         """The JSON objects the app sent, in order: (first rx event, last rx event, object)."""
@@ -144,13 +163,26 @@ def analyse(dump, font, expect=None):
         return
 
     # ---- which message and position every frame shows ------------------------
+    bench = bool(dump.said)        # the bench build: numbers on panel B, lines to the app
+    digits = {tuple(font[str(d)]): str(d) for d in range(10)}
+
+    def panel_b_numbers(f):
+        """The four numbers the bench build draws on panel B, None if that is not what is there."""
+        out = []
+        for col, n in ((60, 3), (78, 3), (96, 2), (108, 2)):
+            text = "".join(digits.get(tuple(f.mask[col + 6 * k:col + 6 * k + 5]), "?") for k in range(n))
+            if "?" in text:
+                return None
+            out.append(int(text))
+        return out
+
     seen = []                      # (frame index, Message, position) for chooser frames
     for i, f in enumerate(dump.frames):
-        if any(f.mask[PANEL:]):
-            continue               # something on panel B: not the chooser
+        if any(f.mask[PANEL:]) and not (bench and panel_b_numbers(f)):
+            continue               # something else on panel B: not the chooser
         picture = tuple(f.mask[:PANEL])
         hits = [(m, m.pictures[picture]) for m in messages.values() if picture in m.pictures]
-        if len(hits) == 1 and f.d["bits"] == PANEL * 24:
+        if len(hits) == 1 and f.d["bits"] in ((PANEL * 24, BENCH_COLS) if bench else (PANEL * 24,)):
             seen.append((i, hits[0][0], hits[0][1]))
     check(len(seen) > 50, "frames that show a chooser message, as Fonts.h draws it: %d" % len(seen))
     if not seen:
@@ -164,11 +196,19 @@ def analyse(dump, font, expect=None):
                       "whole, or the blanking of the strip before a new message (%d are not%s)"
           % (len(strays), ": first at t=%.3f" % dump.frames[strays[0]].t if strays else ""))
     blankings = [f for k, f in enumerate(inside) if first + k not in shown]
-    sixty = [f.d["send_us"] / 1000.0 for i, f in enumerate(dump.frames) if i in shown]
-    check(all(f.d["bits"] == PANEL * 24 for i, f in enumerate(dump.frames) if i in shown)
-          and not any(any(f.mask[PANEL:]) for f in inside),
-          "every chooser frame is panel A only: 1440 bits per strip (60 columns), clocked out in "
-          "%.3f to %.3f ms; panel B stays dark" % (min(sixty), max(sixty)))
+    sixty = [f.d["send_us"] / 1000.0 for i, f in enumerate(dump.frames)
+             if i in shown and f.d["bits"] == PANEL * 24]
+    if bench:
+        longer = [f for i, f in enumerate(dump.frames) if i in shown and f.d["bits"] == BENCH_COLS]
+        check(bool(longer) and all(panel_b_numbers(f) for i, f in enumerate(dump.frames) if i in shown),
+              "the bench build: chooser frames are 60 columns (%.3f to %.3f ms), but for %d of 119 "
+              "that bring the four numbers on panel B up to date (%.3f ms); panel B shows "
+              "numbers and nothing else"
+              % (min(sixty), max(sixty), len(longer), max(f.d["send_us"] for f in longer) / 1000.0))
+    else:
+        check(not any(any(f.mask[PANEL:]) for f in inside),
+              "every chooser frame is panel A only: 1440 bits per strip (60 columns), clocked out "
+              "in %.3f to %.3f ms; panel B stays dark" % (min(sixty), max(sixty)))
     if blankings:
         whole = [f.d["send_us"] / 1000.0 for f in blankings]
         print("        (the strip is blanked %d time(s), once per new message: 2880 bits in "
@@ -225,11 +265,12 @@ def analyse(dump, font, expect=None):
         after = [o for o in objects if o[0]["cycle"] >= b["end"]]
         nxt = min((x["cycle"] for x in dump.breaks if x["cycle"] > b["cycle"]), default=None)
         asked = [d for d in dump.tx if d["cycle"] > b["end"]]
+        spoke = [d for d in dump.all_tx if d["cycle"] > b["end"]]
         if after and (nxt is None or after[0][0]["cycle"] < nxt) and \
                 not (asked and asked[0]["cycle"] < after[0][0]["cycle"]):
             pushes.append((b, after[0]))
         else:
-            leaves.append((b, asked[0] if asked else None))
+            leaves.append((b, asked[0] if asked else None, spoke[0] if spoke else None))
     check(all(0 <= b["cycle"] - b["due"] <= 4 for b in dump.breaks),
           "every break fell at the first instruction boundary from its due cycle (%d breaks, %s ms)"
           % (len(dump.breaks), ", ".join(sorted({"%g" % b["ms"] for b in dump.breaks}))))
@@ -268,17 +309,19 @@ def analyse(dump, font, expect=None):
     # ---- attention with nothing behind it: the app has left chooser mode -------
     print("attention and no message (the app leaves chooser mode)")
     after_leave = set()
-    for b, ask in leaves:
+    for b, ask, spoke in leaves:
         if ask is None:
             check(False, "break at t=%.3f s with no message behind it: the sign asks" % b["t"])
             continue
         after_leave.add(ask["cycle"])
-        waited = (ask["cycle"] - b["end"]) / CYCLES_PER_MS
+        # (the bench build's line of numbers goes out first, and the '~' ends it)
+        waited = (spoke["cycle"] - b["end"]) / CYCLES_PER_MS
         drawn = [f for f in dump.frames if b["t"] + 0.001 < began(f) and f.t < ask["t"]]
         check(150.0 <= waited <= 175.0 and not drawn and ask.get("char") == "~",
-              "break at t=%.3f s, nothing behind it: the picture stood still and the sign asked "
-              "'~' %.1f ms after the end of the break (it waits 150 for a message first)"
-              % (b["t"], waited))
+              "break at t=%.3f s, nothing behind it: the picture stood still and the sign %s "
+              "%.1f ms after the end of the break (it waits 150 for a message first)"
+              % (b["t"], "asked '~'" if spoke is ask else "began its line of numbers and its '~'",
+                 waited))
         answer = [o for o in objects if o[0]["cycle"] > ask["cycle"]]
         if answer and answer[0][2].get("type") != "H":
             cols = text_columns(font, answer[0][2].get("str", ""))
@@ -290,11 +333,47 @@ def analyse(dump, font, expect=None):
     if not leaves:
         print("        (none in this run)")
 
+    # ---- the bench build's own account, against the wire ------------------------
+    if bench:
+        print("the bench build's numbers (ms as the sign counted them)")
+        numbered = [n[0] for _, n in dump.said]
+        check(numbered == list(range(len(numbered))),
+              "%d lines to the app, each 27 characters and the '~' that was due anyway, numbered "
+              "%s" % (len(numbered), " ".join("%03d" % n for n in numbered)))
+        for first_char, (seq, f_ms, e_ms, att, falls, low_ms) in dump.said:
+            before = [b for b in dump.breaks if b["cycle"] < first_char["cycle"]]
+            b = before[-1] if before else None
+            frame = [o for bb, o in pushes if bb is b]
+            line = "#%03d f%03d e%03d a%02d b%02d l%03d~" % (seq, f_ms, e_ms, att, falls, low_ms)
+            if b is None:
+                check(False, "%s at t=%.3f s follows an attention" % (line, first_char["t"]))
+                continue
+            # The sign first sees the line LOW at most one step after it fell.
+            ok = b["ms"] - STEP_MS - 1 <= low_ms <= b["ms"] + 1 and falls <= att <= len(before)
+            told = "the line LOW for %g ms (seen for %d)" % (b["ms"], low_ms)
+            if frame:
+                to_first = (frame[0][0]["cycle"] + 1111 - b["cycle"]) / CYCLES_PER_MS
+                to_end = (frame[0][1]["cycle"] + 11112 - b["cycle"]) / CYCLES_PER_MS
+                ok = ok and to_first - STEP_MS - 1 <= f_ms <= to_first + 2 \
+                    and to_end - STEP_MS - 1 <= e_ms <= to_end + 4
+                told += ", first byte %.1f ms after it fell (counted %d), end of the message " \
+                        "%.1f (counted %d)" % (to_first, f_ms, to_end, e_ms)
+            else:
+                ok = ok and f_ms == 0 and e_ms == 0
+                told += ", no message behind it (000 and 000)"
+            check(ok, "t=%.3f s  %s  on the wire: %s" % (first_char["t"], line, told))
+            shown_b = [panel_b_numbers(dump.frames[i]) for i, _, _ in seen
+                       if dump.frames[i].t < first_char["t"]]
+            if shown_b and shown_b[-1][2] == att:
+                check(shown_b[-1] == [f_ms, e_ms, att, falls],
+                      "            and panel B showed the same: %03d %03d %02d %02d" % tuple(shown_b[-1]))
+
     # ---- what the sign sent ---------------------------------------------------
     print("requests")
     chars = "".join(d.get("char", "?") for d in dump.tx)
     check(set(chars) <= {"~"}, "the sign sent only '~', never '?' and never an error text "
-                               "(%d bytes: %s)" % (len(chars), chars))
+                               "(%d bytes: %s)%s" % (len(chars), chars,
+                                                     "; the lines of numbers apart" if bench else ""))
     moving = []
     for d in dump.tx:
         if d["cycle"] in after_leave:
