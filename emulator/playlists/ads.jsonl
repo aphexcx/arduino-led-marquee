@@ -1,0 +1,14 @@
+# Ads in both styles, short ones and ones wider than a panel. \u007f is the heart.
+# "dly" is how long the finished text stays, in milliseconds of real time.
+
+# C: chonky font with the colour wave. A text that fits just stays for dly.
+{"type":"C","str":"I \u007f U","dly":1500,"r":255,"g":0,"b":128,"scroll":false}
+
+# C, wider than a panel: the start stands still, the text scrolls to its end, the end stays for dly.
+{"type":"C","str":"I \u007f TRANCE AND ENERGY","dly":1500,"r":255,"g":0,"b":128,"scroll":false}
+
+# O: letters one by one, centred when the text fits.
+{"type":"O","str":"HELLO YOU \u007f","r":255,"g":212,"b":59,"dly":1500}
+
+# O, wider than a panel: once the next letter does not fit, the text moves left to make room for it.
+{"type":"O","str":"I LIVE FOR THAT ENERGY \u007f AND SO DO YOU","r":4,"g":255,"b":25,"dly":1500}

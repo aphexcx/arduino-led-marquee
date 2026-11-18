@@ -12,9 +12,13 @@
 #      (tests/cli_test.py, tests/record_fail_test.py)
 #   4. the serial link's timing model against the real firmware, with clients
 #      that come and go (tests/link_test.py)
+#   5. the ads on the real firmware: letters one by one and chonky, short
+#      texts and texts wider than a panel, hearts, and how long each stays
+#      (tests/ads_test.py)
 #
 # The TCP ports can be moved with SIGN_EMU_TEST_PORT (default 14417; the link
-# tests use the eleven after it) so two lanes can run the tests at once.
+# tests use the eleven after it, the ads test three from the sixteenth) so two
+# lanes can run the tests at once.
 set -eu
 cd "$(dirname "$0")"
 
@@ -81,5 +85,8 @@ python3 tests/record_fail_test.py build/sign-emu "$HEX" build/tests/recfail
 
 echo "== serial link timing"
 python3 tests/link_test.py build/sign-emu "$HEX" build/tests/link $((PORT + 1))
+
+echo "== the ads: one by one and chonky, short and long, on the real firmware"
+python3 tests/ads_test.py build/sign-emu "$HEX" .. build/tests/ads $((PORT + 16))
 
 echo "ALL TESTS PASSED"
