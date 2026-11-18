@@ -61,7 +61,9 @@ static_assert(AD_SCROLL_SUBFRAME_TICKS >= AD_FRAME_TICKS,
 // depends on how the sign is fed.) Before a message's first frame the fullest 60 columns of its
 // text are counted, and if that many LEDs in the message's colour would be above a limit, the
 // colour is dimmed for the whole message (one brightness from its first frame to its last) by
-// just as much as it takes.
+// just as much as it takes. The limits are on what the lit LEDs add: the current that flows with
+// the sign dark (about 0.84 A) is not counted. The brightness shift of the 'B' utility message is
+// taken into account: a text that the shift already brings under a limit is not dimmed again.
 //
 // AD_RAMP_MS: a chonky text does not come on in one frame but rises to its brightness over this
 // long, a step every frame. (One-by-one texts come on a letter at a time anyway.)
@@ -269,7 +271,8 @@ static uint16_t adMostLit(const Font& font, const TextMetrics& m, const char* s)
 static uint adBudgetScale(const Font& font, const TextMetrics& m, const char* s, uint r, uint g, uint b, bool wave) {
     const uint16_t allowed = ledAllowance(adMostLit(font, m, s), LED_LOAD_OF_MA(LED_CURRENT_LIMIT_MA),
                                           LED_LOAD_OF_MA(LED_CURRENT_LIMIT_SIDE_MA));
-    return ledBudgetScale(allowed, r, g, b, wave, wave);
+    // BRIGHTNESS_SHIFT is the sketch's: what the 'B' utility message set
+    return ledBudgetScale(allowed, r, g, b, wave, wave, BRIGHTNESS_SHIFT);
 }
 #endif
 

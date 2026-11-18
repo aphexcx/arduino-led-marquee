@@ -17,7 +17,7 @@
 #      (tests/ads_test.py)
 #
 # The TCP ports can be moved with SIGN_EMU_TEST_PORT (default 14417; the link
-# tests use the eleven after it, the ads test three from the sixteenth) so two
+# tests use the eleven after it, the ads test seven from the sixteenth) so two
 # lanes can run the tests at once.
 set -eu
 cd "$(dirname "$0")"

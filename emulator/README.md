@@ -317,7 +317,9 @@ one frame asks for (both sides together, and one side), and the biggest rise
 from one frame to the next. It is an estimate from the LED values the firmware
 sent: 20 mA per colour channel at 255, in proportion to the value. Real LEDs
 draw less at full white, so read it as an upper bound and for comparing
-messages. `tests/ads_test.py --also file.jsonl` adds the messages of another
+messages. It is what the lit channels add: the current that flows with the
+sign dark (about 1 mA per LED, some 0.84 A) is not in it. A message's first
+rise is counted from what the sign was showing when it came. `tests/ads_test.py --also file.jsonl` adds the messages of another
 list to the run and to the table.
 
 The sketch can hold the `O` and `C` styles under a limit and let a `C` text
@@ -325,7 +327,9 @@ come on over a ramp (`LED_CURRENT_LIMIT_MA`, `LED_CURRENT_LIMIT_SIDE_MA`,
 `AD_RAMP_MS` in `AdDisplay.h`; all 0, off, unless given at build time).
 `make test-ads-budget` builds two images with low limits and runs the same
 test on them with the limits asserted. `make sign-images` builds four images
-for trying on the sign: `ramp100`, `cap6000`, `cap6000-ramp100`, `side5500`.
+for trying on the sign: `ramp100`, `cap6000`, `cap6000-ramp100`, `side5500`
+(other numbers: `make sign-images SIGN_SIDE_MA=7000`). Every such image has
+its own build tree, named after its settings.
 
 ## Beat input
 

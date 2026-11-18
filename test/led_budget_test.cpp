@@ -82,38 +82,45 @@ static void testAllowance() {
 
 // What an LED of this colour can send at most when dimmed by `scale`, worked out the slow way:
 // for the wave every red value is tried.
-static uint16_t slowSent(uint8_t r, uint8_t g, uint8_t b, uint8_t scale, bool waveRed, bool greenCarried) {
-    uint16_t red = ledCarried(ledScaled(r, scale));
+// shift: the sign's brightness shift. With one, the carry of every byte is unknown, so all three
+// channels are taken as carried (the most they can be).
+static int slowShift(int v, int shift) { return shift >= 8 ? 0 : v >> shift; }
+
+static uint16_t slowSent(uint8_t r, uint8_t g, uint8_t b, uint8_t scale, bool waveRed, bool greenCarried,
+                         int shift = 0) {
+    uint16_t red = ledCarried((uint8_t) slowShift(ledScaled(r, scale), shift));
     if (waveRed) {
         red = 0;
         for (int v = 0; v <= 255; v++) {
-            uint8_t sent = ledCarried(ledScaled((uint8_t) v, scale));
+            uint8_t sent = ledCarried((uint8_t) slowShift(ledScaled((uint8_t) v, scale), shift));
             if (sent > red) red = sent;
         }
     }
-    uint8_t green = ledScaled(g, scale);
-    return red + (greenCarried ? ledCarried(green) : green) + ledCarried(ledScaled(b, scale));
+    uint8_t green = (uint8_t) slowShift(ledScaled(g, scale), shift);
+    return red + ((greenCarried || shift) ? ledCarried(green) : green) +
+           ledCarried((uint8_t) slowShift(ledScaled(b, scale), shift));
 }
 
-static void checkScale(uint16_t allowed, uint8_t r, uint8_t g, uint8_t b, bool waveRed, bool greenCarried) {
-    uint8_t scale = ledBudgetScale(allowed, r, g, b, waveRed, greenCarried);
+static void checkScale(uint16_t allowed, uint8_t r, uint8_t g, uint8_t b, bool waveRed, bool greenCarried,
+                       int shift = 0) {
+    uint8_t scale = ledBudgetScale(allowed, r, g, b, waveRed, greenCarried, (uint8_t) shift);
     // it fits, and so does every dimming below it: a ramp passes through those ...
     for (int s = 0; s <= scale; s++) {
-        assert(slowSent(r, g, b, (uint8_t) s, waveRed, greenCarried) <= allowed);
+        assert(slowSent(r, g, b, (uint8_t) s, waveRed, greenCarried, shift) <= allowed);
     }
     // ... and the next brighter one does not
-    if (scale < 255) assert(slowSent(r, g, b, (uint8_t) (scale + 1), waveRed, greenCarried) > allowed);
+    if (scale < 255) assert(slowSent(r, g, b, (uint8_t) (scale + 1), waveRed, greenCarried, shift) > allowed);
 }
 
 static void testBudgetScale() {
     // by hand: one-by-one text in full green (0, 255, 0), 153 allowed: green goes out as it is
-    assert(ledBudgetScale(153, 0, 255, 0, false, false) == 153);
+    assert(ledBudgetScale(153, 0, 255, 0, false, false, 0) == 153);
     // within the limit as it is: not touched
-    assert(ledBudgetScale(255, 0, 255, 0, false, false) == 255);
-    assert(ledBudgetScale(765, 255, 255, 255, false, false) == 255);
-    assert(ledBudgetScale(765, 0, 255, 255, true, true) == 255);
+    assert(ledBudgetScale(255, 0, 255, 0, false, false, 0) == 255);
+    assert(ledBudgetScale(765, 255, 255, 255, false, false, 0) == 255);
+    assert(ledBudgetScale(765, 0, 255, 255, true, true, 0) == 255);
     // nothing allowed: dark
-    assert(ledBudgetScale(0, 255, 255, 255, false, false) == 0);
+    assert(ledBudgetScale(0, 255, 255, 255, false, false, 0) == 0);
     // the chonky heading that started this (wave, green 255, blue 25): undimmed it can send
     // 255 + 255 + 29 per LED
     assert(slowSent(0, 255, 25, 255, true, true) == 539);
@@ -126,24 +133,24 @@ static void testBudgetScale() {
             if (sent > most) most = sent;
         }
         assert(most > 539 && most <= 541);
-        assert(ledBudgetScale(most, 0, 255, 25, true, true) == 255);
-        assert(ledBudgetScale(most - 1, 0, 255, 25, true, true) < 255);
+        assert(ledBudgetScale(most, 0, 255, 25, true, true, 0) == 255);
+        assert(ledBudgetScale(most - 1, 0, 255, 25, true, true, 0) < 255);
     }
     // pure blue 128 is sent as 192: it needs dimming under a limit its plain value would pass
-    assert(ledBudgetScale(128, 0, 0, 128, false, false) < 255);
+    assert(ledBudgetScale(128, 0, 0, 128, false, false, 0) < 255);
     // What is sent does not fall evenly with the dimming: a red of 12 goes out as 14, but dimmed
     // to 11 as 15. With 14 allowed the full colour would fit, and a ramp up to it would not: the
     // frame at 11 is over. So the answer stays below the first dimming that is too bright.
     assert(slowSent(12, 0, 0, 255, false, false) == 14);
     {
-        uint8_t scale = ledBudgetScale(14, 12, 0, 0, false, false);
+        uint8_t scale = ledBudgetScale(14, 12, 0, 0, false, false, 0);
         assert(scale < 255);
         for (int s = 0; s <= scale; s++) assert(slowSent(12, 0, 0, (uint8_t) s, false, false) <= 14);
     }
     // the case the review found: a chonky text with green and blue 192. Every frame of a ramp of
     // any length stays within what the text is allowed
     for (uint16_t allowed = 0; allowed <= 765; allowed += 5) {
-        uint8_t scale = ledBudgetScale(allowed, 0, 192, 192, true, true);
+        uint8_t scale = ledBudgetScale(allowed, 0, 192, 192, true, true, 0);
         for (int frames = 2; frames <= 255; frames += 11) {
             for (int frame = 0; frame < frames; frame++) {
                 uint8_t at = ledRampScale(scale, (uint8_t) frame, (uint8_t) frames);
@@ -167,6 +174,37 @@ static void testBudgetScale() {
     for (int scale = 0; scale <= 255; scale++) {
         uint16_t counted = slowSent(0, 0, 0, (uint8_t) scale, true, true);
         for (int v = 0; v <= 255; v++) assert(ledCarried(ledScaled((uint8_t) v, (uint8_t) scale)) <= counted);
+    }
+    tests++;
+}
+
+// The sign's brightness shift ('B' utility message): every value is shifted right before it goes out.
+static void testShift() {
+    assert(ledShifted(200, 0) == 200 && ledShifted(200, 1) == 100 && ledShifted(200, 3) == 25);
+    assert(ledShifted(255, 7) == 1 && ledShifted(255, 8) == 0 && ledShifted(255, 200) == 0);
+
+    // A text that the shift already brings under the limit is not dimmed again. Full green, one by
+    // one, 153 allowed: without a shift it has to come down to 153 ...
+    assert(ledBudgetScale(153, 0, 255, 0, false, false, 0) == 153);
+    // ... at shift 1 it goes out as 127 and is left alone (it was dimmed to 153 and then halved)
+    assert(ledBudgetScale(153, 0, 255, 0, false, false, 1) == 255);
+    // the chonky heading (wave, green 255, blue 25) at shift 1: at most 127 + 127 + 14 per LED (12 goes out as 14)
+    assert(slowSent(0, 255, 25, 255, true, true, 1) == 127 + 127 + 14);
+    assert(ledBudgetScale(300, 0, 255, 25, true, true, 1) == 255);
+    assert(ledBudgetScale(300, 0, 255, 25, true, true, 0) < 255);
+    // shifted to nothing: nothing is sent, nothing to dim
+    assert(ledBudgetScale(0, 255, 255, 255, false, false, 8) == 255);
+
+    // against the slow way, every shift
+    srand(7);
+    for (int shift = 0; shift <= 9; shift++) {
+        for (int round = 0; round < 60; round++) {
+            uint8_t r = (uint8_t) (rand() % 256), g = (uint8_t) (rand() % 256), b = (uint8_t) (rand() % 256);
+            for (uint16_t allowed = 0; allowed <= 765; allowed += (allowed < 40 ? 1 : 41)) {
+                checkScale(allowed, r, g, b, false, false, shift);
+                checkScale(allowed, 0, g, b, true, true, shift);
+            }
+        }
     }
     tests++;
 }
@@ -197,6 +235,7 @@ int main() {
     testCarriedAndScaled();
     testAllowance();
     testBudgetScale();
+    testShift();
     testRamp();
     printf("led_budget_test: all %d tests passed\n", tests);
     return 0;

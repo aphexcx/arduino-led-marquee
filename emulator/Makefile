@@ -6,9 +6,10 @@
 #   make test       the smoke test (no human needed)
 #   make test-ads   only the ads' test: the O and C styles on the real firmware (half a minute)
 #   make test-ads-budget   the same test on images built with a current limit and a ramp (the
-#                   sketch has neither): build/firmware-budget/ and build/firmware-budget-side/
+#                   sketch has neither): FW_BUDGET_LIMIT_MA, FW_BUDGET_RAMP_MS, FW_BUDGET_SIDE_MA
 #   make sign-images   the images for trying the supply's settings on the sign: ramp only, a limit
-#                   only, both, and a limit per side (build/firmware-<name>/)
+#                   only, both, and a limit per side (SIGN_RAMP_MS, SIGN_CAP_MA, SIGN_SIDE_MA);
+#                   each in build/firmware-<name>/, the name says the settings
 #   make clean      delete build/ (third_party/ is kept)
 #
 # Everything is written under build/ and third_party/, both gitignored.
@@ -113,8 +114,14 @@ test-ads: all
 
 # The same sketch with the supply's settings on (in the sketch they are all 0 = off), each in its
 # own build tree: build/firmware-<name>/. $(1) = name, $(2) = the settings, separated by ;
+#
+# A tree is configured once, and its NAME carries its settings (cap6000, budget-3000-ramp100):
+# another number is another tree. So a tree is never asked to change its settings, which cmake and
+# make do not do reliably (cmake keeps the first value it was given unless told again, and make
+# does not see a file changed within the same second). The last line of the recipe checks that the
+# tree really has the settings its name says, and fails if not.
 define SIGN_IMAGE
-$(BUILD)/firmware-$(1)/Makefile: firmware/CMakeLists.txt firmware/toolchain.cmake Makefile
+$(BUILD)/firmware-$(1)/Makefile: firmware/CMakeLists.txt firmware/toolchain.cmake
 	cmake -S firmware -B $(BUILD)/firmware-$(1) -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Debug \
 	      -DARDUINO_SDK_PATH=$(ARDUINO_SDK) "-DSIGN_FLAGS=$(2)"
 
@@ -123,6 +130,8 @@ firmware-$(1): $(BUILD)/firmware-$(1)/Makefile
 	$(MAKE) --no-print-directory -C $(BUILD)/firmware-$(1) LED_Marquee
 	@$(AVR_SIZE) $(BUILD)/firmware-$(1)/LED_Marquee.elf
 	@shasum -a 256 $(BUILD)/firmware-$(1)/LED_Marquee.hex
+	@grep -qxF "SIGN_FLAGS:UNINITIALIZED=$(2)" $(BUILD)/firmware-$(1)/CMakeCache.txt || \
+	    { echo "$(BUILD)/firmware-$(1) was configured with other settings than $(2): delete it"; exit 1; }
 endef
 
 # Two images for the tests: a limit for the two sides together with a ramp, and a limit per side.
@@ -130,22 +139,31 @@ endef
 FW_BUDGET_LIMIT_MA ?= 3000
 FW_BUDGET_RAMP_MS  ?= 100
 FW_BUDGET_SIDE_MA  ?= 1200
-$(eval $(call SIGN_IMAGE,budget,-DLED_CURRENT_LIMIT_MA=$(FW_BUDGET_LIMIT_MA);-DAD_RAMP_MS=$(FW_BUDGET_RAMP_MS)))
-$(eval $(call SIGN_IMAGE,budget-side,-DLED_CURRENT_LIMIT_SIDE_MA=$(FW_BUDGET_SIDE_MA)))
+BUDGET      := budget-$(FW_BUDGET_LIMIT_MA)-ramp$(FW_BUDGET_RAMP_MS)
+BUDGET_SIDE := budget-side$(FW_BUDGET_SIDE_MA)
+$(eval $(call SIGN_IMAGE,$(BUDGET),-DLED_CURRENT_LIMIT_MA=$(FW_BUDGET_LIMIT_MA);-DAD_RAMP_MS=$(FW_BUDGET_RAMP_MS)))
+$(eval $(call SIGN_IMAGE,$(BUDGET_SIDE),-DLED_CURRENT_LIMIT_SIDE_MA=$(FW_BUDGET_SIDE_MA)))
 
-test-ads-budget: emu firmware-budget firmware-budget-side
-	python3 tests/ads_test.py $(EMU) $(BUILD)/firmware-budget/LED_Marquee.hex .. $(BUILD)/tests/ads-budget 14445 \
-	    --limit-ma $(FW_BUDGET_LIMIT_MA) --ramp-ms $(FW_BUDGET_RAMP_MS)
-	python3 tests/ads_test.py $(EMU) $(BUILD)/firmware-budget-side/LED_Marquee.hex .. $(BUILD)/tests/ads-budget-side \
-	    14450 --limit-side-ma $(FW_BUDGET_SIDE_MA)
+firmware-budget: firmware-$(BUDGET) firmware-$(BUDGET_SIDE)
 
-# Images for trying the settings on the sign. What a setting should be has to be found there.
-$(eval $(call SIGN_IMAGE,ramp100,-DAD_RAMP_MS=100))
-$(eval $(call SIGN_IMAGE,cap6000,-DLED_CURRENT_LIMIT_MA=6000))
-$(eval $(call SIGN_IMAGE,cap6000-ramp100,-DLED_CURRENT_LIMIT_MA=6000;-DAD_RAMP_MS=100))
-$(eval $(call SIGN_IMAGE,side5500,-DLED_CURRENT_LIMIT_SIDE_MA=5500))
+test-ads-budget: emu firmware-budget
+	python3 tests/ads_test.py $(EMU) $(BUILD)/firmware-$(BUDGET)/LED_Marquee.hex .. $(BUILD)/tests/ads-$(BUDGET) \
+	    14445 --limit-ma $(FW_BUDGET_LIMIT_MA) --ramp-ms $(FW_BUDGET_RAMP_MS)
+	python3 tests/ads_test.py $(EMU) $(BUILD)/firmware-$(BUDGET_SIDE)/LED_Marquee.hex .. \
+	    $(BUILD)/tests/ads-$(BUDGET_SIDE) 14451 --limit-side-ma $(FW_BUDGET_SIDE_MA)
 
-sign-images: firmware-ramp100 firmware-cap6000 firmware-cap6000-ramp100 firmware-side5500
+# Images for trying the settings on the sign: build/firmware-ramp100, -cap6000, -cap6000-ramp100
+# and -side5500 with these numbers. What a setting should be has to be found on the sign.
+SIGN_RAMP_MS ?= 100
+SIGN_CAP_MA  ?= 6000
+SIGN_SIDE_MA ?= 5500
+$(eval $(call SIGN_IMAGE,ramp$(SIGN_RAMP_MS),-DAD_RAMP_MS=$(SIGN_RAMP_MS)))
+$(eval $(call SIGN_IMAGE,cap$(SIGN_CAP_MA),-DLED_CURRENT_LIMIT_MA=$(SIGN_CAP_MA)))
+$(eval $(call SIGN_IMAGE,cap$(SIGN_CAP_MA)-ramp$(SIGN_RAMP_MS),-DLED_CURRENT_LIMIT_MA=$(SIGN_CAP_MA);-DAD_RAMP_MS=$(SIGN_RAMP_MS)))
+$(eval $(call SIGN_IMAGE,side$(SIGN_SIDE_MA),-DLED_CURRENT_LIMIT_SIDE_MA=$(SIGN_SIDE_MA)))
+
+sign-images: firmware-ramp$(SIGN_RAMP_MS) firmware-cap$(SIGN_CAP_MA) firmware-cap$(SIGN_CAP_MA)-ramp$(SIGN_RAMP_MS) \
+             firmware-side$(SIGN_SIDE_MA)
 
 clean:
 	cmake -E remove_directory $(BUILD)

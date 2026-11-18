@@ -42,6 +42,8 @@
 #define COLUMNS_PER_PANEL 60
 #define INTERCHAR_SPACE 1
 
+static uint BRIGHTNESS_SHIFT = 0; // the sketch's brightness shift ('B' utility message): none here
+
 #include "../Color.h"
 #include "../Gamma.h"
 #include "../Fonts.h"
@@ -346,15 +348,17 @@ static Run runWith(void (*show)(const char*, unsigned int), const char* text, un
 }
 
 static const Color ORANGE = {255, 120, 0};
+static const Color BLUE = {0, 161, 242};
+// The colours the messages are sent in: these two, except in testSupplyRandom
+static Color colourO = ORANGE;
+static Color colourC = BLUE;
 
-static void showO(const char* text, unsigned int dly) { showCharsOneByOneOnBothPanels(text, ORANGE, dly); }
+static void showO(const char* text, unsigned int dly) { showCharsOneByOneOnBothPanels(text, colourO, dly); }
 
-static void showC(const char* text, unsigned int dly) {
-    showChonkySlideStyleOnBothPanels(text, dly, Color{0, 161, 242}, false);
-}
+static void showC(const char* text, unsigned int dly) { showChonkySlideStyleOnBothPanels(text, dly, colourC, false); }
 
 static void showCNudge(const char* text, unsigned int dly) {
-    showChonkySlideStyleOnBothPanels(text, dly, Color{0, 161, 242}, true);
+    showChonkySlideStyleOnBothPanels(text, dly, colourC, true);
 }
 
 // a and b are the same time to within `tolUs`
@@ -728,6 +732,38 @@ static void testRandom() {
     tests++;
 }
 
+// Random texts in random colours, with short and long holds so that a ramp is cut off at every
+// point: runWith() holds EVERY frame that is sent to the supply's limits, the frames of a ramp and
+// every position of a nudge included. (With no limit set this only checks its other rules.)
+static void testSupplyRandom() {
+    srand(11);
+    const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 !.,$|\x7F\x0B";
+    // the two cases the reviews found: a frame part of the way up a ramp drew more than the last
+    colourC = Color{0, 96, 96};
+    runWith(showC, "$", 263);
+    colourC = Color{0, 192, 192};
+    runWith(showC, "|", 2710);
+    runWith(showCNudge, "ABCDEF|", 10);
+    for (int round = 0; round < 250; round++) {
+        std::string text;
+        int n = 1 + rand() % 12;
+        for (int i = 0; i < n; i++) text += alphabet[rand() % (sizeof(alphabet) - 1)];
+        // colours with single bits, runs of ones and values next to powers of two come up often:
+        // that is where what is sent jumps
+        const int edges[] = {0, 1, 11, 12, 15, 16, 31, 32, 63, 64, 96, 127, 128, 170, 191, 192, 254, 255};
+        auto value = [&]() { return (uint8_t) (rand() % 3 ? edges[rand() % 18] : rand() % 256); };
+        colourO = Color{value(), value(), value()};
+        colourC = Color{0, value(), value()};
+        unsigned int dly = (unsigned int) (rand() % 4 ? rand() % 140 : rand() % 900);
+        runWith(showO, text.c_str(), dly % 60);
+        runWith(showC, text.c_str(), dly);
+        if (round % 5 == 0) runWith(showCNudge, text.c_str(), dly % 40);
+    }
+    colourO = ORANGE;
+    colourC = BLUE;
+    tests++;
+}
+
 int main(int argc, char** argv) {
     showArt = argc > 1 && strcmp(argv[1], "--show") == 0;
     testOneByOneFits();
@@ -736,6 +772,7 @@ int main(int argc, char** argv) {
     testChonkyLong();
     testChonkyNudge();
     testRandom();
+    testSupplyRandom();
     // with a limit set, the texts above it were dimmed and those under it were not
     const bool limits = LIMIT_BOTH + LIMIT_SIDE > 0;
     if (limits) assert(dimmedRuns > 100 && undimmedRuns > 100);

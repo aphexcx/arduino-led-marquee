@@ -35,7 +35,7 @@ usage: ads_test.py <sign-emu> <firmware.hex> <repo root> <work dir> [port]
                    [--limit-ma N] [--limit-side-ma N] [--ramp-ms N] [--also playlist.jsonl]
 --also: more messages (one JSON object per line) to run and put in the table, for example the
 sign's own ad list; O and C messages in it get all the checks.
-Python 3 standard library only. Uses five TCP ports from `port` (default 14440).
+Python 3 standard library only. Uses seven TCP ports from `port` (default 14440).
 """
 import json
 import os
@@ -225,7 +225,9 @@ def run_group(env, name, messages, port, flags=()):
         first = at
         while at < len(frames) and frames[at].t <= requests[i + 1]:
             at += 1
-        out.append((requests[i], requests[i + 1], frames[first:at]))
+        # what the sign was showing when the message came: the last frame latched before it
+        before = frames[first - 1].load if first else [0, 0]
+        out.append((requests[i], requests[i + 1], frames[first:at], before))
     return out
 
 
@@ -240,6 +242,53 @@ def label(message):
                                " " + message["_note"] if "_note" in message else "")
 
 
+def check_shifted(env, message, start, end, frames):
+    """An O or C text that fits a panel, shown while the sign's brightness shift is `_shift`.
+    The shift halves what is sent, so a text that only the shift brings under the limits must be
+    left alone by them: not dimmed a second time. The colours themselves cannot be pinned (with a
+    shift the carry of each byte is whatever the shifting left), so each frame's load is held
+    between what the values come to without any carry and with every carry."""
+    log = [label(message)]
+    shift, wave = message["_shift"], message["type"] == "C"
+    font = env["chonk"] if wave else env["std"]
+    cols = font.columns(text_bytes(message))
+    if wave:
+        r, g, b = 0, message["g"], message["b"]
+    else:
+        frames = frames[1:]                               # the clear
+        message["_before"] = [0, 0]
+        r, g, b = (env["gamma"][message[k]] for k in "rgb")
+    common_checks(log, frames)
+    limit_check(log, env, message, frames)
+    dim = model_scale(env, cols, r, g, b, wave, shift)
+    plain = model_scale(env, cols, r, g, b, wave, 0)
+    if plain == 255:
+        # this image's limits are above this text even without the shift: nothing to tell apart
+        log.append("  note  this text is within the image's limits as it is; the shift makes no difference to them")
+    else:
+        check(log, plain < dim, "the test has teeth: without the shift this text would be dimmed to %d/256, "
+              "with shift %d %s" % (plain + 1, shift, "it fits as it is" if dim == 255 else
+                                    "only to %d/256" % (dim + 1)))
+    dly = message.get("dly", 0)
+    width = max(0, len(cols) - 1)
+    pad = 0 if wave else (PANEL - width) // 2
+    ok, low_seen, high_seen = True, 0, 0
+    for k, f in enumerate(frames if wave else frames[-1:]):
+        d = ramp_scale(env, dim, k) if wave else dim
+        low = high = 0
+        for c, v in enumerate(side(cols, 0, pad)):
+            red = dimmed((dly - 10 * k + 10 * c) & 0xFF, d) if wave else dimmed(r, d)
+            values = [red >> shift, dimmed(g, d) >> shift, dimmed(b, d) >> shift]
+            low += bin(v).count("1") * sum(values)
+            high += bin(v).count("1") * sum(carried(x) for x in values)
+        ok = ok and low <= f.load[0] <= high
+        low_seen, high_seen = max(low_seen, low), max(high_seen, high)
+    check(log, ok, "at brightness shift %d it is sent as the shift alone makes it, not dimmed again: every "
+          "frame's load on a side is between %.2f and %.2f A (most: %.2f A)"
+          % (shift, low_seen * AMPS, high_seen * AMPS, max([f.load[0] for f in frames] or [0]) * AMPS))
+    return log
+
+
 def check_table_only(env, message, start, end, frames):
     """A message that is only run for the table of what it asks of the supply."""
     supply_row(message, frames)
@@ -248,12 +297,14 @@ def check_table_only(env, message, start, end, frames):
 
 # ---- the supply -------------------------------------------------------------------------------------
 def supply_row(message, frames):
-    """Puts a message's row into the table. Returns (peak both sides, peak one side) as loads."""
+    """Puts a message's row into the table. Returns (peak both sides, peak one side) as loads.
+    A rise is from one latched frame to the next, and for a message's first frame from what the
+    sign was showing when the message came (a chonky text stays lit until the next message draws)."""
+    loads = [message.get("_before", [0, 0])] + [f.load for f in frames]
     both = [f.load[0] + f.load[1] for f in frames] or [0]
     one = [max(f.load) for f in frames] or [0]
-    rise_both = max([b - a for a, b in zip([0] + both, both)])
-    rise_one = max([max(g.load[0] - f.load[0], g.load[1] - f.load[1]) for f, g in zip(frames, frames[1:])]
-                   + [one[0]])
+    rise_both = max([sum(b) - sum(a) for a, b in zip(loads, loads[1:])] + [0])
+    rise_one = max([max(b[0] - a[0], b[1] - a[1]) for a, b in zip(loads, loads[1:])] + [0])
     supply.append((message["_order"], label(message), max(both) * AMPS, max(one) * AMPS, rise_both * AMPS,
                    rise_one * AMPS))
     return max(both), max(one)
@@ -274,11 +325,13 @@ def dimmed(v, scale):
     return v * (scale + 1) // 256
 
 
-def model_scale(env, cols, r, g, b, wave):
+def model_scale(env, cols, r, g, b, wave, shift=0):
     """How far a text in this colour must be dimmed (255 = not at all), worked out the slow way:
     the most LEDs any 60 columns of it light on a side, what each may then send under the limits,
-    and the brightest dimming that sends no more. wave: a chonky text, whose red can be any value
-    and whose green goes out carried."""
+    and the brightest dimming up to which no dimming sends more (a ramp passes through all those
+    below its own). wave: a chonky text, whose red can be any value and whose green goes out carried.
+    shift: the sign's brightness shift; with one, every value is shifted right before it is sent and
+    the carry of every byte is unknown, so all three channels are taken as carried."""
     lit = [bin(v).count("1") for v in cols]
     most = max([sum(lit[i:i + PANEL]) for i in range(len(lit))] or [0])
     allowed = 765
@@ -288,10 +341,11 @@ def model_scale(env, cols, r, g, b, wave):
         allowed = min(allowed, env["limit_side"] // most)
     best = 0
     for scale in range(256):
-        red = max(carried(dimmed(v, scale)) for v in range(256)) if wave else carried(dimmed(r, scale))
-        green = carried(dimmed(g, scale)) if wave else dimmed(g, scale)
+        red = (max(carried(dimmed(v, scale) >> shift) for v in range(256)) if wave
+               else carried(dimmed(r, scale) >> shift))
+        green = carried(dimmed(g, scale) >> shift) if wave or shift else dimmed(g, scale)
         # the brightest dimming up to which everything fits: a ramp passes through all those below it
-        if red + green + carried(dimmed(b, scale)) > allowed:
+        if red + green + carried(dimmed(b, scale) >> shift) > allowed:
             break
         best = scale
     return best
@@ -360,6 +414,7 @@ def check_one_by_one(env, message, start, end, frames):
     # the first frame after the request is clear(): all dark
     check(log, bool(frames) and not any(frames[0].mask), "the sign is cleared first")
     frames = frames[1:]
+    message["_before"] = [0, 0]                           # so its letters come onto a dark sign
     common_checks(log, frames)
     check(log, len(frames) == len(steps), "one frame per letter and per scrolled column (%d, expected %d)"
           % (len(frames), len(steps)))
@@ -464,7 +519,7 @@ def check_chonky(env, message, start, end, frames):
         # step can be a frame's share of the level plus up to a third of the level. On top comes
         # what the wave itself moves from one frame to the next once the text is fully on.
         both = [f.load[0] + f.load[1] for f in frames]
-        rises = [b - a for a, b in zip([0] + both, both)]
+        rises = [b - a for a, b in zip([sum(message.get("_before", [0, 0]))] + both, both)]
         flicker = max(rises[n:] + [0])
         bound = max(both) / n + max(both) / 3 + flicker
         check(log, max(rises[:n]) <= bound,
@@ -688,8 +743,17 @@ def main():
         {"type": "D", "str": "I LIVE FOR THAT ENERGY"}, {"type": "N", "str": "CHONKY MARQUEE"},
         {"type": "W", "str": "NEW MSG"}, {"type": "F", "str": "MIC ON"},
         {"type": "I", "str": "1", "r": 79, "g": 98, "b": 210}, {"type": "I", "str": "2", "r": 79, "g": 98, "b": 210})]
+    # The sign's brightness shift ('B' utility message), which halves every value: two short
+    # texts that are over this test's limits as they are and under them at shift 1
+    shifted = [
+        ({"type": "U", "subtype": "B", "str": "1", "_note": "(sets brightness shift 1)"}, check_table_only),
+        (dict(c("HI", 400), g=255, b=25, _shift=1, _note="(at brightness shift 1)"), check_shifted),
+        (dict(o("HI THERE!", 400), r=255, g=0, b=0, _shift=1, _note="(at brightness shift 1)"), check_shifted),
+        ({"type": "U", "subtype": "B", "str": "0", "_note": "(back to no shift)"}, check_table_only),
+        (dict(c("HI", 400), g=255, b=25, _note="(no shift again)"), check_chonky),
+    ]
     groups = [("one_by_one", one_by_one, ()), ("chonky", chonky, ()), ("rest", rest + quiet, ()),
-              ("notices", notices, ()), ("beat", beat, ("--bpm", "128"))]
+              ("notices", notices, ()), ("beat", beat, ("--bpm", "128")), ("shift", shifted, ())]
     if opts["--also"]:
         also = []
         for line in open(opts["--also"], encoding="utf-8"):
@@ -710,7 +774,8 @@ def main():
         try:
             runs = run_group(env, name, [m for m, _ in cases], port + i, flags)
             logs = []
-            for (message, checker), (start, end, frames) in zip(cases, runs):
+            for (message, checker), (start, end, frames, before) in zip(cases, runs):
+                message["_before"] = before
                 logs += checker(env, message, start, end, frames)
             results[i] = logs
         except Exception as e:  # a run that could not be made or read is a failed test, not a crash
