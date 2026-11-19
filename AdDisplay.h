@@ -40,6 +40,13 @@ static_assert(AD_SCROLL_SUBFRAMES >= 1, "AD_SCROLL_STEP_MS must be at least half
 // A frame is not started when the hold would end before it is out.
 #define AD_FRAME_TICKS AD_TICKS(6)
 
+// Each of the frames of a scrolled column needs the time a frame takes. A step of 9 ms with a wave
+// frame of 6 ms would ask for two frames of 4.5 ms: they cannot be sent that fast, and the scroll
+// would fall behind its clock. Such a pair of settings is refused here rather than adjusted.
+static_assert(AD_SCROLL_SUBFRAME_TICKS >= AD_FRAME_TICKS,
+              "AD_SCROLL_STEP_MS and AD_WAVE_FRAME_MS: the wave frames of one scrolled column would be less "
+              "than 6 ms apart; make AD_SCROLL_STEP_MS a multiple of AD_WAVE_FRAME_MS");
+
 // "All the characters" for adDrawFrame's `shown`
 #define AD_SHOW_ALL 0xFFFF
 

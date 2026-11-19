@@ -15,6 +15,8 @@
 // Scroll geometry of the chooser preview (pure functions, unit-tested on the host: see test/)
 #include "ChooserScroll.h"
 
+#include "BrightnessShift.h"
+
 #include "PixelBitBanging.h"
 
 #include "ArduinoJson-v6.18.3.h"
@@ -261,6 +263,8 @@ void show() {
                       1);       // Round up since the delay must be _at_least_ this long (too short might not work, too long not a problem)
 }
 
+// Every colour value is shifted right by this before it is sent ('B' utility message). Never more
+// than BRIGHTNESS_SHIFT_MAX: the message's handler sees to that, where it stores the value.
 uint BRIGHTNESS_SHIFT = 0;
 
 // Send 3 bytes of color data (R,G,B) for a signle pixel down all the connected stringsat the same time
@@ -333,6 +337,10 @@ static void sendString(const char* str, const Font& font, uint skip, const uint 
     unsigned int l = PIXELS / (font.width + INTERCHAR_SPACE);
 
     sendChar(*str, skip, r, g, b, true, font); // First char is special case because it can be stepped for smooth scrolling
+
+    if (!*str) {
+        return; // an empty string: that was its end (as a blank), and the loop below would start behind it
+    }
 
     // Send rest of string
     while (*(++str) && l--) {
@@ -418,6 +426,10 @@ void showAsInputStyle(const char* str, int idxToBlink, const char mode) {
     // Shift string from the start if it is longer than the max chars we can show,
     // so that last MAX_CHARS_PER_PANEL chars are always visible (plus _)
     str = str + shiftBy;
+    // ...and only those are drawn. (The whole line's length used to be drawn from the shifted start:
+    // the ten characters, then whatever follows the line in memory, and a line of 256 or more never
+    // ended, because the loop below counts in 8 bits.)
+    length -= shiftBy;
 
     unsigned int count = 2;
     clear();
@@ -566,6 +578,9 @@ void showAsFlashyStyle(const char* countdownstr, unsigned int time = 200) {
 }
 
 void showstarfieldcustom(int stars) {
+    if (stars < 0) {
+        stars = 0; // (the loop below counts unsigned: -1 stars were 65535 of them, minutes of nothing else)
+    }
     const uint field = 40;       // Good size for a field, must be less than 256 so counters fit in a byte
     uint sectors = (PIXELS / field);      // Repeating sectors makes for more stars and faster update
 
@@ -965,11 +980,17 @@ void loop() {
                         break;
                     }
                     case 'B': { // Brightness shift
+                        // 0 = full brightness; every step halves it; 8 = dark (nothing is left of a
+                        // value). The number is brought into that range HERE, once, before it is
+                        // stored. (It used to be stored as it came, the low byte of what atoi()
+                        // made of it: "200" gave a shift the compiler does not define, and in the
+                        // image it built, full brightness; "256" was 0.) More than 8 is 8 however
+                        // many digits the number has; below 0, and a text that is no number, is 0.
                         uint shift;
                         if (strlen(str) == 0) {
                             shift = BRIGHTNESS_SHIFT;
                         } else {
-                            shift = atoi(str);
+                            shift = brightnessShiftFromText(str, BRIGHTNESS_SHIFT_MAX);
                         }
                         BRIGHTNESS_SHIFT = shift;
                         char out[10];
@@ -1033,7 +1054,14 @@ void loop() {
                         break;
                     }
                     default: {
-                        showAsCountdownStyle(strcat("INVALID ICON: ", str), 100);
+                        // The text is put together in a buffer of its own. (strcat() onto the string
+                        // constant wrote the icon's name into the memory behind the constant, and
+                        // left the constant longer for the next such message.) 21 characters of the
+                        // name are more than the sign shows of it.
+                        char invalid[36];
+                        strcpy_P(invalid, PSTR("INVALID ICON: "));
+                        strncat(invalid, str, 21);
+                        showAsCountdownStyle(invalid, 100);
                         break;
                     }
                 }

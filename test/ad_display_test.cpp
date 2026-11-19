@@ -44,8 +44,12 @@
 // The sketch's settings (keep in step with the top of LED_Marquee.ino)
 #define CHARS_ONEBYONE_DELAY 50
 #define AD_SCROLL_HOLD_MS 600
+#ifndef AD_SCROLL_STEP_MS // (test/run.sh builds this file once more with a pair the header must refuse)
 #define AD_SCROLL_STEP_MS 35
+#endif
+#ifndef AD_WAVE_FRAME_MS
 #define AD_WAVE_FRAME_MS 10
+#endif
 
 // The font tables are what they should be: 96 characters each, the standard heart 2 columns wider
 static_assert(sizeof(FontStd5x7) == 95 * 5 + 7, "standard font: 0x20 to 0x7E and the heart");
@@ -495,7 +499,8 @@ static void checkChonky(const std::string& text, unsigned int dly) {
         // a text that fits: a frame every 10 ms for as long as it stays (1000 ms: 100 frames, as before)
         size_t expected = dly < 6 ? 1 : (dly - 6) / 10 + 1;
         assert(r.frames.size() == expected || r.frames.size() == expected + 1);
-        if (dly == 1000) assert(r.frames.size() == 100);
+        // (begun at 0, W, 2 W, ... while 6 ms of the hold are left; the hold starts when the first frame is out)
+        if (dly == 1000) assert(r.frames.size() == (1000 - 2) / AD_WAVE_FRAME_MS + 1);
     }
 }
 
