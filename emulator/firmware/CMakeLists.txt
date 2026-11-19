@@ -1,7 +1,9 @@
 # Builds the UNMODIFIED sketch (../../LED_Marquee.ino and its headers) into an
 # ELF + HEX for the emulator, with the repo's own arduino-cmake toolchain file,
-# so the compiler, flags, Arduino core and link order are the ones the flashed
-# build uses. Run it through ../build_firmware.sh, never by hand in the repo root.
+# so the flags and the link order are the ones the flashed build uses. The
+# compiler and the Arduino core are the ones ../Makefile names (ARDUINO_SDK,
+# fetched by ../fetch_toolchain.sh). Run it through the Makefile (make
+# firmware), never by hand in the repo root.
 #
 # Why this wrapper exists instead of pointing cmake at ../../CMakeLists.txt:
 #   1. That file sets LED_Marquee_PORT, which makes arduino-cmake generate the

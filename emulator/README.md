@@ -14,13 +14,15 @@ of the firmware's software serial port.
 
 ## Quick start
 
-Needs the Arduino IDE 1.8.x in `/Applications/Arduino.app` (its avr-gcc 7.3.0
-builds the firmware), plus `cmake`, `make`, the Xcode command-line compiler and
-`python3`. Nothing is installed: everything lands in `emulator/build/` and
-`emulator/third_party/`, both gitignored.
+Needs `cmake`, `make`, the Xcode command-line compiler, `curl` and `python3`
+(nothing but its standard library). The Arduino IDE is not needed: the first
+run fetches the AVR compiler and the Arduino AVR core, each pinned by version
+and checksum (see [The toolchain](#the-toolchain)). Nothing is installed:
+everything lands in `emulator/build/` and `emulator/third_party/`, both
+gitignored.
 
 ```sh
-make -C emulator          # firmware image + emulator (first run clones simavr v1.8)
+make -C emulator          # firmware image + emulator (first run fetches the toolchain and simavr v1.8)
 make -C emulator test     # all tests, about three minutes, no human needed
 ```
 
@@ -482,6 +484,7 @@ Seen while building this; the firmware is not changed by this directory.
 | `Makefile` | `make`, `make firmware`, `make firmware-debug` (a second image built with `FW_DEBUG_FLAGS`, default `-DCHOOSER_DEBUG_PANEL_B=1`: the chooser's measurements on panel B), `make run`, `make test`, `make test-ads`, `make test-fixes`, `make test-leftover`, `make clean` |
 | `firmware/` | CMake wrapper that builds the unmodified sketch (no upload target) |
 | `fetch_simavr.sh` | clones simavr at the pinned commit into `third_party/` |
+| `fetch_toolchain.sh` | fetches the Arduino AVR core and the compiler `AVR_COMPILER` names into `third_party/`, by version and SHA-256, and lays them out as the directory the repo's toolchain file expects |
 | `src/` | the emulator: `main.c`, `ihex.c` (firmware image reader), `ws2812.c` (LED decoder), `softuart.c` (serial pins, the queue of replies and breaks), `reply.c` (cuts the app's bytes into replies and directives), `link.c` (TCP), `view.c` (terminal), `record.c` (GIF, PNG, frames dump) |
 | `fake_app.py` | the app's side of the link |
 | `playlists/` | `all_types.jsonl`, `demo.jsonl`, `chooser_push.jsonl` (for `--contract 3`), `ads.jsonl` |
@@ -516,8 +519,31 @@ Build notes:
   emulator reads the Intel HEX file itself. A file that is cut short (no
   end-of-file record), has a line that is not a record, or places data
   outside the 32 KiB flash is refused, not loaded as far as it goes.
-- `make ARDUINO_SDK=/path/to/Arduino.app/Contents/Java` if the IDE lives
-  elsewhere.
+- `make ARDUINO_SDK=/Applications/Arduino.app/Contents/Java` builds with an
+  Arduino IDE 1.8.x instead of the fetched toolchain (its avr-gcc 7.3.0 and
+  its AVR core 1.8.3, as every image was built before the toolchain was
+  fetched). Nothing is fetched then.
+
+## The toolchain
+
+What the image is made of besides the sketch, and where each comes from.
+`make firmware` fetches the first two on its first run
+(`./fetch_toolchain.sh`), into `third_party/`:
+
+| | version | pinned by |
+| --- | --- | --- |
+| the Arduino AVR core (`Arduino.h`, `millis`, the pin tables) | ArduinoCore-avr 1.8.8 | the archive's SHA-256, as Arduino's package index gives it |
+| the compiler, `AVR_COMPILER` | `arduino-7.3.0`: avr-gcc 7.3.0-atmel3.6.1-arduino7, the Arduino project's newest (an Intel program: it needs Rosetta on an Apple Silicon Mac) | the archive's SHA-256, as Arduino's package index gives it |
+| ArduinoJson | 6.21.6, `ArduinoJson-v6.21.6.h` in the repo | the file itself |
+| SoftwareSerial | the core's with this repo's changes, `SoftwareSerial/` in the repo | the files themselves |
+| simavr (the emulator only) | v1.8 | the tag's commit (`./fetch_simavr.sh`) |
+
+`make firmware AVR_COMPILER=...` builds with another of the compilers
+`fetch_toolchain.sh` knows; the build tree is made afresh when the toolchain is
+not the one it was made with. cmake is run with the chosen toolchain first in
+`PATH`, and a build tree whose compiler, archiver or objcopy is not from that
+toolchain is refused, so an `avr-gcc` that happens to be installed on the
+computer never builds the image.
 
 ## Speed
 
