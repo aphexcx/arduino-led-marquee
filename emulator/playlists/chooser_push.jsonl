@@ -1,0 +1,10 @@
+# Chooser contract version 3: the app pushes. For fake_app.py --contract 3 and
+# sign-emu --link-directives --speed 1.
+# A 64-character message scrolls; after 4 s the selection changes and is pushed
+# (the line LOW for 50 ms, 20 ms, the message), and again 4 s later; 4 s after
+# that the app leaves chooser mode: the line LOW and nothing behind it. The
+# sign asks, and gets the last message.
+{"type":"H","str":"THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG AND KEEPS ON RUNNING","flashy":"1/3","_seconds":4}
+{"type":"H","str":"PACK MY BOX WITH FIVE DOZEN LIQUOR JUGS, THEN DANCE TILL SUNRISE","flashy":"2/3","_seconds":4}
+{"type":"H","str":"SPHINX OF BLACK QUARTZ, JUDGE MY VOW: THE BASS DROPS AT MIDNIGHT","flashy":"3/3","_seconds":4}
+{"type":"F","str":"BYE"}
