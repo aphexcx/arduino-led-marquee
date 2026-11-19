@@ -34,13 +34,19 @@
 //    complete object with a type. Anything less, and an "answer" that does not open like a
 //    message or cannot be read to its end, is the rest of something the sign did not hear the
 //    start of: it is let by, and then the sign asks again (chooserExchange). It is an error on
-//    the sign only when three requests in a row end that way.
+//    the sign only when three requests in a row end that way, or when the line does not fall
+//    silent behind such a thing.
 //  - A request that has gone out stands. Whether something of the app's began while it went
-//    out is known, not guessed (the receive pin's change flag at the end of the sign's own
-//    byte: chooserSendByte, in the sketch). If so its start was missed: the sign listens again
-//    once the line has paused, and reads the answer to the request it sent. That something
-//    crossed the request is never by itself a reason to ask again; a second request would take
-//    a second message from the app's list (chooserRequest).
+//    out is known, not guessed, and so is when (the receive pin's change flag, looked at after
+//    every bit of the sign's own byte: chooserSendByte, in the sketch). The one byte of the
+//    app's that began then is lost; the sign's serial port lets it go by and listens again
+//    from its end, so what follows it is received whole, the answer to the request too, however
+//    close behind. That something crossed the request is never by itself a reason to ask
+//    again; a second request would take a second message from the app's list (chooserRequest).
+//  - Once the app has raised its hand, the chooser message that comes next is shown from its
+//    start, by whatever way it comes: read where a push is looked for, read in an exchange the
+//    sign began for another reason, or as the plain answer to the sign's own request because
+//    the pushed one went by unread. Also when it is the message already showing (handSeen).
 //  - The first LOW the sign sees may be a bit of a message, not a break: the sign's own app
 //    raises its hand with a run of 0x00 bytes, and a break can be too short to see. A run of
 //    zeros is waited out like a break. A message that is already going by is let by, all of it,
@@ -325,6 +331,31 @@ static void chooserStore(const char* text, const char* count) {
 static unsigned long lineLowAtMs; // when the line was last seen LOW (millis)
 static bool lineWasLow;           // ... if it ever was
 
+// ONCE THE APP HAS RAISED ITS HAND, THE CHOOSER MESSAGE THAT COMES NEXT IS SHOWN FROM ITS START,
+// BY WHATEVER WAY IT COMES. The app raises its hand and sends the chooser message unasked when
+// what the chooser should show has changed, or when it has come back to the chooser. That
+// message is shown from its start also when it is the one already showing (the contract). It
+// does not always arrive where the sign looks for it (attentionRead). The sign may read it in
+// an exchange it began for another reason: where a request was due and the app was already
+// sending, as the "answer" to a request the push overtook, or behind a request it crossed. Or
+// the sign may not read it at all (it went by while the sign waited for the line to be quiet)
+// and get the same message as the plain answer to its own request. In all of these the caller
+// would call the same text "the same" and go on from the middle of it: an app that left and
+// came back to the same selection. So the hand is remembered until a message has been taken:
+//   - the line was LOW for CHOOSER_BREAK_MIN_US without a gap, in any wait that watches it
+//     (chooserAwaitQuietLine): a break, or one of the zero bytes the app sends for one
+//   - a 0x00 was received while the sign listened (chooserTakePadding): the same, received
+//   - a message was read where a request was due and none was sent (chooserExchange)
+// Not a hand: a LOW that was a bit of bytes going by (a stray frame, a late answer, a newline
+// behind the last message), also when such a byte crosses the sign's own request. The sign
+// asks then too, and the same message for an answer goes on from where it is.
+// Set in those three places (a break or zeros that cross a request are seen by the first two:
+// chooserRequest looks at the line for it). Read where a message is taken, and put down there:
+// what was seen up to the end of that read belongs to that message; a hand raised behind it
+// belongs to the next (chooserAsk, chooserAttention). Put down when the chooser comes on the
+// LEDs (showAsChooser).
+static bool handSeen;
+
 static bool lineSeenLow() {
     if (chooserLineLow()) {
         lineLowAtMs = millis();
@@ -360,8 +391,11 @@ static uint chooserAwaitQuietLine(unsigned int maxMs, unsigned int maxLowMs, uns
                 wasLow = true;
                 lowSinceUs = nowUs;
             }
-            if (stopAtBreak && nowUs - lowSinceUs >= CHOOSER_BREAK_MIN_US) {
-                return LINE_BREAK;
+            if (nowUs - lowSinceUs >= CHOOSER_BREAK_MIN_US) {
+                handSeen = true;
+                if (stopAtBreak) {
+                    return LINE_BREAK;
+                }
             }
             if (nowUs - lowSinceUs >= maxLowMs * 1000UL) {
                 return LINE_HELD;
@@ -413,6 +447,7 @@ static void chooserTakePadding(int c) {
     if (c == 0) {
         lineLowAtMs = millis();
         lineWasLow = true;
+        handSeen = true;
     }
 }
 
@@ -573,6 +608,7 @@ static bool chooserOpensMessage(unsigned int byteMs) {
     softSerial.read(); // the '{'
     unsigned long startMs = millis();
     uint waits = 0;
+    bool since = false; // a byte was taken since startMs was set
     do {
         int c = softSerial.peek();
         if (c == '"' || c == '}') {
@@ -583,13 +619,17 @@ static bool chooserOpensMessage(unsigned int byteMs) {
                 return false;
             }
             softSerial.read();
+            since = true;
             if (chooserIsWhiteSpace(c) && waits < CHOOSER_MAX_WHITE_WAITS) {
                 waits++;
                 startMs = millis(); // the next byte has the same time again
+                since = false;
             }
         }
     } while (millis() - startMs < byteMs);
-    frameRestMs = 0;
+    if (!since) {
+        frameRestMs = 0; // (silent for a byte's time: nothing more is coming)
+    }
     return false; // a brace and then nothing
 }
 
@@ -599,6 +639,7 @@ static bool chooserOpensMessage(unsigned int byteMs) {
 // taken, and the time that frame's bytes were given (0: nothing was read, or that time is over).
 static unsigned long frameEndMs;
 static unsigned int frameByteMs;
+static bool frameOpened; // the frame read last opened like a message (chooserOpensMessage)
 
 // Reads the message that begins at the front of the receive buffer (the caller has seen its '{'
 // there) into `into`, allowing byteMs for every byte after the first.
@@ -608,7 +649,8 @@ static DeserializationError chooserReadFrame(JsonDocument& into, unsigned int by
     DeserializationError err = DeserializationError::InvalidInput;
     softSerial.setTimeout(byteMs);
     frameRestMs = byteMs;
-    if (chooserOpensMessage(byteMs)) {
+    frameOpened = chooserOpensMessage(byteMs);
+    if (frameOpened) {
         ChooserReader reader = {true, false, false, false, 0, 0, -1};
         err = deserializeJson(into, reader);
         if (reader.starved) {
@@ -649,6 +691,24 @@ static uint chooserTake(bool readOk) {
     return CHOOSER_REPLY_CHANGED;
 }
 
+// WHAT STANDS WHERE THE ANSWER IS WAITED FOR AND IS NO ANSWER. Bytes that are no character of
+// text are stepped over (chooserIsPadding): white space the app wrote behind its last message,
+// the zeros of its hand, what the receiver makes of a pulse. So the rest of a newline that
+// crossed the request costs nothing: the answer behind it is read.
+// A character of text that is no opening brace, or a brace from which no whole message is
+// read, is something else: the rest of a frame nobody asked for (an answer that comes long
+// after the sign stopped waiting for it; a pushed message whose break the sign could not see),
+// or an answer damaged on the line. THE SIGN DOES NOT TRY TO FIND AN ANSWER BEHIND IT. It stops
+// listening, lets the line go by until it has been silent for the time an answer's byte is
+// given (a second), and asks again (chooserExchange). The cost, known and taken: an answer
+// that the app sends behind such bytes, glued to them or less than a second after them, goes
+// by with them, and the second request takes the app's next message. The sign's own app sends
+// nothing of the kind: it writes no frame unasked outside chooser mode, and in chooser mode
+// its requests take nothing.
+// (A version of this code followed such bytes to find where the answer began: three guesses
+// about where in a message the first byte heard stood. Four reviews in a row found a case it
+// lost. It is not here.)
+
 // Waits for the first byte of the answer to a '~', as long as a read waits for any byte.
 // Padding in front of it is thrown away (chooserIsPadding). A 0x00 is what a break is received
 // as when it falls while we are listening: the app raised its hand just as we asked, and what it
@@ -657,7 +717,10 @@ static uint chooserTake(bool readOk) {
 // A 0x00 that comes late in the wait is given the time a pushed message needs to follow it (the
 // rest of the break, the guard), so the wait can outlast ANSWER_FIRST_BYTE_MS by that much, once.
 // White space is a byte the app wrote for its answer: the byte behind it has the time any byte
-// of an answer has (ONE RULE). Other padding is given no time.
+// of an answer has (ONE RULE), CHOOSER_MAX_WHITE_WAITS times. Other padding is given no time,
+// and neither is white space beyond that count: the wait can then end as "no answer" with such
+// a byte only just received (nine bytes of white space each most of a second apart, in front of
+// an answer, cost that answer).
 static bool chooserAwaitAnswer() {
     unsigned long startMs = millis();
     unsigned long waitMs = ANSWER_FIRST_BYTE_MS;
@@ -722,12 +785,30 @@ static DeserializationError chooserReadMessage() {
 // How often one exchange may ask (again after letting go by what was not a message)
 #define REQUEST_MAX_TRIES 3
 
+// How often a request may find a byte on its way just as it begins to listen, and wait for the
+// line to be quiet once more
+#define REQUEST_MAX_LOOKS 3
+
 // Gets the request for the next message out, if the line allows it. loop()'s and the chooser's.
 //
 // Three rules keep the sign from talking into what the app is sending, and from asking twice:
 //  1. The line must be quiet first, for REQUEST_QUIET_MS, however long the app goes on (up to
 //     REQUEST_BUSY_WAIT_MS; a line LOW without a gap for REQUEST_QUIET_WAIT_MS is dead). So a
 //     request never follows a message of the app's by less than that, seen or not.
+//     THE LAST PART OF THAT QUIET IS WATCHED WITH THE RECEIVER ON (REQUEST_GAP_MS, longer than
+//     a byte). Between the last look at the line and the receiver's coming on there is a moment
+//     in which neither sees a start bit (the receiver works out its delays first: a bit time
+//     or two). A byte that begins just then (what the app wrote late behind its last message)
+//     would be taken from its middle, and so would every byte that follows it back to back:
+//     the answer, if the app sends it right behind. So the sign looks once more while it
+//     already listens: a LOW, or anything received, and the line was not quiet after all. That
+//     counts as a LOW seen (rule 2); the sign stops listening and waits for the quiet again.
+//     If that happens REQUEST_MAX_LOOKS times in a row, bytes nobody asked for keep arriving:
+//     no request is sent (REQUEST_UNASKED). A request never goes out unwatched.
+//     AND THE REQUEST IS NOT SENT WITH A BYTE RECEIVED: the last look of all is made by the
+//     serial port itself, with interrupts off, in front of the request's start bit
+//     (chooserSendRequest). A byte that was received in the moment before counts as above.
+//     So whatever the sign hears behind its request, it has heard nothing of it before.
 //  2. If the line was seen LOW less than CHOOSER_ATTN_FIRST_BYTE_MS ago (by any look, anywhere),
 //     the app may be about to send a message by itself. The sign listens for the rest of that
 //     time and sends nothing. If a byte comes, no request is sent: REQUEST_UNASKED.
@@ -735,48 +816,76 @@ static DeserializationError chooserReadMessage() {
 //     the line while it went out. The request byte goes out through chooserSendByte(), which
 //     says whether the line from the app changed meanwhile. If it did, something of the app's
 //     began while the sign could not receive: the app raising its hand (a break, or the run of
-//     0x00 bytes it sends instead of one), the first byte of a message it pushed, or noise. It
-//     cannot be the answer: the app had not received the request yet. Whatever it is, its
-//     start was missed, so the receiver is not trusted with it (it would take a byte from its
-//     middle): the sign stops listening until the line has been HIGH for REQUEST_GAP_MS, longer
-//     than it ever is between two bytes sent back to back, and then listens for the answer as
-//     after any request. What the app sends behind a break or a run of zeros is then read whole:
-//     the message it pushed, or, if it has left chooser mode, the answer to this very request.
-//     Asking again instead would take a second message from the app's list for the one shown.
-//     The one thing that is lost is a pushed message whose own first byte crossed the request
-//     (no break in front of it that the sign could see, and its first bit inside the 0.7 ms of
-//     the request): the request then gets no answer, the read ends as unanswered, and the sign
-//     is that much later, with nothing taken and no error. (If that message pauses further on,
-//     its second part arrives where the answer would, is let by like any rest of a message,
-//     and the sign does ask again: chooserExchange. The app is in chooser mode then.)
-//     And one limit: for that REQUEST_GAP_MS the sign hears nothing. The app answers a request
-//     2 to 9 ms after it. If NOISE crossed the request and the answer began within the
-//     millisecond after it, the answer goes by and the request counts as unanswered.
+//     0x00 bytes it sends instead of one), a byte it wrote late behind its last message (a
+//     newline), the first byte of a message it pushed, or noise. It cannot be the answer: the
+//     app had not received the request yet. That ONE byte is lost. Nothing else is: the sign's
+//     serial port knows in which bit of the request it began, so it knows when it is over, and
+//     listens again from there, in step (SoftwareSerial::write() in this sketch's copy). So
+//     whatever follows that byte is received whole, however close behind it: the rest of what
+//     the app was writing, and THE ANSWER TO THIS REQUEST, also when the app's UART sends it
+//     back to back with the bytes that crossed. (It used to wait for a pause on the line
+//     before it listened again, and an answer that began before that pause was over went by
+//     unheard: the app's message, taken from its list and never shown.)
+//     The receiver is off from the bit in which the byte began to the end of that byte: at
+//     most 0.59 ms behind the request's last data bit. A byte cannot be followed sooner by
+//     the same UART, so nothing the app sends is lost in that time. What is: an answer that
+//     begins in it after NOISE crossed the request (a LOW that was no byte). The app answers
+//     a request 2 to 9 ms after it.
+//     What that means for each thing that can cross:
+//      - a newline, or any white space or padding the app wrote behind its last message: the
+//        rest of it is stepped over where an answer is waited for, and the answer is read.
+//      - a break: nothing is received of it; a run of zeros: the rest of it is received as
+//        zeros and stepped over. What the app sends behind either is read whole: the message
+//        it pushed, or, if it has left chooser mode, the answer to this very request. Asking
+//        again instead would take a second message from the app's list for the one shown.
+//      - the first byte of a frame nobody asked for (a pushed message with no break in front
+//        of it that the sign could see; an answer that comes long after the sign stopped
+//        waiting): the rest of it does not open like a message. It is let by until the line
+//        has been silent for a second, and the sign asks again (chooserExchange). After a
+//        pushed message the app is in chooser mode, where a request takes nothing.
+//      - noise: nothing follows it, and the answer is read (but see the limit above).
+//     The crossing counts as a LOW seen (rule 2). Whether it was the app's hand, the line
+//     says: the sign looks at it for REQUEST_GAP_MS, with the receiver on (handSeen).
 static uint chooserRequest() {
-    if (chooserAwaitQuietLine(REQUEST_BUSY_WAIT_MS, REQUEST_QUIET_WAIT_MS, REQUEST_QUIET_MS, false) != LINE_QUIET) {
-        return REQUEST_DEAD;
-    }
-    startSerial(); // we stopped listening after the last read, so this starts with an empty buffer
-    while (lineWasLow && millis() - lineLowAtMs < CHOOSER_ATTN_FIRST_BYTE_MS) {
-        if (softSerial.peek() >= 0) {
+    for (uint looks = 1;; looks++) {
+        if (chooserAwaitQuietLine(REQUEST_BUSY_WAIT_MS, REQUEST_QUIET_WAIT_MS, REQUEST_QUIET_MS - REQUEST_GAP_MS,
+                                  false) != LINE_QUIET) {
+            return REQUEST_DEAD;
+        }
+        startSerial(); // we stopped listening after the last read, so this starts with an empty buffer
+        if (chooserAwaitQuietLine(REQUEST_GAP_MS, REQUEST_GAP_MS, REQUEST_GAP_MS, false) == LINE_QUIET &&
+            softSerial.peek() < 0) {
+            while (lineWasLow && millis() - lineLowAtMs < CHOOSER_ATTN_FIRST_BYTE_MS) {
+                if (softSerial.peek() >= 0) {
+                    return REQUEST_UNASKED;
+                }
+            }
+            bool crossed = false;
+#if CHOOSER_DEBUG_PANEL_B
+            crossed = chooserDebugLine();
+#endif
+            uint sent = chooserSendRequest('~');
+            if (sent != SEND_HELD) {
+                if (crossed || sent == SEND_CROSSED) {
+                    // (the port has let the byte that crossed go by and is listening again)
+                    lineLowAtMs = millis();
+                    lineWasLow = true;
+                    // A break is still LOW now, and stays so: that is the app's hand (handSeen is set
+                    // by this look). Zeros are received, and say so themselves. Anything else is no hand.
+                    chooserAwaitQuietLine(REQUEST_GAP_MS, REQUEST_GAP_MS, REQUEST_GAP_MS, false);
+                }
+                return REQUEST_SENT;
+            }
+        }
+        // a byte is on its way, or has just been received (the receiver's interrupt may have
+        // kept every look at the line from seeing it LOW)
+        lineLowAtMs = millis();
+        lineWasLow = true;
+        if (looks >= REQUEST_MAX_LOOKS) {
             return REQUEST_UNASKED;
         }
+        stopSerial(); // its start was not seen, or the request was not sent behind it: nothing of it is kept
     }
-    bool crossed = false;
-#if CHOOSER_DEBUG_PANEL_B
-    crossed = chooserDebugLine();
-#endif
-    if (chooserSendByte('~')) {
-        crossed = true;
-    }
-    if (crossed) {
-        stopSerial();
-        if (chooserAwaitQuietLine(REQUEST_BUSY_WAIT_MS, REQUEST_QUIET_WAIT_MS, REQUEST_GAP_MS, false) != LINE_QUIET) {
-            return REQUEST_DEAD; // (the request did go out; nothing can be heard on this line)
-        }
-        startSerial();
-    }
-    return REQUEST_SENT;
 }
 
 // The line is carrying the rest of something the sign did not hear the start of, or could not
@@ -785,10 +894,12 @@ static uint chooserRequest() {
 // ONE RULE, and it is not applied twice: when the read ended because a byte did not come in that
 // time (restMs is 0: see frameRestMs), the frame is over and there is no rest. The line is then
 // only looked at for a moment, as before any request.
-static void chooserLetRestPass(unsigned int restMs) {
+// False: the silence did not come within REQUEST_BUSY_WAIT_MS and restMs (or the line is held
+// LOW): bytes are still arriving, and no request belongs into them.
+static bool chooserLetRestPass(unsigned int restMs) {
     stopSerial();
-    chooserAwaitQuietLine(REQUEST_BUSY_WAIT_MS + restMs, REQUEST_QUIET_WAIT_MS, restMs ? restMs + 10 : REQUEST_GAP_MS,
-                          false);
+    return chooserAwaitQuietLine(REQUEST_BUSY_WAIT_MS + restMs, REQUEST_QUIET_WAIT_MS,
+                                 restMs ? restMs + 10 : REQUEST_GAP_MS, false) == LINE_QUIET;
 }
 
 // One exchange with the app: gets its next message into `json`. loop()'s read and the chooser's.
@@ -797,16 +908,23 @@ static void chooserLetRestPass(unsigned int restMs) {
 //               for an answer, and checked here for what came unasked)
 //   EmptyInput  no answer, or the line is dead
 //   another     the last of REQUEST_MAX_TRIES requests in a row was answered with something that
-//               opened like a message and could not be read
+//               could not be read; or the line did not fall silent behind such a thing
 // A FRAME IS WHOLE OR IT IS NOT A FRAME. What does not open like a message (`{"`), what opens
 // like one and cannot be read to its end, and what arrives unasked and is not a complete object
 // with a type, is first of all the rest of something whose start the sign did not hear (the app
 // may pause inside a message for longer than the line needs to look quiet). So it is no error
 // yet: it is let by, until the line has been quiet for longer than such a pause, and the sign
-// asks again. That costs no message: if the bytes were an answer that was damaged on the line,
-// its message was lost with them; if they were the rest of a pushed message, the app is in
-// chooser mode, where a request takes nothing. Only when the last try ends the same way is it
-// reported. The caller stops the listening.
+// asks again. If the line does not fall quiet behind what stood where an answer was due (bytes
+// go on arriving for seconds), THIS exchange ends there and sends no further request into
+// them. (That is a promise for one exchange. What its caller does next is the caller's: the
+// chooser asks once more, at once, as after any read that failed, and loop() shows the error
+// and asks when it comes round. A line that carries a byte every half second for five seconds
+// is not the app. And behind what came unasked the wait's result is not looked at: no request
+// is out then, and rule 2 of chooserRequest holds the next one for 150 ms behind any LOW.)
+// What it costs when the bytes were not the answer and the answer came close behind them is
+// said above (WHAT STANDS WHERE THE ANSWER IS WAITED FOR). It is reported when the last try
+// ends with something that could not be read, or the line did not fall silent. The caller
+// stops the listening.
 static DeserializationError chooserExchange() {
     DeserializationError unreadable = DeserializationError::EmptyInput;
     for (uint attempt = 0; attempt < REQUEST_MAX_TRIES; attempt++) {
@@ -819,6 +937,7 @@ static DeserializationError chooserExchange() {
             bool began = chooserAwaitObject(CHOOSER_ATTN_FIRST_BYTE_MS, CHOOSER_ATTN_BYTE_MS);
             if (began && chooserReadFrame(json, CHOOSER_ATTN_BYTE_MS) == DeserializationError::Ok &&
                 json["type"].is<const char*>()) {
+                handSeen = true; // nobody asked for this message: the app pushed it
                 return DeserializationError::Ok;
             }
             chooserLetRestPass(began ? frameRestMs : CHOOSER_ATTN_BYTE_MS);
@@ -829,7 +948,9 @@ static DeserializationError chooserExchange() {
             return err;
         }
         unreadable = err;
-        chooserLetRestPass(frameRestMs);
+        if (!chooserLetRestPass(frameRestMs)) {
+            return unreadable; // (the line never fell silent: nothing is asked into it)
+        }
     }
     return unreadable;
 }
@@ -892,9 +1013,14 @@ static bool chooserWait(unsigned long sinceUs, unsigned long us) {
 // Asks for the whole message the normal way and reads the answer into `json`, with the normal
 // read's patience (a second per byte). No error flash and no error text on the wire.
 // Only ever called with the text standing still or already stopped.
-static bool chooserAsk() {
+// `hand`: the app had raised its hand before that read ended (handSeen, which is put down here:
+// a hand raised behind the answer, which the look at what follows it may see, is the next
+// message's).
+static bool chooserAsk(bool& hand) {
     DeserializationError err = chooserExchange();
     stopSerial();
+    hand = handSeen;
+    handSeen = false;
     chooserLetTrailerPass();
     return err == DeserializationError::Ok;
 }
@@ -909,10 +1035,27 @@ static bool chooserSyncIsDue() {
     return chooser.blinkCount == 0 && millis() - chooser.fullReadMs >= CHOOSER_REFRESH_MS;
 }
 
+// Asks, and does to the display what the answer says (chooserTake). One thing more: if the app
+// has raised its hand since a message was last taken, a chooser message is shown from its start
+// even when it is the one already showing (see handSeen). Without a hand, the same message as
+// the answer to a request goes on from where it is.
+static uint chooserAskAndTake() {
+    bool hand;
+    uint reply = chooserTake(chooserAsk(hand));
+    if (reply == CHOOSER_REPLY_SAME && hand) {
+        chooserRestart();
+        reply = CHOOSER_REPLY_CHANGED;
+    }
+    if (reply == CHOOSER_REPLY_FAILED && hand) {
+        handSeen = true; // no message was taken: the hand is not answered yet
+    }
+    return reply;
+}
+
 // The read underneath the pushes: the whole message, compared with what is shown.
 static uint chooserSync() {
     chooser.syncDue = false; // one try per stand-still
-    return chooserTake(chooserAsk());
+    return chooserAskAndTake();
 }
 
 // Nothing usable was read: ask the normal way (chooserExchange() first lets whatever is still
@@ -921,7 +1064,7 @@ static uint chooserFallback() {
 #if CHOOSER_DEBUG_PANEL_B
     chooserCount(chooserDebug.fallbacks);
 #endif
-    return chooserTake(chooserAsk());
+    return chooserAskAndTake();
 }
 
 // The receive line was seen LOW: the app has something to say and will say it unasked.
@@ -944,6 +1087,9 @@ static bool attentionRead(JsonDocument& into) {
         if (!lineSeenLow()) {
             chooserDebug.lowMs = (unsigned int) ((micros() - seenUs + 999) / 1000);
             break;
+        }
+        if (micros() - seenUs >= CHOOSER_BREAK_MIN_US) {
+            handSeen = true; // (this wait takes the LOW from the one behind it, which would have said so)
         }
     }
 #endif
@@ -990,6 +1136,9 @@ static uint chooserAttention() {
         chooserRestart();
         reply = CHOOSER_REPLY_CHANGED;
     }
+    if (reply != CHOOSER_REPLY_FAILED) {
+        handSeen = false; // a message was taken: the hand is answered
+    }
     return reply;
 }
 
@@ -1009,6 +1158,7 @@ bool showAsChooser(const char* blinkyStr, const char* countyStr) {
     // ended it, or the stars), so the message is always drawn afresh here, from its start.
     chooserStore(blinkyStr, countyStr);
     chooserFullReadDone(); // loop()'s read has just brought this message
+    handSeen = false;      // ... and whatever hand was seen before it is answered by it
 
     bool attention = false; // the line was seen LOW during the last wait
     for (;;) {

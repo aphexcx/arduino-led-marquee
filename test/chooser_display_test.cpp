@@ -195,6 +195,12 @@ struct LowSpan {
     uint64_t fromUs, toUs;
 };
 
+// What the receiver makes of bytes whose start bit it did not see, and until when it is out of
+// step with the line (0: it is in step): see startSerial()
+static const char DAMAGED = '\x15';
+static uint64_t misframedUntilUs = 0;
+static uint64_t misframedFromUs = 0; // when the receiver took an edge inside a byte for a start bit
+
 static std::deque<WireByte> wire;        // bytes the sign has not read yet
 static std::vector<LineByte> lineBytes;  // every byte ever put on the line, in time order
 static std::vector<LowSpan> lineBreaks;  // every break, in time order
@@ -205,7 +211,12 @@ static uint64_t wireBusyUntilUs = 0;
 static uint64_t sendOnWire(const std::string& bytes, uint64_t startUs) {
     uint64_t at = startUs > wireBusyUntilUs + BYTE_US ? startUs : wireBusyUntilUs + BYTE_US;
     for (size_t i = 0; i < bytes.size(); i++) {
-        wire.push_back(WireByte{at, bytes[i], false, false});
+        char received = bytes[i];
+        if (misframedUntilUs && at - BYTE_US <= misframedUntilUs + BYTE_US / 2) {
+            received = DAMAGED; // back to back with a byte the receiver took from its middle
+            misframedUntilUs = at;
+        }
+        wire.push_back(WireByte{at, received, false, false});
         lineBytes.push_back(LineByte{at - BYTE_US, (uint8_t) bytes[i]});
         wireBusyUntilUs = at;
         at += BYTE_US;
@@ -266,6 +277,7 @@ struct ScriptEvent {
     uint64_t atUs;
     std::string message; // what the app would send for '~' from then on
     bool chooserMode;
+    std::string stray;   // not a change of what it holds: these bytes go on the line, with no hand in front
 };
 
 struct PendingRequest {
@@ -372,7 +384,13 @@ struct FakeApp {
     }
 
     void at(double atMs, const std::string& newMessage, bool stillChooser) {
-        script.push_back(ScriptEvent{(uint64_t) (atMs * 1000), newMessage, stillChooser});
+        script.push_back(ScriptEvent{(uint64_t) (atMs * 1000), newMessage, stillChooser, ""});
+    }
+
+    // Bytes nobody asked for and no hand in front of them (an answer that comes long after the
+    // sign stopped waiting for it), at that moment or when the line is free.
+    void strayAt(double atMs, const std::string& bytes) {
+        script.push_back(ScriptEvent{(uint64_t) (atMs * 1000), "", true, bytes});
     }
 
     // The sign has sent a request byte.
@@ -450,7 +468,10 @@ struct FakeApp {
         uint64_t scriptUs = script.empty() ? UINT64_MAX : script.front().atUs;
         uint64_t pendingUs = pending.empty() ? UINT64_MAX : pending.front().dueUs;
         uint64_t owedUs = pushOwed ? wireBusyUntilUs : UINT64_MAX;
-        if (scriptUs <= pendingUs && scriptUs <= owedUs) {
+        if (scriptUs <= pendingUs && scriptUs <= owedUs && !script.front().stray.empty()) {
+            sendOnWire(script.front().stray, scriptUs + BYTE_US);
+            script.erase(script.begin());
+        } else if (scriptUs <= pendingUs && scriptUs <= owedUs) {
             // the message changes (a command came in over Bluetooth)
             message = script.front().message;
             chooserMode = script.front().chooserMode;
@@ -590,70 +611,155 @@ struct FakeSerial {
 static FakeSerial softSerial;
 static unsigned long timeoutLeftBehind = 0;
 
+// How long begin() takes before the receiver is on (it works out its delays and waits one bit
+// time): in that time nobody sees a start bit, the sign's look at the line being over
+static const uint64_t BEGIN_US = 140;
+
+// begin(): the receiver comes on BEGIN_US later, with an empty buffer. A byte that is under way
+// at that moment was not seen to begin. If the line falls once more inside it (a 1 bit and
+// then a 0 bit), the receiver takes that edge for a start bit: it receives a byte that was
+// never sent, is still busy with it when the next byte begins, and so takes every byte that
+// follows back to back from its middle too, until the line pauses: bytes that are on the line
+// already, and bytes the app sends later (the answer, if its UART sends it right behind). The
+// sign's own byte going out in between changes nothing about that. If the line does not fall
+// again inside the byte under way, nothing is received of it and the next byte is good.
 static void startSerial() {
-    appAdvance(nowUs);
+    tick(BEGIN_US);
     softSerial.listening = true;
-    // begin() starts with an empty buffer, and a byte whose start bit we did not see is not received
-    while (!wire.empty() && wire.front().atUs < nowUs + BYTE_US) wire.pop_front();
+    misframedUntilUs = 0;
+    while (!wire.empty() && wire.front().atUs <= nowUs) wire.pop_front();
+    bool damaged = false;
+    uint64_t damagedUntilUs = 0;
+    for (size_t i = 0; i < wire.size(); i++) {
+        uint64_t startUs = wire[i].atUs - BYTE_US;
+        if (startUs < nowUs) {
+            // under way: a break is LOW and stays LOW (nothing received until it has risen and
+            // fallen again), a dip is over or will only rise
+            bool fallsAgain = false;
+            if (!wire[i].held && !wire[i].dip) {
+                unsigned bit = (unsigned) ((nowUs - startUs) * 10 / BYTE_US); // the bit the line is in now
+                for (unsigned next = bit + 1; next <= 8; next++) {            // (bits 1 to 8 are the data, lowest first)
+                    bool before = next - 1 == 0 ? false : ((wire[i].c >> (next - 2)) & 1);
+                    bool level = (wire[i].c >> (next - 1)) & 1;
+                    if (before && !level && !fallsAgain) {
+                        fallsAgain = true;
+                        misframedFromUs = startUs + next * BYTE_US / 10;
+                    }
+                }
+            }
+            if (fallsAgain) {
+                wire[i].c = DAMAGED;
+                damaged = true;
+                damagedUntilUs = wire[i].atUs;
+            } else {
+                wire[i].atUs = 0; // nothing of it is received
+            }
+        } else if (damaged && startUs <= damagedUntilUs + BYTE_US / 2 && !wire[i].held && !wire[i].dip) {
+            wire[i].c = DAMAGED;
+            damagedUntilUs = wire[i].atUs;
+        } else {
+            break;
+        }
+    }
+    for (size_t i = wire.size(); i-- > 0;) {
+        if (wire[i].atUs == 0) wire.erase(wire.begin() + (long) i);
+    }
+    if (damaged) misframedUntilUs = damagedUntilUs;
 }
 
 static void stopSerial() {
     softSerial.listening = false;
+    misframedUntilUs = 0;
     timeoutLeftBehind = softSerial.timeoutMs;
     lastLineReadUs = nowUs; // while it listened, the line was watched by the receiver
 }
 
 // The sketch's chooserSendByte(): sends one byte and says whether the line from the app changed
-// while it went out (the receive pin's change flag). It decides nothing and does not stop the
-// listening; that is the code under test's business.
-// What the sign's receiver makes of it, if it is left listening: a byte that began while the
-// sign was sending is taken from its middle, and so is every byte that follows it back to back
-// (the receiver finds no start bit until the line pauses). Those arrive as damaged bytes. A
-// break is still LOW when the receiver gets to it and is the 0x00 it always is.
+// while it went out (the receive pin's change flag). It decides nothing; that is the code under
+// test's business.
 // "While it went out" is its start bit and its eight data bits. With the stop bit the request is
 // in the app's hands, and the sign receives again from the first moment of it: a byte that begins
 // in the stop bit, or any time after, is good, and is not reported.
+// What the sign's serial port does about a change (the sketch's copy of SoftwareSerial, write()):
+// it knows in which bit of its own byte the change came, so it knows when a byte that began
+// there is over. It keeps its receiver off until then and switches it on between that byte and
+// the next: 8.5 bit times after the end of the bit in which the change came. So of what began
+// while the sign was sending, nothing is received: not the byte; not the 0x00 of a break (the
+// receiver comes back with the line LOW and waits for a falling edge); not a dip. Everything that
+// begins after that moment is received whole, also when it follows the lost byte back to back.
+// write() returns later for it, by one bit time for every bit of the sign's byte that had gone
+// out before the bit with the change.
+// One thing more that the real port does: while a byte of the app's is being received, the
+// receiver's interrupt holds the program. A send that falls due in that time begins when the
+// byte is in. (A byte that was under way when the receiver came on is being received only
+// from the edge the receiver takes for its start bit. A send that begins before that edge
+// is not held: the edge then falls under the sign's own byte, and the receiver is out of step
+// with everything that follows back to back.)
 static const uint64_t SEND_DEAF_US = BYTE_US * 9 / 10;
-static const char DAMAGED = '\x15';
+
+static void waitOutAByteUnderWay() {
+    for (size_t i = 0; i < wire.size(); i++) {
+        if (wire[i].dip) continue; // (a dip is over before the interrupt gets to look)
+        if (wire[i].c == DAMAGED && misframedUntilUs && nowUs < misframedFromUs) continue;
+        if (wire[i].atUs - BYTE_US <= nowUs && wire[i].atUs > nowUs) {
+            tick(wire[i].atUs - nowUs);
+            return;
+        }
+    }
+}
 
 static bool chooserSendByte(char c) {
     assert(softSerial.listening);
     assert(c == '~' || (c != '?' && c >= 0x20 && c < 0x7F));
-    uint64_t fromUs = nowUs;
+    waitOutAByteUnderWay();
+    const uint64_t fromUs = nowUs;
     tick(BYTE_US);
-    bool changed = false;
-    uint64_t damagedUntilUs = 0; // the arrival time of the last byte known damaged
-    for (size_t i = 0; i < wire.size(); i++) {
-        uint64_t startUs = wire[i].atUs - BYTE_US;
-        bool began = startUs >= fromUs && startUs < fromUs + SEND_DEAF_US;
-        changed = changed || began;
-        if (wire[i].held) continue;
-        if (wire[i].dip) {
-            // (the line is HIGH again when the receiver's interrupt gets to run: nothing received)
-            if (began) wire[i].atUs = 0;
-            continue;
-        }
-        if (began || (damagedUntilUs && wire[i].atUs <= damagedUntilUs + BYTE_US + REQUEST_GAP_MS * 1000 / 2)) {
-            wire[i].c = DAMAGED;
-            damagedUntilUs = wire[i].atUs;
-        }
-    }
-    for (size_t i = 0; i < lineBreaks.size(); i++) {
-        // any LOW that began (a break, or one too short to be the app holding the line)
-        changed = changed || (lineBreaks[i].fromUs >= fromUs && lineBreaks[i].fromUs < fromUs + SEND_DEAF_US);
-    }
     if (c == '~') {
         app.onRequest(c);
     } else {
         app.heard += c;
     }
+    // the first change of the line while the byte went out
+    uint64_t firstUs = UINT64_MAX;
+    for (size_t i = 0; i < wire.size(); i++) {
+        uint64_t startUs = wire[i].atUs - BYTE_US;
+        if (startUs >= fromUs && startUs < fromUs + SEND_DEAF_US && startUs < firstUs) firstUs = startUs;
+    }
+    for (size_t i = 0; i < lineBreaks.size(); i++) {
+        // any LOW that began (a break, or one too short to be the app holding the line)
+        uint64_t startUs = lineBreaks[i].fromUs;
+        if (startUs >= fromUs && startUs < fromUs + SEND_DEAF_US && startUs < firstUs) firstUs = startUs;
+    }
+    if (firstUs == UINT64_MAX) return false;
+    lostToTransmit++;
+    const uint64_t bit = (firstUs - fromUs) * 10 / BYTE_US + 1;             // 1 (the start bit) to 9
+    const uint64_t listensAgainUs = fromUs + (2 * bit + 17) * BYTE_US / 20; // 8.5 bit times after that bit
+    tick((bit - 1) * BYTE_US / 10);
     for (size_t i = wire.size(); i-- > 0;) {
-        if (wire[i].dip && wire[i].atUs == 0) wire.erase(wire.begin() + (long) i);
+        uint64_t startUs = wire[i].atUs - BYTE_US;
+        if (startUs >= fromUs && startUs < listensAgainUs) {
+            if (misframedUntilUs && wire[i].atUs > misframedUntilUs) misframedUntilUs = wire[i].atUs;
+            wire.erase(wire.begin() + (long) i);
+        }
     }
-    if (changed) {
-        lostToTransmit++;
+    return true;
+}
+
+// The sketch's chooserSendRequest(): the same, unless a byte of the app's has been received and
+// not read (the port's own look, with interrupts off, in front of the start bit).
+#define SEND_SENT 0
+#define SEND_CROSSED 1
+#define SEND_HELD 2
+static int heldRequests = 0; // how often a request was not sent because a byte had just been received
+
+static uint chooserSendRequest(char c) {
+    assert(softSerial.listening);
+    waitOutAByteUnderWay();
+    if (!wire.empty() && wire.front().atUs <= nowUs) {
+        heldRequests++;
+        return SEND_HELD;
     }
-    return changed;
+    return chooserSendByte(c) ? SEND_CROSSED : SEND_SENT;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -702,6 +808,9 @@ static void arrive(FakeApp::Kind kind, const std::string& text, const std::strin
     lostToTransmit = 0;
     lineWasLow = false; // as after a reset of the sign: no LOW has been seen yet
     frameByteMs = 0;    // ... and no frame read
+    handSeen = false;   // ... and no hand raised
+    misframedUntilUs = 0;
+    heldRequests = 0;
 #if CHOOSER_DEBUG_PANEL_B
     chooserDebug = ChooserDebug(); // as after a reset of the sign
 #endif
@@ -1812,11 +1921,13 @@ static void requestIsNotSentIntoAMessageOnItsWay() {
     // message needs to begin: it listens and does not ask, and the message is read whole.
     // If it saw nothing (the attention was over before it could look) it asks, and never into
     // the message. One moment is left: its request goes out just as the message's first byte
-    // begins. That byte is lost with the message's start, and THE REQUEST STANDS: the sign does
-    // not ask again (it cannot know that what crossed was a message and not the app leaving
-    // chooser mode, where a second request would take a second message from the list). The
-    // request has no answer (a request that crossed a pushed message gets none), the read ends
-    // as unanswered with nothing taken and no error, and the next request brings the message.
+    // begins. That one byte is lost, and with it the brace that makes a message of what follows.
+    // The rest is heard for what it is: bytes that do not open like a message, where an answer
+    // was due, so not an answer (the app leaving chooser mode sends nothing of the kind: its
+    // answer comes whole, behind its break). They are let by, and the sign asks again, in the
+    // same exchange: the app is in chooser mode, where a request takes nothing. The first
+    // request has no answer of its own (a request that crossed a pushed message gets none); the
+    // second brings the message. No error, and nothing taken twice.
     for (int zeros = 0; zeros < 2; zeros++) {                             // a break; the run of zero bytes
         int crossings = 0;
         for (int guardMs = 20; guardMs <= 38; guardMs += 18) {            // the contract's guard, and the app's slowest
@@ -1843,15 +1954,12 @@ static void requestIsNotSentIntoAMessageOnItsWay() {
                     uint64_t asked = app.requests[0].tUs; // (when the request byte had gone out)
                     assert(asked - BYTE_US < frameStart || asked >= frameEnd + 10000);
                 }
-                assert(app.requests.size() <= 1);
+                assert(got == DeserializationError::Ok);
                 if (lostToTransmit) {
                     crossings++;
-                    assert(app.requests.size() == 1 && answered() == 0);
-                    assert(got == DeserializationError::EmptyInput);
-                    assert(exchange() == DeserializationError::Ok); // the next request brings it
-                    assert(app.requests.size() == 2 && answered() == 1);
+                    assert(app.requests.size() == 2 && answered() == 1 && app.replies[0].empty());
                 } else {
-                    assert(got == DeserializationError::Ok);
+                    assert(app.requests.size() <= 1);
                 }
                 assert(strcmp(json["type"], "H") == 0 && FIRST == (const char*) json["str"]);
             }
@@ -2612,15 +2720,19 @@ static void replyThatBeginsInTheStopBitOfTheRequestIsRead() {
         assert(lostToTransmit == 0);
     }
     // One bit earlier it began while the request's last data bit went out: no UART answers
-    // what it has not been sent. That is something crossing the request, as before.
+    // what it has not been sent. That is something crossing the request: its first byte is
+    // lost, what is left of it does not open like a message and is let by, and the sign asks
+    // again. (Here that second request finds an app that is not in chooser mode and takes its
+    // next message: bytes like these, with no hand raised in front of them and no request,
+    // are nothing an app of the contract sends.)
     freshApp();
     arrive(FakeApp::V2_APP, "HELLO", "1/1");
     app.message = BYE;
     app.dropped.insert(1);
     nowUs = 5000 * 1000;
     sendOnWire(BYE, sentUs - BYTE_US / 10 - 20 + BYTE_US);
-    assert(exchange() == DeserializationError::EmptyInput);
-    assert(app.requests.size() == 1 && lostToTransmit == 1);
+    assert(exchange() == DeserializationError::Ok);
+    assert(app.requests.size() == 2 && lostToTransmit == 1 && answered() == 1);
 }
 
 static void everyByteOfAMessageHasItsOwnTime() {
@@ -2950,6 +3062,351 @@ static void lateTrailerInAScrollStepMakesItMillisecondsLate() {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Gate round 4
+// ---------------------------------------------------------------------------------------------
+
+static void bytesThatCrossTheRequestNeverCostTheAnswer() {
+    // What the app wrote behind its last message arrives late: just as the sign's next request
+    // goes out. Its first byte begins under the request, where the sign cannot receive. The
+    // app then answers the request, and its UART sends that answer behind the bytes it was
+    // still sending: back to back with them, or a moment later. The answer is the app's next
+    // message, taken from its list: it must be read, whatever the trailer is, wherever its
+    // first bit falls, however soon the answer follows. One request, one message.
+    // (The gate's run: "\r\n" 0.5 ms into the request, the answer 2 ms after it.)
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.message = BYE;
+    nowUs = 5000 * 1000;
+    assert(exchange() == DeserializationError::Ok);
+    const uint64_t startUs = app.requests[0].tUs - BYTE_US; // when the request's start bit fell, with a silent line
+    const char* const units[] = {"\r\n", " ", "\n", "\t \r\n"};
+    const size_t lengths[] = {1, 2, 3, 5, 9, 14};
+    const uint64_t answersUs[] = {0, 100, 350, 700, 1000, 2000, 3000, 5000, 9000, 20000};
+    long rows = 0, crossed = 0, glued = 0, both = 0, lost = 0;
+    for (size_t u = 0; u < 4; u++) {
+        for (size_t n = 0; n < 6; n++) {
+            const std::string trailer = repeat(units[u], lengths[n]);
+            for (size_t a = 0; a < 10; a++) {
+                // the trailer's first bit: from two byte times in front of the request's start
+                // bit (where the sign is about to listen, or has just begun to), through its
+                // data bits and its stop bit, to two byte times behind it
+                for (int64_t into = -2 * (int64_t) BYTE_US; into < 3 * (int64_t) BYTE_US; into += 23) {
+                    freshApp();
+                    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+                    app.message = BYE;
+                    app.latencyUs = answersUs[a];
+                    nowUs = 5000 * 1000;
+                    const uint64_t trailerEndUs = sendOnWire(trailer, (uint64_t) ((int64_t) startUs + into) + BYTE_US);
+                    DeserializationError got = exchange();
+                    rows++;
+                    if (got != DeserializationError::Ok || app.requests.size() != 1 || answered() != 1 ||
+                        strcmp(json["type"] | "", "D") != 0 || strcmp(json["str"] | "", "bye") != 0) {
+                        if (lost++ < 3) {
+                            printf("  %zu byte(s) of trailer beginning %lld us into the request, the answer %llu us "
+                                   "behind the request: %s, %zu request(s)\n", trailer.size(), (long long) into,
+                                   (unsigned long long) answersUs[a], got.c_str(), app.requests.size());
+                        }
+                        continue;
+                    }
+                    // (a trailer that begins under the request or behind it does not move the request;
+                    // one that the sign sees or hears coming makes it wait, as any byte does)
+                    if (into >= 0) assert(app.requests[0].tUs == startUs + BYTE_US);
+                    const bool wasGlued = app.requests[0].tUs + answersUs[a] <= trailerEndUs; // the answer had to wait for the trailer
+                    crossed += lostToTransmit;
+                    glued += wasGlued;
+                    both += lostToTransmit && wasGlued;
+                }
+            }
+        }
+    }
+    if (lost) printf("  the answer was lost, or asked for twice, in %ld of %ld rows\n", lost, rows);
+    assert(lost == 0);
+    // (the trailer did begin under the request in that many rows, and the answer was glued to it)
+    assert(crossed > rows / 8 && glued > rows / 10 && both > rows / 20);
+    if (wantShow) printf("  bytes behind a message that arrive as the next request goes out: %ld rows, %ld with the "
+                         "first byte under the request, %ld with the answer back to back behind the trailer, %ld "
+                         "with both: the answer was read in all\n", rows, crossed, glued, both);
+}
+
+// True if the exchange ended as it must when the app is not in chooser mode: its answer, the
+// next message of its list, was read, and it was asked once.
+static bool oneRequestOneAnswerRead(DeserializationError got) {
+    return got == DeserializationError::Ok && strcmp(json["type"] | "", "D") == 0 &&
+           strcmp(json["str"] | "", "bye") == 0 && app.requests.size() == 1 && answered() == 1;
+}
+
+static void byteReceivedJustBeforeTheRequestHoldsIt() {
+    // A byte is received in the moment between the sign's last look at its receive buffer and
+    // its request's start bit (the receiver's interrupt takes it, and then lets the program go
+    // on to send); the byte behind it would fall under the request. The request is not sent:
+    // the port looks once more, with interrupts off, in front of the start bit. The sign waits
+    // for a quiet line again, asks, and the answer is read: one request, one message.
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.message = BYE;
+    nowUs = 5000 * 1000;
+    assert(exchange() == DeserializationError::Ok);
+    const uint64_t startUs = app.requests[0].tUs - BYTE_US; // when the request's start bit falls, with a silent line
+    const char* const items[] = {"{}", "D\"}", "\"}", "\r\n"};
+    for (size_t i = 0; i < 4; i++) {
+        freshApp();
+        arrive(FakeApp::V2_APP, "HELLO", "1/1");
+        app.message = BYE;
+        app.latencyUs = 5000;
+        nowUs = 5000 * 1000;
+        // (in the buffer just behind the last look: the line of this model cannot say "the
+        // interrupt held the send", so the byte is put where the receiver would have it)
+        wire.push_back(WireByte{startUs + 1, items[i][0], false, false});
+        sendOnWire(items[i] + 1, startUs + 45 + BYTE_US);
+        DeserializationError got = exchange();
+        assert(heldRequests == 1 && lostToTransmit == 0);
+        assert(oneRequestOneAnswerRead(got));
+    }
+}
+
+static void whatIsNoAnswerIsLetByForASecondOfSilenceBeforeTheSignAsksAgain() {
+    // A frame nobody asked for (an answer that comes long after the sign stopped waiting for it)
+    // lies across the sign's request or goes on behind it. Its rest is no answer. The sign does
+    // not look for one behind it: it lets the line go by, and asks again when the line has been
+    // silent for a second, never into a pause of the frame. THE COST IS KNOWN: this app answers
+    // the first request behind the stray frame, that answer goes by with it, and the second
+    // request takes the next message: two taken, one shown. (The sign's own app sends no frame
+    // unasked outside chooser mode.)
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.message = BYE;
+    nowUs = 5000 * 1000;
+    assert(exchange() == DeserializationError::Ok);
+    const uint64_t sentUs = app.requests[0].tUs; // when the request is out, with a silent line
+    const uint64_t startUs = sentUs - BYTE_US;
+    const std::string late = "{\"type\":\"F\",\"str\":\"LATE {\"}";
+    for (int shape = 0; shape < 3; shape++) {
+        freshApp();
+        arrive(FakeApp::V2_APP, "HELLO", "1/1");
+        app.message = BYE;
+        app.latencyUs = 3000;
+        nowUs = 5000 * 1000;
+        uint64_t end;
+        if (shape == 0) {
+            end = sendOnWire(late, startUs + 300 + BYTE_US);                  // its first byte under the request
+        } else if (shape == 1) {
+            end = sendOnWire(late.substr(0, 8), startUs + 300 + BYTE_US);     // ... and two pauses of 0.6 s in it
+            end = sendOnWire(late.substr(8, 8), end + 600000 + BYTE_US);
+            end = sendOnWire(late.substr(16), end + 600000 + BYTE_US);
+        } else {
+            end = sendOnWire(late.substr(12), sentUs + 700 + BYTE_US);        // its second part, behind the request
+        }
+        DeserializationError got = exchange();
+        assert(got == DeserializationError::Ok && strcmp(json["str"] | "", "bye") == 0);
+        assert(app.requests.size() == 2 && answered() == 2);
+        // the second request: a second of silence behind the last byte that was on the line
+        // (the stray frame, and the first answer glued to it)
+        const uint64_t lastUs = end + strlen(BYE) * BYTE_US;
+        assert(app.requests[1].tUs >= lastUs + (uint64_t) ANSWER_FIRST_BYTE_MS * 1000);
+        assert(app.requests[1].tUs < lastUs + (uint64_t) (ANSWER_FIRST_BYTE_MS + 40) * 1000);
+    }
+
+    // And a line that does not fall silent (a byte every 0.6 s, for longer than the sign
+    // waits for silence): the exchange ends there. No second request goes into it.
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.message = BYE;
+    app.dropped.insert(1);
+    nowUs = 5000 * 1000;
+    uint64_t end = sentUs + 3000;
+    while (end < sentUs + 12 * 1000 * 1000) end = sendOnWire("x", end + 600000 + BYTE_US);
+    DeserializationError got = exchange();
+    assert(got != DeserializationError::Ok && got != DeserializationError::EmptyInput);
+    assert(app.requests.size() == 1);
+    assert(nowUs < end);
+
+    // A brace, a byte that is no text 0.6 s later, and the rest 0.6 s after that: "a brace
+    // and then nothing" is not said with a byte 0.4 s old. The sign waits out the whole of it.
+    const std::string hearted = "{\"type\":\"F\",\"str\":\"A{\x7F}B\"}";
+    const size_t brace = hearted.find("A{") + 1;
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.message = BYE;
+    app.latencyUs = 3000;
+    sendOnWire(hearted.substr(0, brace), 5000 * 1000 - 15000 - (brace - 1) * BYTE_US);
+    nowUs = 5000 * 1000;
+    end = sendOnWire(hearted.substr(brace, 1), sentUs + 3000 + BYTE_US);
+    end = sendOnWire(hearted.substr(brace + 1, 1), end + 600000 + BYTE_US);
+    end = sendOnWire(hearted.substr(brace + 2), end + 600000 + BYTE_US);
+    got = exchange();
+    assert(got == DeserializationError::Ok && app.requests.size() == 2);
+    assert(app.requests[1].tUs >= end + strlen(BYE) * BYTE_US + (uint64_t) ANSWER_FIRST_BYTE_MS * 1000);
+}
+
+// The text was in its middle before the push (at breakStartUs), and the first frame drawn after
+// it is its start, standing still; from there it scrolls on.
+static void assertStartedAgain(uint64_t pushUs) {
+    size_t before = frameAt(pushUs + 3000);
+    assert(positionOf(frames[before], FIRST, "3/9") > 30);
+    assert(before + 2 < frames.size());
+    if (positionOf(frames[before + 1], FIRST, "3/9") != 0) {
+        printf("  after the push at %.1f ms the text went on from column %d\n", ms(pushUs), positionOf(frames[before + 1], FIRST, "3/9"));
+    }
+    assert(positionOf(frames[before + 1], FIRST, "3/9") == 0);
+    double hold = ms(frames[before + 2].tUs - frames[before + 1].tUs);
+    assert(hold >= CHOOSER_HOLD_MS && hold < CHOOSER_HOLD_MS + 5);
+    assert(positionOf(frames[before + 2], FIRST, "3/9") == 1);
+}
+
+static void handThenTheSameMessageStartsItAgainByWhateverWayItComes() {
+    // The app raises its hand and sends the message the sign is already showing (it left and
+    // came back; or the selection was changed and changed back). The text starts again. Three
+    // ways the hand is known, each of them the only one in its runs:
+    const std::string same = chooserJson(FIRST, "3/9");
+
+    // 1. The line LOW for a break's length, seen by a wait that watches it. The message behind
+    //    it is cut in half or does not come at all, so the sign asks, and the plain answer to
+    //    its request is the same message. (With a break and with the app's zeros.)
+    for (int zeros = 0; zeros < 2; zeros++) {
+        for (int cut = 0; cut < 2; cut++) {
+            for (double offset = 0; offset < CHOOSER_SCROLL_DELAY_MS; offset += 3.1) {
+                freshApp();
+                app.breakAsZeros = zeros;
+                if (cut) app.damagedPush[1] = ""; else app.breakOnly.insert(1);
+                app.at(2000 + offset, same, true);
+                app.at(6000, BYE, false);
+                assert(runChooser(FakeApp::V3_APP, FIRST, "3/9"));
+                assertStartedAgain(app.pushes[0].breakStartUs);
+                assert(requestsWhileChoosing() == 1 && app.replies[0] == same);
+            }
+        }
+    }
+
+    // 2. A 0x00 received while the sign listens. A stray frame with no hand in front of it has
+    //    made the sign ask; the Pico is slow, and before the app has seen that request it
+    //    pushes. The hand arrives where the answer is waited for, and the pushed message is the
+    //    answer (the request gets no other).
+    int listening = 0;
+    for (int zeros = 0; zeros < 2; zeros++) {
+        for (double pushMs = 2200; pushMs < 2420; pushMs += 11) {
+            freshApp();
+            app.breakAsZeros = zeros;
+            app.latencyUs = 250000;
+            app.at(pushMs, same, true);
+            app.at(6000, BYE, false);
+            arrive(FakeApp::V3_APP, FIRST, "3/9");
+            sendOnWire(same, 2000 * 1000);
+            assert(showAsChooser(json["str"], json["flashy"]));
+            assert(app.pushes.size() == 2 && app.pushes[0].frame);
+            assertStartedAgain(app.pushes[0].breakStartUs);
+            // (the request was out and unanswered when the hand came: it came to a listening sign)
+            listening += !app.requests.empty() && app.requests[0].tUs < app.pushes[0].breakStartUs && app.replies[0].empty();
+        }
+    }
+    assert(listening >= 30);
+
+    // 3. A message read where a request was due and none was sent. No hand that the sign could
+    //    see (an app whose break is too short): a stray byte has made the sign listen instead of
+    //    asking, and the pushed message arrives in that time. Nobody asked for it: the app
+    //    pushed it.
+    int unasked = 0;
+    for (double pushMs = 2172; pushMs < 2270; pushMs += 7) {
+        freshApp();
+        app.breakUs = 0;
+        app.at(pushMs, same, true);
+        app.at(6000, BYE, false);
+        arrive(FakeApp::V3_APP, FIRST, "3/9");
+        sendOnWire("x", 2000 * 1000);      // nothing follows it: the sign will ask ...
+        sendOnWire("x", 2158 * 1000);      // ... and is about to, when another one makes it wait and listen
+        assert(showAsChooser(json["str"], json["flashy"]));
+        assert(app.pushes.size() == 2 && app.pushes[0].frame);
+        assertStartedAgain(app.pushes[0].breakStartUs);
+        unasked += requestsWhileChoosing() == 0;
+    }
+    assert(unasked >= 10);
+
+    // 4. And a hand that has had its message is forgotten. Seconds later a stray frame with no hand
+    //    in front of it makes the sign ask; the answer is the same message, and the text goes on
+    //    from where it stopped. Whichever read took the hand's message: the read of a push (a),
+    //    the sign's own request (b), or loop()'s read before the chooser came on the LEDs (c).
+    for (int way = 0; way < 3; way++) {
+        freshApp();
+        if (way == 1) app.breakOnly.insert(1);
+        const uint64_t strayUs = (way < 2 ? 4500 : 2500) * 1000;
+        if (way < 2) app.at(2000, same, true);
+        app.strayAt(ms(strayUs), same);
+        app.at(8000, BYE, false);
+        arrive(FakeApp::V3_APP, FIRST, "3/9");
+        if (way == 2) handSeen = true; // (loop()'s read saw the app's hand in front of this message)
+        assert(showAsChooser(json["str"], json["flashy"]));
+        if (way < 2) assertStartedAgain(app.pushes[0].breakStartUs);
+        size_t before = frameAt(strayUs + 3000);
+        int pos = positionOf(frames[before], FIRST, "3/9");
+        assert(pos > 30 && before + 1 < frames.size());
+        if (positionOf(frames[before + 1], FIRST, "3/9") != pos + 1) {
+            printf("  way %d: after the stray frame the text went to column %d from %d\n", way,
+                   positionOf(frames[before + 1], FIRST, "3/9"), pos);
+        }
+        assert(positionOf(frames[before + 1], FIRST, "3/9") == pos + 1);
+        assert(frames[before + 1].tUs > strayUs + 30000); // (it stood still while the sign asked)
+    }
+}
+
+static void appThatComesBackToTheSameSelectionStartsItAgain() {
+    // The app leaves chooser mode in the middle of a text (its hand, and nothing behind it) and
+    // comes back a moment later, to the same selection: its hand again, and the chooser message,
+    // the one the sign is showing. Wherever that push finds the sign (still waiting for a
+    // message behind the first hand; about to ask; with its request just gone out), it is a
+    // push: the text starts again at its beginning. It does not go on from the middle.
+    // (The gate's run: back 206 ms after leaving, the text went on from column 41.)
+    int backInTime = 0, tooLate = 0, wentOn = 0;
+    double worstMs = 0;
+    for (int zeros = 0; zeros < 2; zeros++) {
+        for (double backMs = 55; backMs < 330; backMs += 0.5) {
+            freshApp();
+            app.breakAsZeros = zeros;
+            app.at(2000, BYE, false);
+            app.at(2000 + backMs, chooserJson(FIRST, "3/9"), true);
+            app.at(2000 + backMs + 3000, BYE, false);
+            assert(runChooser(FakeApp::V3_APP, FIRST, "3/9"));
+            assert(strcmp(json["type"], "D") == 0 && strcmp(json["str"], "bye") == 0);
+            assertOnlyWholePictures(FIRST, "3/9", FIRST, "3/9");
+            size_t taken = 0;
+            for (size_t i = 0; i < app.replies.size(); i++) taken += app.replies[i] == BYE;
+            assert(taken == 1); // the message it left for is taken once, whichever way this went
+            // the last frame drawn before the app left, in the middle of the text
+            size_t before = frameAt(2000 * 1000);
+            assert(positionOf(frames[before], FIRST, "3/9") > 30);
+            if (before + 1 == frames.size()) {
+                // The sign's request found the app out of chooser mode: the chooser ended there,
+                // on the picture it had, and loop() shows the other message.
+                tooLate++;
+                continue;
+            }
+            // The app was back first. The next frame is the start of the text, standing still.
+            backInTime++;
+            assert(app.pushes.size() == 3 && app.pushes[1].frame);
+            if (positionOf(frames[before + 1], FIRST, "3/9") != 0) {
+                if (wentOn++ < 3) {
+                    printf("  back %.1f ms after leaving (%s): the text went on from column %d\n", backMs,
+                           zeros ? "zeros" : "a break", positionOf(frames[before + 1], FIRST, "3/9"));
+                }
+                continue;
+            }
+            // (within 150 ms of the pushed message's end where the sign read it; where it went by
+            // unread, the sign's own request is first given the time a push has to begin)
+            double late = ms(frames[before + 1].tUs - app.pushes[1].messageEndUs);
+            if (late > worstMs) worstMs = late;
+            assert(late < 150 + CHOOSER_ATTN_FIRST_BYTE_MS + REQUEST_QUIET_MS + 60);
+            double hold = ms(frames[before + 2].tUs - frames[before + 1].tUs);
+            assert(hold >= CHOOSER_HOLD_MS && hold < CHOOSER_HOLD_MS + 5);
+            for (size_t i = before + 2; i < frames.size(); i++) {
+                assert(positionOf(frames[i], FIRST, "3/9") == (int) (i - before - 1)); // and it scrolls on from there
+            }
+        }
+    }
+    if (wentOn) printf("  the text went on from its middle in %d of the %d runs in which the app was back in time\n", wentOn, backInTime);
+    assert(wentOn == 0);
+    assert(backInTime > 400 && tooLate > 100); // (both happened, each in many runs)
+    if (wantShow) printf("  an app that leaves and comes back to the same selection: the text starts again at the latest %.0f ms after the pushed message\n", worstMs);
+}
+
 #if CHOOSER_DEBUG_PANEL_B
 static void attentionThatCrossesTheBenchLineCostsNoMessage() {
     // The bench build sends 27 characters in front of a request and is deaf for all of them.
@@ -3192,6 +3649,11 @@ static const Test tests[] = {
     TEST(byteThatIsNoTextBetweenTwoTextsCostsNoMessage),
     TEST(whiteSpaceWithoutEndDoesNotHoldTheSign),
     TEST(lateTrailerInAScrollStepMakesItMillisecondsLate),
+    TEST(bytesThatCrossTheRequestNeverCostTheAnswer),
+    TEST(byteReceivedJustBeforeTheRequestHoldsIt),
+    TEST(whatIsNoAnswerIsLetByForASecondOfSilenceBeforeTheSignAsksAgain),
+    TEST(handThenTheSameMessageStartsItAgainByWhateverWayItComes),
+    TEST(appThatComesBackToTheSameSelectionStartsItAgain),
 #if CHOOSER_DEBUG_PANEL_B
     TEST(attentionThatCrossesTheBenchLineCostsNoMessage),
 #endif

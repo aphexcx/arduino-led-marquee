@@ -147,8 +147,10 @@ PROGMEM = "                    ";
 //back to back. Bytes that go on for longer are a message going by (the shortest message is 25 bytes, 17 ms, of
 //which the sign may miss the first 5 while it sends a frame)
 #define CHOOSER_TRAILER_LATE_MS 10
-//When the line from the app changed while a request went out, the sign listens again only once the line has been
-//HIGH for this long, in ms: longer than it is between two bytes sent back to back (nine bit times, 0.63 ms)
+//Longer than the line is ever HIGH between two bytes sent back to back (nine bit times, 0.63 ms), in ms. For this
+//long the sign watches the line with its receiver already on before it sends a request (the last part of
+//REQUEST_QUIET_MS); and the line must be HIGH this long before it asks again after a read that ended because a
+//byte did not come in its time
 #define REQUEST_GAP_MS 1
 //Before any '~' is sent (in every mode), the line from the app must have been quiet for this long, in ms, or
 //the answer would be read starting in the middle of whatever the app is sending. (The app wants about 10 ms of
@@ -235,7 +237,7 @@ static_assert(ANSWER_FIRST_BYTE_MS + REQUEST_BUSY_WAIT_MS <= 60000 && CHOOSER_AT
               "the time a byte is given is counted in ms in 16 bits");
 static_assert(CHOOSER_TRAILER_LATE_MS >= 1 && CHOOSER_TRAILER_LATE_MS <= 12,
               "what comes late behind a message must stay shorter than the shortest message less a frame (17 - 5 ms)");
-static_assert(REQUEST_GAP_MS >= 1 && REQUEST_GAP_MS <= REQUEST_QUIET_MS,
+static_assert(REQUEST_GAP_MS >= 1 && REQUEST_GAP_MS < REQUEST_QUIET_MS,
               "the gap must be longer than the line is HIGH inside a run of bytes (0.63 ms at most)");
 static_assert(CHOOSER_LINE_QUIET_MS >= 1 && CHOOSER_LINE_QUIET_MS < CHOOSER_ATTN_HIGH_WAIT_MS &&
               CHOOSER_LINE_QUIET_MS < CHOOSER_TRAILER_WAIT_MS,
@@ -834,13 +836,34 @@ static inline bool chooserLineLow() {
 // interrupts off too (PB2 is the only pin of its group that is watched, and only while the sign listens).
 // THE SIGN LISTENS FROM THE MOMENT ITS OWN BYTE CAN BE ANSWERED. With the last data bit the byte is in the app's
 // hands: a quick UART looks at the stop bit half way and may begin its answer in the 35 us that are left of it.
-// So the flag is looked at where the stop bit begins, and interrupts are back on from there: the bundled
+// So the flag is last looked at where the stop bit begins, and interrupts are back on from there: the bundled
 // SoftwareSerial's write() does both (see rxChangedDuringWrite() there). What begins in the stop bit or later is
-// received like any byte and is not reported. Nothing is decided here; what the sign does about a change is in
+// received like any byte and is not reported.
+// AND IT LOSES ONE BYTE, NOT WHAT FOLLOWS IT. write() looks at the flag after every bit it sends, so it knows in
+// which bit time the app's byte began and when it is over. It keeps the receiver off until then (it returns up
+// to eight bit times, 0.56 ms, later for that) and switches it on between that byte and the next: whatever the
+// app sends behind the byte that crossed, back to back or later, is received whole. (If what crossed was no byte
+// but noise, the receiver is off for that long all the same.) What the sign does about a crossing is in
 // chooserRequest().
 static bool chooserSendByte(char c) {
     softSerial.write(c);
     return softSerial.rxChangedDuringWrite();
+}
+
+// Sends a request byte, UNLESS A BYTE OF THE APP'S HAS BEEN RECEIVED AND NOT READ: then nothing is sent
+// (SEND_HELD). The sign must not ask with something of the app's already heard: what it hears after its request
+// would then be the middle of that, and it could not tell where the answer begins. Looking at the receive buffer
+// first is not enough: a byte that begins after that look is received by the interrupt, which holds the program
+// for the length of the byte and then lets it go on to send. So the look is made inside the bundled
+// SoftwareSerial, with interrupts off, right in front of the start bit (writeUnlessReceived() there).
+#define SEND_SENT 0    // the byte went out, and nothing of the app's began meanwhile
+#define SEND_CROSSED 1 // it went out, and something of the app's began while it did (see chooserSendByte)
+#define SEND_HELD 2    // it was not sent: a byte of the app's is in the receive buffer
+static uint chooserSendRequest(char c) {
+    if (!softSerial.writeUnlessReceived(c)) {
+        return SEND_HELD;
+    }
+    return softSerial.rxChangedDuringWrite() ? SEND_CROSSED : SEND_SENT;
 }
 
 // The chooser display (MSGTYPE_CHOOSER): showAsChooser() with its scrolling and its watch on the receive line,
