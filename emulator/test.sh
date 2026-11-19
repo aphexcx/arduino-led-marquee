@@ -28,6 +28,9 @@
 #      negative number of stars, icons it does not have (tests/fixes_test.py)
 #   8. nothing of the picture before a track id or the icons stays lit beside
 #      them (tests/leftover_test.py)
+#   9. the jump game: every frame of a list is drawn as its text reads, answers
+#      that are not a good frame leave the picture and are asked for again, and
+#      a scripted game's frames a second (tests/game_test.py)
 #   Before 7: the checks of 7 and 8 themselves, on frames in memory: right
 #   frames pass, and a message with one part missing, cut short, dark, moved,
 #   out of order, a bit too long or in another colour does not
@@ -36,7 +39,8 @@
 # The TCP ports can be moved with SIGN_EMU_TEST_PORT (default 14417; the link
 # tests use the eleven after it, the push tests the four after those, the ads
 # test three from the sixteenth, the test of 7 seven from the twenty-fourth, the
-# test of 8 two from the thirty-first) so two lanes can run the tests at once.
+# test of 8 two from the thirty-first, the test of 9 five from the fortieth) so
+# two lanes can run the tests at once.
 set -eu
 cd "$(dirname "$0")"
 
@@ -181,5 +185,8 @@ python3 tests/fixes_test.py build/sign-emu "$HEX" .. build/tests/fixes $((PORT +
 
 echo "== a track id and the icons after a text: nothing of the text stays lit beside them"
 python3 tests/leftover_test.py build/sign-emu "$HEX" .. build/tests/leftover $((PORT + 31))
+
+echo "== the jump game: its pictures, answers that are no frame, its pace"
+python3 tests/game_test.py build/sign-emu "$HEX" .. build/tests/game $((PORT + 40))
 
 echo "ALL TESTS PASSED"
