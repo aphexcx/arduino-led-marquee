@@ -588,6 +588,11 @@ void showIconInvaders(const Icon* icon, Color iconColor) {
 
     uint acount = PIXELS / (iconWidth + FONTSTD_WIDTH);      // How many aliens do we have room for?
 
+    // A row of icons stops 1 to 17 columns short of the end of the strip (by the icon's width and
+    // where the row stands), and what a frame does not reach keeps what the strip showed before:
+    // the end of the text before the icons stayed lit beside them. So the sign is cleared first.
+    clear();
+
     for (int8_t row = -7; row < 7; row++) {     // Walk down the rows
         //  Walk them 6 pixels per row
         // ALternate direction on each row
@@ -980,6 +985,11 @@ void loop() {
             }
             case MSGTYPE_TRACKID: {
 //                sector = 1; //TODO support color setting
+                // A track id starts half way across, and its frames end with its text: one of nine
+                // characters or fewer never reaches the right-hand end of side B, and what was
+                // there stayed lit beside it, and after it (no starfield follows). So the sign is
+                // cleared first. (The other marquees begin with frames longer than the strip.)
+                clear();
                 marquee(str, fontStd, false, MARQUEE_DELAY + 10);
                 break;
             }

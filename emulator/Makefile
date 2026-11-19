@@ -8,6 +8,7 @@
 #   make test       the smoke test (no human needed)
 #   make test-ads   only the ads' test: the O and C styles on the real firmware (half a minute)
 #   make test-fixes only the test of messages the sign must survive (half a minute)
+#   make test-leftover only the test that a track id and the icons leave nothing of the picture before
 #   make clean      delete build/ (third_party/ is kept)
 #
 # Everything is written under build/ and third_party/, both gitignored.
@@ -45,7 +46,7 @@ SIM_WARN  := -w
 EMU_NAMES := main ihex reply ws2812 softuart link view record
 EMU_OBJS  := $(EMU_NAMES:%=$(OBJ)/%.o)
 
-.PHONY: all firmware firmware-debug emu run test test-ads test-fixes clean
+.PHONY: all firmware firmware-debug emu run test test-ads test-fixes test-leftover clean
 all: firmware emu
 
 # ---- firmware ---------------------------------------------------------------
@@ -134,6 +135,9 @@ test-ads: all
 
 test-fixes: all
 	python3 tests/fixes_test.py $(EMU) $(FW_HEX) .. $(BUILD)/tests/fixes
+
+test-leftover: all
+	python3 tests/leftover_test.py $(EMU) $(FW_HEX) .. $(BUILD)/tests/leftover
 
 clean:
 	cmake -E remove_directory $(BUILD)
