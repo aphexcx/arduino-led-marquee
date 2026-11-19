@@ -6,13 +6,16 @@ nine characters or fewer never reaches the right-hand end of side B, and a row o
 to 17 columns short of it. What a frame does not reach keeps what the strip showed before. So
 both styles clear the sign first; this test holds them to it:
 
-  - every case comes after a white text that fills both sides ("the ad"), and the ad's last
-    frame is checked to be that text, LED for LED
+  - every case comes after a white text that fills both sides to their last column ("the ad":
+    eleven characters, so it has moved left until its last character, an H, stands at the right
+    edge), and the ad's last frame is checked to be that text, LED for LED, with all seven LEDs
+    of the strip's last column lit: what a message leaves behind there is seen
   - the message's first frame is the whole strip, dark
   - then every frame of the message is worked out here, from Fonts.h or Icons.h, and compared
     column for column: for a track id, 60 blank columns and the text, one column further left in
     each frame, as many frames as that row has columns; for the icons, the 98 frames of the
-    animation (14 rows of 7 steps) in the message's colour
+    animation (14 rows of 7 steps) in the message's colour. Each frame is as many bits as its
+    columns have, to the bit: 24 a column, no pixel begun and not finished
   - in every one of those frames the columns the frame did not write are dark
   - so a track id leaves the sign dark when it has passed
 
@@ -33,9 +36,15 @@ import fixes_test as F  # noqa: E402
 
 COLS, PANEL = A.COLS, A.PANEL
 check = A.check
-lit = F.lit
 
-AD = {"type": "O", "str": "TEN CHARS!", "r": 255, "g": 255, "b": 255, "dly": 100}
+# Eleven characters are 65 columns: the text moves left five, and its last character ends at the
+# last column of each side. That is an H: its last column is lit in all seven rows.
+AD = {"type": "O", "str": "I FILL BOTH", "r": 255, "g": 255, "b": 255, "dly": 100}
+ALL_ROWS = 0xFE
+
+
+def lit(frame):
+    return sum(bin(m).count("1") for m in frame.mask)
 
 
 def written(frame):
@@ -53,12 +62,16 @@ def ad_checks(env, log, ad_result):
     start, end, frames = ad_result
     ok = F.asked_again(log, start, end)
     last = frames[-1] if ok and frames else None
-    cols = env["std"].columns(A.text_bytes(AD))[:-1]         # 59 columns: it fills a side
-    expected = A.side(cols, 0, (PANEL - len(cols)) // 2)
+    cols = env["std"].columns(A.text_bytes(AD))[:-1]         # 65 columns: its end fills a side
+    expected = A.side(cols, len(cols) - PANEL)
     check(log, last is not None and last.mask[:PANEL] == expected and last.mask[PANEL:] == expected and
           all(last.colour(c) <= {"ffffff"} for c in range(COLS)),
-          "the text before it is on the sign: %s on both sides, white, lit to the last column but one of side B"
-          % json.dumps(AD["str"]))
+          "the text before it is on the sign: the end of %s on both sides, white" % json.dumps(AD["str"]))
+    # (asked of the frame itself, not of what was worked out: this is what the cases stand on)
+    check(log, last is not None and last.mask[PANEL - 1] == ALL_ROWS and last.mask[COLS - 1] == ALL_ROWS and
+          last.colour(COLS - 1) == {"ffffff"},
+          "and the last column of each side is lit, all seven LEDs: the strip's last column is white before "
+          "the message (rows %s)" % ("%02x" % last.mask[COLS - 1] if last is not None else "?"))
 
 
 def cleared_first(log, frames, wanted=True):
@@ -71,41 +84,102 @@ def cleared_first(log, frames, wanted=True):
     return dark
 
 
-# ---- 'T' -------------------------------------------------------------------------------------------
-def track_row(font, text):
-    """What a track id is: a row of 60 blank columns (ten spaces) and the text, each character with
-    its blank column. An empty text has no row."""
-    return ([0] * PANEL + font.columns(text)) if text else []
+# ---- 'T', 'D', 'N': the marquees ------------------------------------------------------------------
+MARQUEES = {"T": ("std", False), "D": ("std", True), "N": ("chonk", True)}     # the font; all of the blanks before?
+STARS_AFTER_MARQUEE = {"T": 0, "D": 100, "N": 100}
+
+
+def marquee_state(cases):
+    """Gives every marquee of a list what it starts from: `_colour`, the sketch's `sector` and
+    `colorStep` (they go on from one marquee to the next: from 1 and 0 at power-on), and
+    `_stars_before`, the random numbers the sign has drawn (300 at power-on)."""
+    sector, step, drawn = 1, 0, F.STARS_AT_START
+    for message, _ in cases:
+        if message["type"] not in MARQUEES:
+            continue
+        message["_colour"], message["_stars_before"] = (sector, step), drawn
+        sector = (sector + 1) % 3               # (every call of marquee() moves on a sector first)
+        text = A.text_bytes(message)
+        if text:
+            font, padded = MARQUEES[message["type"]]
+            blanks = COLS // ({"std": 5, "chonk": 8}[font] + 1)
+            for _ in range((blanks if padded else blanks - blanks // 2) + len(text)):
+                sector, step = ((sector + 1) % 3, 0) if step == 255 else (sector, step + 1)
+        drawn += STARS_AFTER_MARQUEE[message["type"]]
+
+
+def marquee_parts(env, message, strip):
+    """marquee() with sendPaddedString(), frame for frame. The row is blanks (as many characters as
+    the strip holds: 20, of the chonky font 13; a track id starts with half of them gone) and the
+    text. It is walked a character at a time and each character a column at a time (as many steps
+    as the font is wide and one more; the heart's width when the heart is at the front). A frame
+    is what is left of the character at the front, the blanks still to come, the text's first
+    character, and as many characters more as the strip holds less the blanks sent. Every
+    character has its blank column; a vertical tab is that column alone, at every step.
+    The colour goes round with the characters: one step of 255 per character, in three sectors
+    (red up and green down, red down and blue up, green up and blue down), through Gamma.h; no
+    beat comes in to whiten it. Then the stars, if the style has them."""
+    font_name, padded = MARQUEES[message["type"]]
+    font, text, gamma = env[font_name], A.text_bytes(message), env["gamma"]
+    holds = COLS // (font.cols + 1)
+    blanks = holds if padded else holds - holds // 2
+    sector, step = message["_colour"]
+    sector = (sector + 1) % 3
+
+    def cell(ch, skip=0):
+        glyph = font.columns(bytes([ch]))[:-1]
+        return glyph[min(skip, len(glyph)):] + [0]
+
+    wants = []
+    for at in range(blanks + len(text) if text else 0):
+        sector, step = ((sector + 1) % 3, 0) if step == 255 else (sector, step + 1)
+        up, down = gamma[step], gamma[255 - step]
+        rgb = ((up, down, 0), (down, 0, up), (0, up, down))[sector]
+        left, front = max(0, blanks - at), max(0, at - blanks)
+        for skip in range((font.heart_cols if not left and text[front] == A.HEART else font.cols) + 1):
+            more = holds
+            if left:
+                rows = cell(0x20, skip) + cell(0x20) * (left - 1) + cell(text[0])
+                more -= left - 1
+            else:
+                rows = cell(text[front], skip)
+            for ch in text[front + 1:front + 1 + more]:
+                rows += cell(ch)
+            wants.append(strip.frame([(r, rgb) for r in rows]))
+    parts = [F.Part("the marquee: the blanks and the text, a column further in every frame", wants)]
+    if STARS_AFTER_MARQUEE[message["type"]]:
+        parts.append(F.starfield(strip, STARS_AFTER_MARQUEE[message["type"]], message["_stars_before"]))
+    return parts
+
+
+def after_the_ad(env):
+    """The strip as the text before a case leaves it."""
+    cols = env["std"].columns(A.text_bytes(AD))[:-1]
+    one = A.side(cols, len(cols) - PANEL)
+    strip = F.Strip()
+    strip.clear()
+    return strip, strip.frame([(rows, (255, 255, 255)) for rows in one + one])
 
 
 def check_track(env, message, ad_result, result):
+    """A track id: the clear, then its marquee, each frame worked out. What a frame does not
+    reach is dark, because the clear made it so; and when it has passed, the sign is dark."""
     start, end, frames = result
-    text = A.text_bytes(message)
     log = ["%s %s, after a white text" % (message["type"], json.dumps(message["str"]))]
     ad_checks(env, log, ad_result)
     if not F.asked_again(log, start, end):
         return log
-    own = frames[1:] if cleared_first(log, frames) else frames
-    bad, most = beyond(own)
-    check(log, not bad, "in none of its %d frames is a column lit that the frame did not write (%d frames, up to %d "
-          "columns)" % (len(own), bad, most))
-    # Frame number i shows the row from its column i on, to the row's end (or the strip's), and
-    # there are as many frames as the row has columns.
-    row = track_row(env["std"], text)
-    check(log, len(own) == len(row), "one frame for every column of ten spaces and the text (%d frames, %d columns)"
-          % (len(own), len(row)))
-    lengths = sum(1 for i, f in enumerate(own) if f.bits // 24 >= min(COLS, len(row) - i))
-    right = sum(1 for i, f in enumerate(own)
-                if tuple(f.mask[:written(f)]) == tuple((row[i:] + [0] * COLS)[:written(f)]))
-    check(log, lengths == len(own) and right == len(own),
-          "every frame is that row from its own column on, as Fonts.h has the text, and reaches the row's end or "
-          "the strip's (%d of %d are that; %d reach the end)" % (right, len(own), lengths))
-    if own:
-        check(log, not lit(own[-1]), "when it has passed, the sign is dark")
+    cleared_first(log, frames)
+    strip = F.Strip()
+    parts = [F.Part("the clear", [strip.clear()])] + marquee_parts(env, message, strip)
+    F.check_parts(log, frames, parts)
+    check(log, bool(frames) and not lit(frames[-1]), "when it has passed, the sign is dark")
     return log
 
 
 def check_marquee_as_it_is(env, message, ad_result, result):
+    """The default and the chonky marquee: no clear, and none needed. Their frames are worked out
+    on top of what the text before them left on the strip, and then their 100 stars."""
     start, end, frames = result
     log = ["%s %s, after a white text" % (message["type"], json.dumps(message["str"]))]
     ad_checks(env, log, ad_result)
@@ -114,6 +188,8 @@ def check_marquee_as_it_is(env, message, ad_result, result):
     cleared_first(log, frames, wanted=False)
     check(log, bool(frames) and frames[0].bits >= COLS * 24, "and that frame is as long as the strip or longer: "
           "nothing of the text before it is left (%d columns)" % (frames[0].bits // 24 if frames else 0))
+    strip, _ = after_the_ad(env)
+    F.check_parts(log, frames, marquee_parts(env, message, strip))
     return log
 
 
@@ -158,8 +234,10 @@ def check_icon(env, message, ad_result, result):
     check(log, not bad, "in none of its %d frames is a column lit that the frame did not write (%d frames, up to %d "
           "columns)" % (len(own), bad, most))
     wanted = icon_frames(env["icons"][message["str"]])
+    # (to the bit: a frame with part of one more pixel behind it is not that frame. A's frames are
+    # up to 121 columns, one more than the strip has.)
     right = sum(1 for f, cols in zip(own, wanted)
-                if f.bits // 24 == len(cols) and tuple(f.mask[:len(cols)]) == tuple(cols[:COLS]))  # (A: up to 121)
+                if f.bits == 24 * len(cols) and tuple(f.mask[:len(cols)]) == tuple(cols[:COLS]))
     check(log, len(own) == len(wanted) == 98 and right == 98,
           "the animation, frame for frame as Icons.h has the icon: 14 rows of 7 steps, each frame the margin and "
           "the row of icons and no column more (%d frames, %d of them right)" % (len(own), right))
@@ -181,9 +259,11 @@ def main():
     std = A.table(fonts, "FontStd5x7[]")
     if len(std) != 95 * 5 + 7:
         sys.exit("Fonts.h is not what this test expects (%d values)" % len(std))
+    fenv = F.environment(root)
     names = {"1": "ENEMY1", "2": "ENEMY2", "X": "EXPLOSION", "A": "ANJUNA", "B": "BAAAHS", "D": "DREAMSTATE",
              "E": "DREAMSTATE"}                    # the sign draws E as D
     env = {"emu": sys.argv[1], "hex": sys.argv[2], "work": sys.argv[4], "std": A.Font(std, 5, 7),
+           "chonk": fenv["chonk"], "gamma": fenv["gamma"],
            "icons": {k: icon_table(icons_h, v) for k, v in names.items()}}
     port = int(sys.argv[5]) if len(sys.argv) > 5 else 14470
     os.makedirs(env["work"], exist_ok=True)
@@ -195,9 +275,10 @@ def main():
         return ({"type": "I", "str": name, "r": 0, "g": 0, "b": 255}, check_icon)
 
     tracks = [t("A"), t("TRACK"), t("TRACK ID"), t("NINE CHAR"), t("TEN CHARS?"), t("A TRACK ID OF 22 CHARS"),
-              t("I \u007f U"), t(" "), t(""),
+              t("I \u007f U"), t("\u007f FIRST"), t("A\u000bB"), t("\u00e9"), t(" "), t(""),
               ({"type": "D", "str": "HELLO"}, check_marquee_as_it_is),
               ({"type": "N", "str": "CHONKY"}, check_marquee_as_it_is)]
+    marquee_state(tracks)
     icons = [icon(name) for name in "12XABDE"]
     groups = [("tracks", tracks, 120), ("icons", icons, 120)]
     results = [None] * len(groups)

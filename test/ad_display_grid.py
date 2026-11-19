@@ -16,6 +16,9 @@ and held against what the compiler says.
 
 usage: test/ad_display_grid.py [--jobs N] [--waves A-B]      (from anywhere; about 1900 builds)
 Prints one line per pair that is not as worked out, then a summary; exit status 1 if there was one.
+A command line it cannot run as written (an option it does not know, a number that is none, a
+range from a larger to a smaller interval or outside 1 to 1000 ms, an option given twice,
+anything that would test no pair) is exit status 2 and a line that says why: a run that tested nothing never looks like a pass.
 Python 3 standard library and clang++ only.
 """
 import concurrent.futures
@@ -69,19 +72,54 @@ def one(pair):
     return step, wave, None
 
 
-def main():
+def refuse(why):
+    sys.stderr.write("ad_display_grid: %s\n"
+                     "usage: test/ad_display_grid.py [--jobs N] [--waves A-B]   (nothing was tested)\n" % why)
+    sys.exit(2)
+
+
+def number(option, text):
+    if not (text.isascii() and text.isdigit()):      # (the digits 0 to 9 only: no sign, no blank, not empty)
+        refuse("%s wants a whole number, not %r" % (option, text))
+    return int(text)
+
+
+def arguments(args):
+    """(jobs, first wave interval, last wave interval), or refuse()."""
     jobs, lo, hi = 1, 5, 101
-    args = sys.argv[1:]
+    args, given = list(args), set()
     while args:
         a = args.pop(0)
+        if a not in ("--jobs", "--waves"):
+            refuse("%r is not an option of this tool" % a)
+        if a in given:
+            refuse("%s is given twice: which of the two is meant?" % a)
+        given.add(a)
+        if not args:
+            refuse("%s wants a value after it" % a)
+        value = args.pop(0)
         if a == "--jobs":
-            jobs = int(args.pop(0))
-        elif a == "--waves":
-            lo, hi = [int(v) for v in args.pop(0).split("-")]
+            jobs = number(a, value)
+            if jobs < 1:
+                refuse("--jobs %d: at least one build at a time" % jobs)
         else:
-            sys.exit(__doc__)
+            ends = value.split("-")
+            if len(ends) != 2:
+                refuse("--waves wants two wave intervals in ms as A-B, not %r" % value)
+            lo, hi = number(a, ends[0]), number(a, ends[1])
+            if lo > hi:
+                refuse("--waves %d-%d runs from the larger interval to the smaller: no pair would be tested" % (lo, hi))
+            if lo < 1 or hi > 1000:
+                refuse("--waves %d-%d: wave intervals are 1 to 1000 ms here (the header accepts 6 to 100)" % (lo, hi))
+    return jobs, lo, hi
+
+
+def main():
+    jobs, lo, hi = arguments(sys.argv[1:])
     with tempfile.TemporaryDirectory() as out:
         pairs = [(s, w, out) for w in range(lo, hi + 1) for s in steps_for(w)]
+        if not pairs:
+            refuse("waves %d to %d ms give no pair of step and wave to test" % (lo, hi))
         bad = []
         ran = refused = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
@@ -96,6 +134,9 @@ def main():
     print("ad_display_grid: %d pairs of step and wave (waves %d to %d ms): %d accepted by the header, built and "
           "passed; %d refused by the header, as worked out; %d not as worked out"
           % (len(pairs), lo, hi, ran, refused, len(bad)))
+    if ran + refused + len(bad) != len(pairs):
+        print("ad_display_grid: %d pairs were not run" % (len(pairs) - ran - refused - len(bad)))
+        sys.exit(1)
     sys.exit(1 if bad else 0)
 
 
