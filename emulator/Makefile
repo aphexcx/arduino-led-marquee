@@ -7,7 +7,8 @@
 #   make run        live terminal view (start ./fake_app.py in another terminal)
 #   make test       the smoke test (no human needed)
 #   make test-ads   only the ads' test: the O and C styles on the real firmware (half a minute)
-#   make test-fixes only the test of messages the sign must survive (half a minute)
+#   make test-fixes only the test of messages the sign must survive (a minute), after the test
+#                   of its checks on frames in memory (tests/fixes_selftest.py)
 #   make test-leftover only the test that a track id and the icons leave nothing of the picture before
 #   make clean      delete build/ (third_party/ is kept)
 #
@@ -134,6 +135,7 @@ test-ads: all
 	python3 tests/ads_test.py $(EMU) $(FW_HEX) .. $(BUILD)/tests/ads
 
 test-fixes: all
+	python3 tests/fixes_selftest.py ..
 	python3 tests/fixes_test.py $(EMU) $(FW_HEX) .. $(BUILD)/tests/fixes
 
 test-leftover: all
