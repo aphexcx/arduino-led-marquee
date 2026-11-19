@@ -369,7 +369,13 @@ def check_chonky(env, message, start, end, frames):
         worst = max([abs(s - env["step"]) for s in steps] or [0])
         check(log, worst <= 0.5, "then one column every %d ms (worst %.2f ms off)" % (env["step"], worst))
     elif dly == 1000:
-        check(log, len(frames) == 100, "dly 1000 is 100 frames, as it always was (%d)" % len(frames))
+        # A frame every AD_WAVE_FRAME_MS for as long as the text stays. The hold is counted from when
+        # the first frame is out (4.4 to 4.9 ms after it was begun), and a frame is not begun when
+        # fewer than 6 ms of the hold are left: frames are begun at 0, W, 2 W, ... up to 1000 - 6 + 4.4.
+        # (10 ms: 100 frames, as it always was; 20 ms: 50; 15 ms: 67.)
+        wanted = (1000 - 2) // env["wave"] + 1
+        check(log, len(frames) == wanted, "dly 1000 is %d frames, one every %d ms (%d)"
+              % (wanted, env["wave"], len(frames)))
     elif dly == 0:
         check(log, len(frames) == 1, "dly 0 or missing is one frame (%d)" % len(frames))
     message["_long"] = bool(last)
