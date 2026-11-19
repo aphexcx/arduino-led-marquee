@@ -338,6 +338,7 @@ def main():
         "std": A.Font(std, 5, 7), "chonk": A.Font(chonk, 8, 8), "gamma": gamma,
         "letter": A.setting(sketch, "CHARS_ONEBYONE_DELAY"), "step": A.setting(sketch, "AD_SCROLL_STEP_MS"),
         "hold": A.setting(sketch, "AD_SCROLL_HOLD_MS"), "wave": A.setting(sketch, "AD_WAVE_FRAME_MS"),
+        "quiet": A.setting(sketch, "REQUEST_QUIET_MS", 0),     # (see ads_test.py: the wait before a request)
     }
     port = int(sys.argv[5]) if len(sys.argv) > 5 else 14460
     os.makedirs(env["work"], exist_ok=True)
