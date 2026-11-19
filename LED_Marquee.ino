@@ -12,6 +12,9 @@
 
 #include "Icons.h"
 
+// Scroll geometry of the chooser preview (pure functions, unit-tested on the host: see test/)
+#include "ChooserScroll.h"
+
 #include "PixelBitBanging.h"
 
 #include "ArduinoJson-v6.18.3.h"
@@ -95,6 +98,41 @@ PROGMEM = "                    ";
 //Speed (delay between frames) of flashy countdown animation, lower is faster
 #define COUNTDOWN_DELAY 500
 
+// ---- Chooser preview (MSGTYPE_CHOOSER): a message too wide for the space beside the count scrolls.
+// ---- These six values are the ones to tune:
+//How long the start of a scrolling message stands still before it moves (and again every time round), in ms
+#define CHOOSER_HOLD_MS 600
+//Time per scrolled LED column in ms, lower is faster. 35 is about 4.8 characters a second
+//(on the sign a step measures 36 to 37 ms: the millisecond clock stands still while a frame is sent)
+#define CHOOSER_SCROLL_DELAY_MS 35
+//Blank columns between the end of the message and its start coming round again. 18 is three spaces. 1 to 240
+#define CHOOSER_GAP_COLS 18
+//Brightness of scrolling text, 0-255 before gamma correction. 145 is where the fade blink of a short message starts
+#define CHOOSER_TEXT_BRIGHTNESS 145
+//While scrolling, ask the app "anything changed?" ('?') every this many columns. Lower reacts faster to !next
+#define CHOOSER_POLL_EVERY_COLS 6
+//While a text scrolls the app is only asked for a checksum of its message. The message itself is read again
+//every time the text has come round, and at the latest after this many ms (one short hitch if the text is moving).
+//Lower is safer against a wrong preview staying up, higher hitches long texts less often. 1000 to 30000
+#define CHOOSER_REFRESH_MS 8000
+// ---- The rest rarely needs touching:
+//Ask the app at least every this many ms, whatever the scroll is doing (the app lane counts on 250 at most)
+#define CHOOSER_POLL_EVERY_MS 200
+//How long to wait for each byte of the app's answer to a chooser poll, in ms. A late answer costs one visible hitch
+#define CHOOSER_POLL_TIMEOUT_MS 60
+//After this many requests in a row without a usable answer, ask the normal way (which waits up to a second).
+//If the same chooser message comes back the scroll carries on from where it was
+#define CHOOSER_MAX_FAILED_POLLS 3
+
+// ---- Ads (MSGTYPE_ONE_BY_ONE, MSGTYPE_CHONKY_SLIDE): a text wider than a panel scrolls to its end by itself.
+// ---- Their "dly" is real milliseconds. These three values are the ones to tune (see AdDisplay.h):
+//How long the start of a too-wide chonky text stands still before it moves, in ms
+#define AD_SCROLL_HOLD_MS 600
+//Time per scrolled LED column in ms, lower is faster. 35 is the chooser's pace, about 4.8 one-by-one letters a second
+#define AD_SCROLL_STEP_MS 35
+//Time per frame of the chonky colour wave in ms. 10 is 100 frames a second, what a dly of 1000 always gave
+#define AD_WAVE_FRAME_MS 10
+
 // Change this to be at least as long as your pixel string (too long will work fine, just be a little slower)
 #define NUM_PANELS 2  // Number of panels. There are 2.
 #define COLUMNS_PER_PANEL 60  // Number of columns per panel, in my case, the # of pixels in each LED string. I am using 60LED/M
@@ -134,30 +172,29 @@ const char KEYBOARD_MODE_WARNING = 'W';
 const char VT = '\u000B';
 const char HEART = '\u007F';
 
+// ChooserScroll.h keeps its own copies of these numbers so that it compiles without the sketch
+static_assert(CHOOSER_PANEL_COLS == COLUMNS_PER_PANEL, "ChooserScroll.h: panel width");
+static_assert(CHOOSER_GLYPH_COLS == FONTSTD_WIDTH && CHOOSER_HEART_COLS == HEART_WIDTH && INTERCHAR_SPACE == 1,
+              "ChooserScroll.h: font widths");
+static_assert(CHOOSER_CHAR_VT == VT && CHOOSER_CHAR_HEART == HEART, "ChooserScroll.h: special characters");
+static_assert(CHOOSER_GAP_COLS >= 1 && CHOOSER_GAP_COLS <= 240, "CHOOSER_GAP_COLS must be 1 to 240");
+static_assert(CHOOSER_REFRESH_MS >= 1000 && CHOOSER_REFRESH_MS <= 30000, "CHOOSER_REFRESH_MS must be 1000 to 30000");
+static_assert(CHOOSER_POLL_EVERY_MS <= 250, "the app expects a chooser poll at least every 250 ms");
+
+// TextWindow.h (the column arithmetic) and AdDisplay.h keep their own copies of these so that they compile without the sketch
+static_assert(TEXT_CHAR_VT == VT && TEXT_CHAR_HEART == HEART && INTERCHAR_SPACE == 1, "TextWindow.h: special characters");
+
 /* Calculates how many empty columns to pad this string on its start and on its end,
  * and stores the results in startPad and endPad. Helps get it to be in the middle of the panel.
  * E.g.
  * (columns - total string width) = startPad, endPad
  * (60-6) = 27, 27
  * (60-5) = 27, 28
+ * The width is what the string senders really send: a vertical tab is one column, the heart is
+ * as wide as the font says. A string as wide as the panel or wider gets no padding.
  */
-void getColumnsToPadForString(const char* str, int fontWidth, uint* startPad, uint* endPad) {
-    uint stringColumns = 0;
-    while (*str++) {
-        if (*str != VT) {
-            stringColumns += (fontWidth + INTERCHAR_SPACE);
-        }
-    }
-    //Subtract 1 because we don't append an interchar space at the end of the string
-    stringColumns -= 1;
-
-    uint usedCols = COLUMNS_PER_PANEL - stringColumns;
-    *startPad = usedCols / 2;
-    if (usedCols % 2 == 0) {
-        *endPad = usedCols / 2;
-    } else {
-        *endPad = usedCols / 2 + 1;
-    }
+void getColumnsToPadForString(const char* str, const Font& font, uint* startPad, uint* endPad) {
+    textCentre(textCols(fontMetrics(font), str), COLUMNS_PER_PANEL, startPad, endPad);
 }
 
 // Just wait long enough without sending any bits to cause the pixels to latch and display the last sent frame
@@ -207,10 +244,14 @@ static void sendChar(
 
     // For the VT char, we only send a single column (so just the interchar space)
     if (ch != VT) {
-        const uint* charbase = font.data + ((ch - ' ') * font.width);
+        // A byte the font has no picture for is drawn as a space
+        const uint* charbase = font.data + ((textInFont(ch) ? ch - ' ' : 0) * font.width);
         uint col = font.width;
         if (ch == HEART) {
-            col = HEART_WIDTH;
+            col = font.heartWidth; // the heart can be wider than the other characters
+        }
+        if (skip > col) {
+            skip = col;
         }
 
         while (skip--) {
@@ -273,59 +314,13 @@ void sendEmptyColumns(int columns) {
 }
 
 static inline void
-sendStringJustified(const char* s, const Font& font, uint skip, const uint r, const uint g, const uint b) {
-    uint startPad, endPad;
-    getColumnsToPadForString(s, font.width, &startPad, &endPad);
+sendStringJustified(const char* s, const Font& font, uint skip, const uint r, const uint g, const uint b,
+                    uint startPad, uint endPad) {
+    // startPad and endPad are from getColumnsToPadForString(): the caller works them out before it
+    // turns interrupts off, so that walking the string does not make a pause in the middle of a frame
     sendEmptyColumns(startPad);
     sendString(s, font, skip, r, g, b);
     sendEmptyColumns(endPad);
-}
-
-// Keep track of where we are in the color cycle between chars
-uint* cyclingColor = (uint * )(calloc(1, sizeof(uint)));
-
-// Send a char with a column-based color cycle
-static inline void sendCharColorCycle(const Font& font, uint c,
-                                      uint skip,
-                                      uint* r, uint* g, uint* b) {
-    const uint* charbase = font.data + ((c - ' ') * font.width);
-    uint col = font.width;
-
-    while (skip--) {
-        charbase++;
-        col--;
-    }
-
-    while (col--) {
-        sendColumnRGB(pgm_read_byte_near(charbase++), *r, *g, *b);
-        *cyclingColor += 10;
-    }
-//    if (sendTrailingSpace) {
-    sendColumnRGB(0, 0, 0, 0); // Interchar space
-//    }
-    *cyclingColor += 10;
-}
-
-// Show the passed string with the arcade font and a nice vertical color cycle effect
-// columnsPrefix: the # of empty columns to add before the string, useful for spacing
-static inline void
-sendStringColorCycle(const Font& font, const char* str, int columnsPrefix,
-                     uint skip,
-                     uint* r, uint* g, uint* b) {
-
-    unsigned int l = PIXELS / (font.width + INTERCHAR_SPACE);
-
-    while (columnsPrefix--) {
-        sendColumnRGB(0, 0x00, 0x00, 0x00);
-    }
-
-    sendCharColorCycle(font, *str, skip, r, g,
-                       b); // First char is special case because it can be stepped for smooth scrolling
-
-    // Send rest of string
-    while (*(++str) && l--) {
-        sendCharColorCycle(font, *str, 0, r, g, b);
-    }
 }
 
 void setupDiagnosticLed() {
@@ -408,52 +403,10 @@ void showAsInputStyle(const char* str, int idxToBlink, const char mode) {
     }
 }
 
-void showAsChooser(const char* blinkyStr, const char* countyStr) {
-
-//    int maxStrLen = 10; // max number of chars to show //TODO or, could scroll the whole thing
-//    blinkyStr[maxStrLen] = 0x00; //chop here
-
-    int blinkyLen = strlen(blinkyStr);
-    int shiftBy = constrain(blinkyLen - MAX_CHARS_PER_PANEL - strlen(countyStr), 0, blinkyLen);
-    // Shift string from the start if it is longer than the max chars we can show,
-    // so that last MAX_CHARS_PER_PANEL chars are always visible (plus _)
-//    blinkyStr = blinkyStr + shiftBy;
-
-    unsigned int count = 58;
-
-    clear();
-    while (count > 0) {
-        count--;
-        uint brightness = GAMMA(((count % 100) * 256) / 100);
-
-        cli();
-
-        // County part
-        sendString(countyStr, fontStd, 0, 0x80, 0, 0);
-        sendColumnRGB(0x00, 0, 0, 0xff);
-
-        // Blinky part
-//        while (*blinkyStr) {
-//        for (int s = 0; s <= shiftBy; s++) {
-//            if (s == blinkyLen) {
-//                break;
-//            }
-//            for (uint step = 0; step < FONTSTD_WIDTH +
-//                                       INTERCHAR_SPACE; step++) {
-//                // step though each column of the 1st char for smooth scrolling
-//                sendString(blinkyStr, step, brightness, brightness, brightness);
-        sendString(blinkyStr, fontStd, 0, brightness, brightness, brightness);
-//            }
-//            blinkyStr = blinkyStr + s;
-//        }
-        sei();
-//        delay(MARQUEE_DELAY); // speed. higher = slower
-
-        show();
-    }
-}
-
 void showAsCountdownStyle(const char* countdownstr, unsigned int count = 600, boolean showCount = true) {
+    uint startPad, endPad; // for the string in the middle of a panel (when the count is not shown)
+    getColumnsToPadForString(countdownstr, fontStd, &startPad, &endPad);
+
     clear();
 
     while (count > 0) {
@@ -475,7 +428,7 @@ void showAsCountdownStyle(const char* countdownstr, unsigned int count = 600, bo
             sendString(countdownstr, fontStd, 0, brightness, brightness, brightness);
         } else {
             // align string to middle if we're not showing the countdown.
-            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness);
+            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness, startPad, endPad);
         }
 
         //  sendChar( '0' , 0 , 0x80, 0 , 0 );
@@ -497,7 +450,7 @@ void showAsCountdownStyle(const char* countdownstr, unsigned int count = 600, bo
 
         } else {
             // show the string on the other panel too if we're not showing the count
-            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness);
+            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness, startPad, endPad);
         }
 
         sei();
@@ -519,7 +472,7 @@ void showAsCountdownStyle(const char* countdownstr, unsigned int count = 600, bo
             sendString(countdownstr, fontStd, 0, brightness, brightness, brightness);
         } else {
             // align string to middle if we're not showing the countdown.
-            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness);
+            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness, startPad, endPad);
         }
 
 //        sendColumnRGB(0x00, 0, 0, 0xff);
@@ -541,7 +494,7 @@ void showAsCountdownStyle(const char* countdownstr, unsigned int count = 600, bo
             sendChar('0', 0, brightness, 0, 0, false);
         } else {
             // show the string on the other panel too if we're not showing the count
-            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness);
+            sendStringJustified(countdownstr, fontStd, 0, brightness, brightness, brightness, startPad, endPad);
         }
 
         sei();
@@ -606,92 +559,10 @@ static inline void sendIcon(const uint* fontbase, uint which, int8_t shift, uint
 
 }
 
-void showCharsOneByOneOnBothPanels(const char* str, Color textColor, int delayMs = 500) {
-    Color tc = textColor;
-    clear();
-    uint startPad, endPad;
-    getColumnsToPadForString(str, FONTSTD_WIDTH, &startPad, &endPad);
-
-    for (uint p = 0; p < strlen(str); p++) {
-        cli();
-
-        sendEmptyColumns(startPad);
-        for (uint i = 0; i <= p; i++) {
-            sendChar(*(str + i), 0, GAMMA(tc.r), GAMMA(tc.g), GAMMA(tc.b));
-        }
-        int usedCols = startPad + (p + 1) * (FONTSTD_WIDTH + INTERCHAR_SPACE);
-        sendEmptyColumns(COLUMNS_PER_PANEL - usedCols);
-
-        sendEmptyColumns(startPad);
-        for (uint i = 0; i <= p; i++) {
-            sendChar(*(str + i), 0, GAMMA(tc.r), GAMMA(tc.g), GAMMA(tc.b));
-        }
-        sendEmptyColumns(COLUMNS_PER_PANEL - usedCols);
-
-        sei();
-        delay(CHARS_ONEBYONE_DELAY);
-    }
-    delay(delayMs);
-}
-
-void showStringColorCycleOnBothPanels(const Font& font, const char* str, int delayMs, bool alignMiddle, uint skip,
-                                      uint* r, uint* g, uint* b) { //, uint slide) {
-    //TODO cycle color without slide
-    uint slide = delayMs;
-//    clear();
-    uint startPad = 0;
-    uint endPad = 0;
-    getColumnsToPadForString(str, font.width, &startPad, &endPad);
-    for (slide; slide; slide -= 10) {
-        *cyclingColor = (slide & 0xff);
-        cli();
-
-        if (alignMiddle) {
-            sendEmptyColumns(startPad);
-        }
-        sendStringColorCycle(font, str, 0, skip, r, g, b);
-        if (alignMiddle) {
-            sendEmptyColumns(endPad);
-            sendEmptyColumns(startPad);
-        } else {
-            sendEmptyColumns(startPad + endPad + font.width);
-        }
-        sendStringColorCycle(font, str, 0, skip, r, g, b);
-        if (alignMiddle) {
-            sendEmptyColumns(endPad);
-        } else {
-            sendEmptyColumns(startPad + endPad + font.width);
-        }
-        sei();
-        show();
-        delay(delayMs / 200);
-    }
-
-}
-
-void showChonkySlideStyleOnBothPanels(const char* str, int delayMs = ALLYOURBASE_DELAY,
-                                      Color colorFrom = Color{0, 0, 0x80}, bool scrollToLastChar = false) {
-//    const char *allyourbase = "CAT: ALL YOUR BASE ARE BELONG TO US !!!";
-    // TODO colorFrom, colorTo support
-    uint g = colorFrom.g;
-    uint b = colorFrom.b;
-//    delayMs = ALLYOURBASE_DELAY + 10; //FIXME rmove
-    if (scrollToLastChar) {
-        uint charWidth = fontChonk.width;
-        int l = 1; //or infinite loop to end of str
-        while (l--) {
-            for (uint skip = 0; skip <= charWidth; skip++) {
-                showStringColorCycleOnBothPanels(fontChonk, str, delayMs, false, skip, cyclingColor, &g, &b);
-            }
-            str++;
-            if (*(str + 1) == '|') {
-                break;
-            }
-        }
-    } else {
-        showStringColorCycleOnBothPanels(fontChonk, str, delayMs, false, 0, cyclingColor, &g, &b);//1250);
-    }
-}
+// The ads' two styles: showCharsOneByOneOnBothPanels() and showChonkySlideStyleOnBothPanels(), with
+// the clock that makes their "dly" real milliseconds and the scrolling of a text wider than a panel.
+// They are in their own file so that the host test can run them against a fake sign and a fake timer.
+#include "AdDisplay.h"
 
 void showIconInvaders(const Icon* icon, Color iconColor) {
     Color ic = iconColor;
@@ -820,7 +691,7 @@ void marquee(const char* marqueePtr, const Font& font = fontStd, bool pad = true
         };
 
         if (!*paddingPtr && *marqueePtr == HEART) {
-            charWidth = HEART_WIDTH;
+            charWidth = font.heartWidth;
         } else {
             charWidth = font.width;
         }
@@ -873,6 +744,11 @@ void marquee(const char* marqueePtr, const Font& font = fontStd, bool pad = true
     free(paddingString);
 }
 
+// The chooser display (MSGTYPE_CHOOSER): showAsChooser() with its scrolling and polling, and the two
+// decisions readSerialData() and loop() make about a reply (chooserReadMessage, chooserDispatch).
+// It is in its own file so that the host test can run it against a fake sign and a fake app.
+#include "ChooserDisplay.h"
+
 // Notifies the IMX that we're ready to retrieve custom message data
 bool readSerialData() {
     startSerial();
@@ -892,8 +768,9 @@ bool readSerialData() {
 //
 //    }
 
-    // Read the JSON document from the serial port
-    DeserializationError err = deserializeJson(json, softSerial);
+    // Read the JSON document from the serial port (stepping over a late answer to a chooser poll,
+    // which is an object without a "type" and not a message)
+    DeserializationError err = chooserReadMessage();
 
     if (err == DeserializationError::Ok) {
         stopSerial();
@@ -935,6 +812,7 @@ void setup() {
     delay(100); //Try to introduce a bit of a delay to clear out serial noise on boot
     setupDiagnosticLed();
     setupLeds();
+    adClockSetup(); // Timer1 becomes the clock of the ads (AdDisplay.h)
 
     showAsFlashyStyle("I", 60);
     showAsFlashyStyle("LIVE", 60);
@@ -961,8 +839,19 @@ void loop() {
     diagnosticLedOff();
 
     if (readSuccessful) {
+        // A chooser message is shown in there, for as long as the chooser is on screen (the app is
+        // asked '?' between frames); what comes back is the type of the message that ended it.
+        // 0 means there is nothing to show: what was read is not a message (it has no "type"), or
+        // the chooser's reads kept failing. Draw nothing and ask again with a normal '~'.
+        const char msgType = chooserDispatch();
+        if (!msgType) {
+            loopcount++;
+            return;
+        }
         const char* str = json["str"];
-        const char msgType = json["type"].as<const char*>()[0];
+        if (!str) {
+            str = ""; // a message without a text is shown as an empty one
+        }
         switch (msgType) {
             case MSGTYPE_ONE_BY_ONE: {
                 showCharsOneByOneOnBothPanels(str, {json["r"], json["g"], json["b"]}, json["dly"]);
@@ -970,10 +859,6 @@ void loop() {
             }
             case MSGTYPE_CHONKY_SLIDE: {
                 showChonkySlideStyleOnBothPanels(str, json["dly"], {json["r"], json["g"], json["b"]}, json["scroll"]);
-                break;
-            }
-            case MSGTYPE_CHOOSER: {
-                showAsChooser(str, json["flashy"]);
                 break;
             }
             case MSGTYPE_UTILITY: { // Utility messages
@@ -1083,6 +968,7 @@ void loop() {
             }
         }
     } else {
+        chooserLeft(); // the starfield (or the error flash before it) replaces the chooser picture
         showstarfieldcustom(600);
     }
 

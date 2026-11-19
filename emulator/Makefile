@@ -6,6 +6,7 @@
 #                   on panel B), in build/firmware-debug/. For the bench, not for a show
 #   make run        live terminal view (start ./fake_app.py in another terminal)
 #   make test       the smoke test (no human needed)
+#   make test-ads   only the ads' test: the O and C styles on the real firmware (half a minute)
 #   make clean      delete build/ (third_party/ is kept)
 #
 # Everything is written under build/ and third_party/, both gitignored.
@@ -43,7 +44,7 @@ SIM_WARN  := -w
 EMU_NAMES := main ihex reply ws2812 softuart link view record
 EMU_OBJS  := $(EMU_NAMES:%=$(OBJ)/%.o)
 
-.PHONY: all firmware firmware-debug emu run test clean
+.PHONY: all firmware firmware-debug emu run test test-ads clean
 all: firmware emu
 
 # ---- firmware ---------------------------------------------------------------
@@ -126,6 +127,9 @@ run: all
 
 test:
 	./test.sh
+
+test-ads: all
+	python3 tests/ads_test.py $(EMU) $(FW_HEX) .. $(BUILD)/tests/ads
 
 clean:
 	cmake -E remove_directory $(BUILD)

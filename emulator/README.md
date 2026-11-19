@@ -370,13 +370,14 @@ The fake app speaks three versions of the chooser contract:
   ```
 
 To add one, copy `playlists/demo.jsonl`, edit, and pass the new file to
-`fake_app.py`. `playlists/all_types.jsonl` has one of every message type the
-firmware's `loop()` understands, with a comment on each:
+`fake_app.py`. `playlists/ads.jsonl` has ads in both styles, short ones and
+ones wider than a panel. `playlists/all_types.jsonl` has one of every message
+type the firmware's `loop()` understands, with a comment on each:
 
 | type | what the sign does | fields it reads |
 | --- | --- | --- |
-| `O` | characters one by one, centred | `str`, `r`, `g`, `b`, `dly` |
-| `C` | chonky font with colour cycle | `str`, `dly`, `r`, `g`, `b`, `scroll` |
+| `O` | characters one by one, centred; a text wider than a panel moves left to make room for each new letter; the finished text stays `dly` ms | `str`, `r`, `g`, `b`, `dly` |
+| `C` | chonky font with colour wave for `dly` ms; a text wider than a panel scrolls to its end first; `scroll` true moves it left by one character instead | `str`, `dly`, `r`, `g`, `b`, `scroll` |
 | `H` | chooser: red count, blinking text | `str`, `flashy` |
 | `U` | utility: `subtype` `B` brightness shift, `M` beat input on/off | `str`, `subtype` |
 | `K` | keyboard echo | `str`, `mode` |
@@ -478,18 +479,19 @@ Seen while building this; the firmware is not changed by this directory.
 
 | | |
 | --- | --- |
-| `Makefile` | `make`, `make firmware`, `make firmware-debug` (a second image built with `FW_DEBUG_FLAGS`, default `-DCHOOSER_DEBUG_PANEL_B=1`: the chooser's measurements on panel B), `make run`, `make test`, `make clean` |
+| `Makefile` | `make`, `make firmware`, `make firmware-debug` (a second image built with `FW_DEBUG_FLAGS`, default `-DCHOOSER_DEBUG_PANEL_B=1`: the chooser's measurements on panel B), `make run`, `make test`, `make test-ads`, `make clean` |
 | `firmware/` | CMake wrapper that builds the unmodified sketch (no upload target) |
 | `fetch_simavr.sh` | clones simavr at the pinned commit into `third_party/` |
 | `src/` | the emulator: `main.c`, `ihex.c` (firmware image reader), `ws2812.c` (LED decoder), `softuart.c` (serial pins, the queue of replies and breaks), `reply.c` (cuts the app's bytes into replies and directives), `link.c` (TCP), `view.c` (terminal), `record.c` (GIF, PNG, frames dump) |
 | `fake_app.py` | the app's side of the link |
-| `playlists/` | `all_types.jsonl`, `demo.jsonl`, `chooser_push.jsonl` (for `--contract 3`) |
+| `playlists/` | `all_types.jsonl`, `demo.jsonl`, `chooser_push.jsonl` (for `--contract 3`), `ads.jsonl` |
 | `test.sh` | runs every test below |
 | `tests/check_frames.py` | the smoke run's frames against `Fonts.h`, and its GIF against its frames |
 | `tests/gif_check.py` | what a recording must be, stated from the rules above in exact arithmetic: a strict GIF decoder, and the GIF and PNG pictures and their times against the frames dump |
 | `tests/gif_cases.py`, `tests/gif_case.c` | chosen, random and very long-held pictures through the GIF encoder |
 | `tests/link_test.py` | the serial link's timing model against the real firmware, with clients that come and go; the line held LOW |
 | `tests/push_test.py` | chooser contract version 3.1 measured on the real firmware: how soon a push is on the LEDs (also one that falls into the sign's own read), how steady the scroll is between pushes, that nothing is sent while a text moves, that a change that was not pushed is found at the next stand-still, that the sign asks when the app leaves chooser mode. `run` plays a scripted app; `check` reads the dump of any run. For the bench image it also reads the numbers on panel B and the lines of numbers sent to the app, and holds them against what was on the wire. Skipped by `test.sh` for firmware without that contract |
+| `tests/ads_test.py` | the ads (`O` and `C`) on the real firmware: every frame against `Fonts.h`, both sides equal, 120 columns, the scroll of a text wider than a panel, and `dly` as real time |
 | `tests/record_fail_test.py` | recordings that cannot be created, written or closed |
 | `tests/cli_test.py` | command line values that are refused; outputs that are the firmware, the report's file or one another under any name; and that nothing is emptied before the run begins |
 | `tests/fake_app_wire_test.py` | what `fake_app.py --contract 3` writes when it leaves chooser mode, as a listener on the sign's receive pin decodes it: nothing behind a break before the guard |
