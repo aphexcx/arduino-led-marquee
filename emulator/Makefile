@@ -17,27 +17,40 @@
 # Everything is written under build/ and third_party/, both gitignored.
 # Nothing here uploads to a board: the firmware build tree has no upload target.
 
-# What the firmware is built with: the compiler named here and the Arduino AVR
-# core, both fetched into third_party/ by ./fetch_toolchain.sh, pinned by
-# version and checksum (see that script for what there is to choose from).
-# Nothing of the Arduino IDE in /Applications is used. To build with another
-# "Arduino SDK" directory all the same, give its path:
-#   make firmware ARDUINO_SDK=/Applications/Arduino.app/Contents/Java
-AVR_COMPILER ?= arduino-7.3.0
-ARDUINO_SDK  ?= $(shell ./fetch_toolchain.sh --path $(AVR_COMPILER))
+# What the firmware is built with: the AVR compiler and the Arduino AVR core
+# that ./fetch_toolchain.sh fetches into third_party/, each pinned by version
+# and checksum (that script says which). Nothing of the Arduino IDE in
+# /Applications is used.
+#
+# An ARDUINO_SDK given on the command line or in the environment is used as it
+# is, and nothing is fetched. It is written here the way cmake will write it
+# into the build tree (absolute, no trailing slash), which is what the build
+# tree is compared with below.
+ifeq ($(origin ARDUINO_SDK),undefined)
+ARDUINO_SDK := $(shell ./fetch_toolchain.sh --path)
+FETCH_TOOLCHAIN := yes
+else
+override ARDUINO_SDK := $(shell cd "$(ARDUINO_SDK)" 2>/dev/null && pwd)
+ifeq ($(ARDUINO_SDK),)
+$(error ARDUINO_SDK is not a directory)
+endif
+endif
 AVR_TOOLS    := $(ARDUINO_SDK)/hardware/tools/avr
 AVR_INC      := $(AVR_TOOLS)/avr/include
 AVR_SIZE     := $(AVR_TOOLS)/bin/avr-size
 
 # cmake looks for avr-gcc and the binutils by name, in PATH before anywhere
-# else: with the chosen toolchain first in PATH it finds that one and no other.
+# else: with the toolchain first in PATH it finds that one and no other.
 FW_CMAKE := PATH="$(AVR_TOOLS)/bin:$$PATH" cmake -S firmware -G "Unix Makefiles" \
-            -DCMAKE_BUILD_TYPE=Debug -DARDUINO_SDK_PATH=$(ARDUINO_SDK)
-# ... and a build tree whose compiler or archiver is not from there is refused.
-# $(call fw-tools-check,<build tree>)
-fw-tools-check = for tool in CMAKE_C_COMPILER CMAKE_CXX_COMPILER CMAKE_AR CMAKE_OBJCOPY; do \
-	    grep -q "$$tool[^=]*=\"*$(AVR_TOOLS)/bin/" $(1)/CMakeCache.txt $(1)/CMakeFiles/*/CMake*Compiler.cmake || \
-	    { echo "firmware: $$tool of $(1) is not from $(AVR_TOOLS)/bin"; exit 1; }; done
+            -DCMAKE_BUILD_TYPE=Debug "-DARDUINO_SDK_PATH=$(ARDUINO_SDK)"
+# ... and a build tree whose compilers, archiver or objcopy are not from there
+# is refused. $(call fw-tools-check,<build tree>)
+fw-tools-check = \
+	grep -qF 'set(CMAKE_C_COMPILER "$(AVR_TOOLS)/bin/' $(1)/CMakeFiles/*/CMakeCCompiler.cmake && \
+	grep -qF 'set(CMAKE_CXX_COMPILER "$(AVR_TOOLS)/bin/' $(1)/CMakeFiles/*/CMakeCXXCompiler.cmake && \
+	grep -qF 'CMAKE_AR:FILEPATH=$(AVR_TOOLS)/bin/' $(1)/CMakeCache.txt && \
+	grep -qF 'CMAKE_OBJCOPY:FILEPATH=$(AVR_TOOLS)/bin/' $(1)/CMakeCache.txt || \
+	{ echo "firmware: a compiler, the archiver or objcopy of $(1) is not from $(AVR_TOOLS)/bin"; exit 1; }
 
 BUILD   := build
 FW_DIR  := $(BUILD)/firmware
@@ -74,8 +87,8 @@ all: firmware emu
 # Fetched once; a second run does nothing. Not when ARDUINO_SDK was given on
 # the command line or in the environment: that directory is used as it is.
 toolchain:
-ifeq ($(origin ARDUINO_SDK),file)
-	@./fetch_toolchain.sh $(AVR_COMPILER)
+ifdef FETCH_TOOLCHAIN
+	@./fetch_toolchain.sh
 endif
 
 # ---- firmware ---------------------------------------------------------------
@@ -94,9 +107,9 @@ $(FW_DIR)/Makefile: firmware/CMakeLists.txt firmware/toolchain.cmake
 firmware: toolchain
 	@if [ "$$(cat $(FW_BUILT_WITH) 2>/dev/null)" != "$(ARDUINO_SDK)" ]; then \
 	    cmake -E remove_directory $(FW_DIR); fi
-	@$(MAKE) --no-print-directory $(FW_DIR)/Makefile
+	@$(MAKE) -s --no-print-directory $(FW_DIR)/Makefile
 	$(MAKE) --no-print-directory -C $(FW_DIR) LED_Marquee
-	@$(AVR_SIZE) $(FW_ELF)
+	@"$(AVR_SIZE)" $(FW_ELF)
 	@shasum -a 256 $(FW_HEX)
 
 # The same sketch with extra compiler flags, in its own build tree.
@@ -118,7 +131,7 @@ firmware-debug: toolchain
 	@$(call fw-tools-check,$(FW_DEBUG_DIR))
 	@printf '%s' "$(ARDUINO_SDK) $(FW_DEBUG_FLAGS)" > $(FW_DEBUG_BUILT_WITH)
 	$(MAKE) --no-print-directory -C $(FW_DEBUG_DIR) LED_Marquee
-	@$(AVR_SIZE) $(FW_DEBUG_DIR)/LED_Marquee.elf
+	@"$(AVR_SIZE)" $(FW_DEBUG_DIR)/LED_Marquee.elf
 	@shasum -a 256 $(FW_DEBUG_DIR)/LED_Marquee.hex
 
 # ---- emulator ---------------------------------------------------------------
@@ -129,10 +142,11 @@ $(SIMAVR)/sim/sim_avr.h:
 
 # simavr's description of the ATmega328P is written with the names of
 # AVR-LibC's <avr/io.h> (the registers' addresses, the interrupt numbers), so
-# it is compiled against the toolchain's copy of those headers.
+# it is compiled against the toolchain's copy of those headers. (Once: these
+# objects are not made again when ARDUINO_SDK names another toolchain.)
 $(OBJ)/simavr/core/%.o: $(SIMAVR)/sim/sim_avr.h | toolchain
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(SIM_WARN) -std=gnu99 $(SIM_INC) -I$(SIMAVR)/cores -I$(AVR_INC) \
+	$(CC) $(CFLAGS) $(SIM_WARN) -std=gnu99 $(SIM_INC) -I$(SIMAVR)/cores "-I$(AVR_INC)" \
 	      -c $(SIMAVR)/cores/$*.c -o $@
 
 $(OBJ)/simavr/%.o: $(SIMAVR)/sim/sim_avr.h
