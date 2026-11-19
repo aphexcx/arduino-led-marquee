@@ -200,15 +200,19 @@ def check_brightness(env, cases, results):
                 hits = [f for f in frames if f.mask[:PANEL] == expected and f.mask[PANEL:] == expected]
                 check(log, bool(hits), 'the sign says "BRIGHT=%d" (%d frames)' % (shift, len(hits)))
             else:
-                check(log, not any(lit(f) for f in frames), "the sign is dark while it says so (shift 8)")
+                # (frames there must be: with none, the strip would keep the picture before, lit)
+                check(log, len(frames) >= 100 and not any(lit(f) for f in frames),
+                      "the sign draws its answer, and every frame of it is dark (shift 8; %d frames)" % len(frames))
             continue
         log = logs[-1]
         if not asked_again(log, start, end):
             continue
         last = frames[-1] if frames else None
         if shift >= 8:
-            check(log, last is not None and not any(lit(f) for f in frames),
-                  "a white text after it is dark: nothing is left of a value shifted by 8")
+            # the clear and one frame per letter, as at any brightness
+            check(log, len(frames) == 3 and not any(lit(f) for f in frames),
+                  "a white text after it is drawn dark: nothing is left of a value shifted by 8 (%d frames)"
+                  % len(frames))
             continue
         cols = font.columns(b"HI")[:-1]
         expected = A.side(cols, 0, (PANEL - len(cols)) // 2)
@@ -244,8 +248,9 @@ def check_keyboard(env, message, result):
     if not asked_again(log, start, end, within=0.15 + len(text) * 0.001):
         return log
     if not text:
+        # (it comes after a line that left the sign lit: see the list)
         check(log, len(frames) == 3 and not any(lit(f) for f in frames),
-              "an empty line: the sign is cleared and stays dark (%d frames)" % len(frames))
+              "an empty line: the line before it is cleared and the sign stays dark (%d frames)" % len(frames))
         return log
     cols = env["std"].columns(text[-10:]) + [0]     # the characters, each with its blank column, and one more
     expected = strip(cols)
@@ -263,7 +268,9 @@ def check_keyboard(env, message, result):
             out |= f.colour(c)
         return out
     white = set() if warning else set().union(*[colours(f, 0, last) for f in shown] or [set()])
-    check(log, white <= {"ffffff"}, "the characters before the last are white (%s)" % (",".join(sorted(white)) or "none lit"))
+    # (a line of one character has none before the last; in warning mode none is white)
+    check(log, white == (set() if warning or len(text) < 2 else {"ffffff"}),
+          "the characters before the last are white (%s)" % (",".join(sorted(white)) or "none lit"))
     blink = [colours(f, 0 if warning else last, len(cols)) for f in shown]
     ok = len(blink) == 2 and all(b and "mixed" not in b for b in blink) and \
         all(px[:2] == "ff" and px[2:4] in ("02", "03") and px[4:] == "03" for px in blink[0]) and blink[1] <= {"ff0000"}
@@ -303,6 +310,12 @@ def check_empty_flashy(env, message, result):
     most = max([lit(f) for f in frames] or [0])
     check(log, bool(frames) and most <= 1, "an empty text lights nothing: no frame has more than the one LED of a "
           "star of the starfield after it (most: %d)" % most)
+    # The message ran: the text before it is cleared (the first frame is dark, and whole), the
+    # fade's 300 frames are drawn, and the 300 stars after them are there.
+    stars = sum(1 for f in frames if lit(f) == 1)
+    check(log, len(frames) >= 600 and frames[0].bits == COLS * 24 and not lit(frames[0]) and stars >= 200,
+          "and it ran: the sign is cleared, then its frames and the starfield (%d frames, %d with a star)"
+          % (len(frames), stars))
     return log
 
 
@@ -318,6 +331,20 @@ def check_stars(env, message, result):
     check(log, len(frames) == wanted and all(lit(f) <= 1 for f in frames),
           "%d frames, at most one LED lit in each (%d frames, %d with a star)"
           % (wanted, len(frames), sum(1 for f in frames if lit(f) == 1)))
+    if wanted >= 40:
+        # Stars are there to be seen. The sign's random numbers are the same in every run (nothing
+        # seeds them), so this is the same picture every time: most frames have their star, in
+        # starlight blue (0x40, 0x40, 0xff: green as it is or carried), at many places.
+        seen = [f for f in frames if lit(f) == 1]
+        places = {(c, f.mask[c]) for f in seen for c in range(COLS) if f.mask[c]}
+        colours = set()
+        for f in seen:
+            for c in range(COLS):
+                colours |= f.colour(c)
+        check(log, len(seen) >= wanted * 3 // 4 and len(places) >= wanted // 2 and
+              colours <= {"6040ff", "6060ff"} and bool(colours),
+              "its stars are visible: %d of %d frames have one, at %d different places, in starlight blue (%s)"
+              % (len(seen), wanted, len(places), ",".join(sorted(colours)) or "none"))
     return log
 
 
@@ -389,17 +416,18 @@ def main():
     def pair():
         return [probe(probe_o(), A.check_one_by_one), probe(probe_c(), A.check_chonky)]
 
-    keyboard = ([(k(n), check_keyboard) for n in (0, 1, 2, 9, 10, 11, 12, 15, 19, 20, 21, 64, 255)]
+    keyboard = ([(k(n), check_keyboard) for n in (1, 2, 9, 10, 0, 11, 12, 15, 19, 20, 21, 64, 255)]
                 + [(k(10, "W"), check_keyboard), (k(20, "W"), check_keyboard)] + pair())
     keyboard_long = [(k(256), check_keyboard)] + pair() + [(k(300), check_keyboard), (k(520), check_keyboard)] + pair()
     empty = [
         # (the text first: what follows an empty text in the sign's memory is then the rest of the
         # message, and a sender that runs past the end of the text draws it)
+        probe(probe_o(), A.check_one_by_one),       # the sign is lit before the empty text
         ({"str": "", "type": "F"}, check_empty_flashy),
         ({"str": "", "type": "W"}, lambda e, m, r: check_count_style(e, m, r, b"", range(600), "an empty text")),
         ({"type": "W", "str": "NEW"}, lambda e, m, r: check_count_style(e, m, r, b"NEW", range(600), '"NEW"')),
     ] + pair()
-    stars = [({"type": "S", "str": "", "stars": n}, check_stars) for n in (5, 0, -1, -32768, 3)] + pair()
+    stars = [({"type": "S", "str": "", "stars": n}, check_stars) for n in (5, 0, -1, -32768, 3, 40)] + pair()
     # (the sign has the icons 1 2 X A B D E and looks at the first character only)
     icons = ([invalid("Q")] + pair() + [invalid("Q" * 62)] + pair() + [invalid("Q" * 70)] + pair()
              + [invalid("FGHIJKLMNOPQRSTUVWXYZ01234" * 8)] + pair())

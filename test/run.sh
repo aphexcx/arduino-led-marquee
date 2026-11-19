@@ -24,6 +24,11 @@ clang++ -std=c++11 -Wall -Wextra -o "$out/brightness_shift_test" "$here/brightne
 clang++ -std=c++11 -Wall -Wextra -O1 -o "$out/ad_display_test" "$here/ad_display_test.cpp"
 "$out/ad_display_test" "$@"
 
+# The same test with a wave frame of 20 ms: what it expects follows the settings
+clang++ -std=c++11 -Wall -Wextra -O1 -DAD_WAVE_FRAME_MS=20 -o "$out/ad_display_test_20" "$here/ad_display_test.cpp"
+echo "ad_display_test with AD_WAVE_FRAME_MS 20:"
+"$out/ad_display_test_20"
+
 # AdDisplay.h refuses a scroll step and a wave interval that cannot keep pace: 9 ms with 6 ms must
 # not compile, and for that reason; 12 ms with 6 ms must compile.
 if clang++ -std=c++11 -fsyntax-only -DAD_SCROLL_STEP_MS=9 -DAD_WAVE_FRAME_MS=6 \

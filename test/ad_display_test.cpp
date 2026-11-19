@@ -422,9 +422,10 @@ static void testOneByOneLong() {
     assert(rowsOfSide(r.frames[13], 0) == modelSide(modelColumns(MODEL_STD, "HELLO WORL"), 4, 0));
     assert(rowsOfSide(r.frames[14], 0) == modelSide(all, 5, 0));
     assert(rowsOfSide(r.frames[14], 0)[59] == all[64] && all[64] != 0); // the D's last column is the panel's last
-    // 9 letters at 50 ms, then 5 columns at 35 ms, then 2 s
-    assert(near(r.frames[9].sentUs - r.frames[0].sentUs, 9 * 50000, 100));
-    assert(near(r.frames[14].sentUs - r.frames[9].sentUs, 50000 + 4 * 35000, 100));
+    // 9 letters at CHARS_ONEBYONE_DELAY (50 ms), then 5 columns at AD_SCROLL_STEP_MS (35 ms), then 2 s
+    assert(near(r.frames[9].sentUs - r.frames[0].sentUs, 9 * CHARS_ONEBYONE_DELAY * 1000, 100));
+    assert(near(r.frames[14].sentUs - r.frames[9].sentUs,
+                CHARS_ONEBYONE_DELAY * 1000 + 4 * AD_SCROLL_STEP_MS * 1000, 100));
     assert(near(r.endUs - r.frames[14].sentUs, 2000000, 40));
     if (showArt) {
         printf("'O' \"HELLO WORLD\", the finished text (one side):\n");
@@ -479,11 +480,13 @@ static void checkChonky(const std::string& text, unsigned int dly) {
             if (offset == last) firstAtEnd = k;
         }
         checkWaveFrame(f, cols, offset, dly, k);
-        // the wave never stops: a frame every 10 ms, or every 8.75 ms while the text moves
+        // the wave never stops: a frame every AD_WAVE_FRAME_MS (10 ms), or, while the text moves, the
+        // frames of a column at even distances (four in 35 ms: every 8.75 ms)
         if (k > 0) {
             uint64_t gap = f.sentUs - r.frames[k - 1].sentUs;
-            assert(gap <= AD_WAVE_FRAME_MS * 1000 + 60);
-            assert(gap >= 8700);
+            const uint64_t moving = AD_SCROLL_STEP_MS * 1000 / AD_SCROLL_SUBFRAMES;
+            assert(gap <= (moving > AD_WAVE_FRAME_MS * 1000 ? moving : AD_WAVE_FRAME_MS * 1000) + 60);
+            assert(gap >= (moving < AD_WAVE_FRAME_MS * 1000 ? moving : AD_WAVE_FRAME_MS * 1000) - 50);
         }
     }
     assert(offset == last); // it got to its end
@@ -496,8 +499,9 @@ static void checkChonky(const std::string& text, unsigned int dly) {
     assert(near(r.endUs - r.frames[firstAtEnd].sentUs, hold, 40));
     if (dly == 0) assert(firstAtEnd == r.frames.size() - 1);
     if (last == 0) {
-        // a text that fits: a frame every 10 ms for as long as it stays (1000 ms: 100 frames, as before)
-        size_t expected = dly < 6 ? 1 : (dly - 6) / 10 + 1;
+        // a text that fits: a frame every AD_WAVE_FRAME_MS for as long as it stays (at 10 ms, 1000 ms
+        // are 100 frames, as before)
+        size_t expected = dly < 6 ? 1 : (dly - 6) / AD_WAVE_FRAME_MS + 1;
         assert(r.frames.size() == expected || r.frames.size() == expected + 1);
         // (begun at 0, W, 2 W, ... while 6 ms of the hold are left; the hold starts when the first frame is out)
         if (dly == 1000) assert(r.frames.size() == (1000 - 2) / AD_WAVE_FRAME_MS + 1);
@@ -552,22 +556,26 @@ static void testChonkyLong() {
     checkChonky(forty, 0);
     checkChonky("DREAMSTATE", 30000);
 
-    // by hand: "ENERGY!" is 61 lit columns. 600 ms at the start, one column, then dly.
+    // by hand: "ENERGY!" is 61 lit columns. AD_SCROLL_HOLD_MS (600 ms) at the start, a frame every
+    // AD_WAVE_FRAME_MS (60 frames at 10 ms), one column, then dly.
+    static_assert(AD_SCROLL_HOLD_MS % AD_WAVE_FRAME_MS == 0, "this check counts the frames of the hold at the start");
+    const size_t held = AD_SCROLL_HOLD_MS / AD_WAVE_FRAME_MS;
     Run r = runWith(showC, "ENERGY!", 2000);
     std::vector<uint8_t> cols = modelColumns(MODEL_CHONK, "ENERGY!");
     assert(rowsOfSide(r.frames[0], 0) == modelSide(cols, 0, 0));
-    assert(rowsOfSide(r.frames[59], 0) == modelSide(cols, 0, 0));
-    assert(rowsOfSide(r.frames[60], 0) == modelSide(cols, 1, 0));
-    assert(rowsOfSide(r.frames[60], 0)[59] == 0xc0); // the last column of the "!"
-    assert(near(r.frames[60].sentUs - r.frames[0].sentUs, 600000, 60));
-    assert(near(r.endUs - r.frames[60].sentUs, 2000000, 40));
-    assert(near(r.endUs - r.startUs, 600000 + 2000000 + FRAME_US, 100));
+    assert(rowsOfSide(r.frames[held - 1], 0) == modelSide(cols, 0, 0));
+    assert(rowsOfSide(r.frames[held], 0) == modelSide(cols, 1, 0));
+    assert(rowsOfSide(r.frames[held], 0)[59] == 0xc0); // the last column of the "!"
+    assert(near(r.frames[held].sentUs - r.frames[0].sentUs, AD_SCROLL_HOLD_MS * 1000, 60));
+    assert(near(r.endUs - r.frames[held].sentUs, 2000000, 40));
+    assert(near(r.endUs - r.startUs, AD_SCROLL_HOLD_MS * 1000 + 2000000 + FRAME_US, 100));
 
     // 40 characters: 358 columns to the last lit one (the S is 7 wide), so the text moves 298 columns:
-    // the first after 600 ms, the other 297 every 35 ms
+    // the first after AD_SCROLL_HOLD_MS, the other 297 every AD_SCROLL_STEP_MS
     r = runWith(showC, forty.c_str(), 1000);
     assert(modelInk(modelColumns(MODEL_CHONK, forty)) == 358);
-    assert(near(r.endUs - r.startUs, FRAME_US + 600000 + 297 * 35000 + 1000000, 300));
+    assert(near(r.endUs - r.startUs,
+                FRAME_US + AD_SCROLL_HOLD_MS * 1000 + 297 * (uint64_t) AD_SCROLL_STEP_MS * 1000 + 1000000, 300));
     if (showArt) {
         printf("'C' 40 characters, the end of the text (one side):\n");
         printSide(rowsOfSide(r.frames.back(), 0));
