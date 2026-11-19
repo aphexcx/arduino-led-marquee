@@ -1,7 +1,7 @@
 #!/bin/bash
 # Runs the host tests of the chooser display and of the ads (no Arduino needed, only the Mac's clang++).
 #
-#   test/run.sh          build and run all four tests
+#   test/run.sh          build and run all five tests
 #   test/run.sh --show   also print a few frames of the sign as ASCII art
 #
 set -euo pipefail
@@ -17,6 +17,9 @@ clang++ -std=c++11 -Wall -Wextra -o "$out/chooser_display_test" "$here/chooser_d
 
 clang++ -std=c++11 -Wall -Wextra -o "$out/text_window_test" "$here/text_window_test.cpp"
 "$out/text_window_test"
+
+clang++ -std=c++11 -Wall -Wextra -o "$out/brightness_shift_test" "$here/brightness_shift_test.cpp"
+"$out/brightness_shift_test"
 
 clang++ -std=c++11 -Wall -Wextra -O1 -o "$out/ad_display_test" "$here/ad_display_test.cpp"
 "$out/ad_display_test" "$@"

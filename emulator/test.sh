@@ -23,10 +23,14 @@
 #   6. the ads on the real firmware: letters one by one and chonky, short
 #      texts and texts wider than a panel, hearts, and how long each stays
 #      (tests/ads_test.py)
+#   7. messages the sign must survive and draw as they read: brightness
+#      numbers of any size, keyboard lines of any length, empty texts, a
+#      negative number of stars, icons it does not have (tests/fixes_test.py)
 #
 # The TCP ports can be moved with SIGN_EMU_TEST_PORT (default 14417; the link
 # tests use the eleven after it, the push tests the four after those, the ads
-# test three from the sixteenth) so two lanes can run the tests at once.
+# test three from the sixteenth, the test of 7 seven from the twenty-fourth) so
+# two lanes can run the tests at once.
 set -eu
 cd "$(dirname "$0")"
 
@@ -162,5 +166,8 @@ fi
 
 echo "== the ads: one by one and chonky, short and long, on the real firmware"
 python3 tests/ads_test.py build/sign-emu "$HEX" .. build/tests/ads $((PORT + 16))
+
+echo "== messages the sign must survive: brightness numbers, long keyboard lines, empty texts, unknown icons"
+python3 tests/fixes_test.py build/sign-emu "$HEX" .. build/tests/fixes $((PORT + 24))
 
 echo "ALL TESTS PASSED"

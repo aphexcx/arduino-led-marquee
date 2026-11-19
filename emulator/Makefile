@@ -7,6 +7,7 @@
 #   make run        live terminal view (start ./fake_app.py in another terminal)
 #   make test       the smoke test (no human needed)
 #   make test-ads   only the ads' test: the O and C styles on the real firmware (half a minute)
+#   make test-fixes only the test of messages the sign must survive (half a minute)
 #   make clean      delete build/ (third_party/ is kept)
 #
 # Everything is written under build/ and third_party/, both gitignored.
@@ -44,7 +45,7 @@ SIM_WARN  := -w
 EMU_NAMES := main ihex reply ws2812 softuart link view record
 EMU_OBJS  := $(EMU_NAMES:%=$(OBJ)/%.o)
 
-.PHONY: all firmware firmware-debug emu run test test-ads clean
+.PHONY: all firmware firmware-debug emu run test test-ads test-fixes clean
 all: firmware emu
 
 # ---- firmware ---------------------------------------------------------------
@@ -130,6 +131,9 @@ test:
 
 test-ads: all
 	python3 tests/ads_test.py $(EMU) $(FW_HEX) .. $(BUILD)/tests/ads
+
+test-fixes: all
+	python3 tests/fixes_test.py $(EMU) $(FW_HEX) .. $(BUILD)/tests/fixes
 
 clean:
 	cmake -E remove_directory $(BUILD)
