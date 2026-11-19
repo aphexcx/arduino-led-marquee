@@ -19,7 +19,7 @@
 
 #include "PixelBitBanging.h"
 
-#include "ArduinoJson-v6.18.3.h"
+#include "ArduinoJson-v6.21.6.h"
 
 // Used to receive data on a virtual RX pin instead of the usual pin 0
 #include "SoftwareSerial/SoftwareSerial.h"
