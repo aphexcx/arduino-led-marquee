@@ -42,6 +42,17 @@ Type messages yourself:
 emulator/fake_app.py -i            # plain text scrolls; ":F HELLO" sends type F; "{...}" is sent as is
 ```
 
+Play the jump game, in one window (124 columns by 32 rows or larger):
+
+```sh
+emulator/game_app.py               # g or Enter starts, SPACE or the up arrow jumps, q quits
+```
+
+`game_app.py` starts the emulator with its live view and plays the app's side
+itself: a stand-in with the app's rules and shows, by this computer's clock,
+so the emulator runs at real-time speed. `--auto 4` presses for the first four
+obstacles by itself; options after `--` go to the emulator (`--record game.gif`).
+
 ## What you see
 
 Each of the 7 LED rows is one 120-pixel strip that goes around the sign like a
