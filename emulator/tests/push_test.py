@@ -69,10 +69,10 @@ Expected pictures are computed from Fonts.h. Python 3 standard library only.
 import json
 import os
 import re
-import socket
 import subprocess
 import sys
-import time
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
+import sign_emu  # noqa: E402
 
 from check_frames import PANEL, Frame, find_on_both_sides, load_font_std, text_columns
 
@@ -602,20 +602,10 @@ def run(emu, hexfile, font_path, work, port, record, bench):
              "--until-requests", str(len(plan) + 1), "--duration", "120", "--frames", dump]
     if record:
         flags += ["--record", record, "--scale", "4"]
-    with open(log, "w") as err:
-        proc = subprocess.Popen([emu, *flags, hexfile], stderr=err)
+    proc = sign_emu.Emu([emu, *flags, hexfile], port, log=log)
     try:
-        deadline = time.monotonic() + 30
-        while True:
-            try:
-                sock = socket.create_connection(("127.0.0.1", port), timeout=2)
-                break
-            except OSError:
-                if time.monotonic() > deadline or proc.poll() is not None:
-                    raise
-                time.sleep(0.05)
+        sock = proc.connect()
         sock.settimeout(120)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         seen = 0
         try:
             while True:
@@ -631,8 +621,7 @@ def run(emu, hexfile, font_path, work, port, record, bench):
         sock.close()
         proc.wait(timeout=180)
     finally:
-        if proc.poll() is None:
-            proc.kill()
+        proc.end()
     text = open(log).read()
     sys.stdout.write(text)
     check(proc.returncode == 0 and "WARNING" not in text and "NOTE" not in text,
@@ -666,22 +655,12 @@ def idle(emu, hexfile, font_path, work, port, cross=False):
         offsets = [round(period_ms - 70 + k / 10.0, 2) for k in range(-10, 11)]
     for x in offsets:
         dump = os.path.join(work, "idle%s.jsonl" % x)
-        with open(os.path.join(work, "idle%s.log" % x), "w") as err:
-            proc = subprocess.Popen([emu, "--headless", "--port", str(port), "--wait-client", "30",
-                                     "--link-directives", "--duration", "15", "--frames", dump,
-                                     hexfile], stderr=err)
+        proc = sign_emu.Emu([emu, "--headless", "--port", str(port), "--wait-client", "30",
+                             "--link-directives", "--duration", "15", "--frames", dump,
+                             hexfile], port, log=os.path.join(work, "idle%s.log" % x))
         try:
-            deadline = time.monotonic() + 30
-            while True:
-                try:
-                    sock = socket.create_connection(("127.0.0.1", port), timeout=2)
-                    break
-                except OSError:
-                    if time.monotonic() > deadline or proc.poll() is not None:
-                        raise
-                    time.sleep(0.05)
+            sock = proc.connect()
             sock.settimeout(120)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             seen = 0
             try:
                 while True:
@@ -710,8 +689,7 @@ def idle(emu, hexfile, font_path, work, port, cross=False):
             sock.close()
             proc.wait(timeout=180)
         finally:
-            if proc.poll() is None:
-                proc.kill()
+            proc.end()
         d = Dump(dump)
         b = d.breaks[0]
         frame_end = [e for e in d.rx if e["byte"] == ord("}")][0]["cycle"] + 11112

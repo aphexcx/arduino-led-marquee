@@ -1,7 +1,7 @@
 // Host test for GameFrame.h: the text of a game frame and the picture it makes. The real
 // gameRender() against a picture worked out here LED by LED, for every rise, every column a thing
-// can be given (-99 to 99), every place of the moving stars and mixes of items in any order; a table
-// of texts that are no frame; and a table of items the sign does not know, which it skips.
+// can be given (-99 to 99), every place of the moving stars and mixes of items in any order; and a
+// table of texts that are no frame.
 //
 //   clang++ -std=c++11 -Wall -Wextra -fsanitize=address,undefined -fno-sanitize-recover=undefined \
 //       -o /tmp/game_frame_test test/game_frame_test.cpp && /tmp/game_frame_test
@@ -232,8 +232,8 @@ int main() {
     // Texts that are no frame: every one is refused
     static const char* const BAD[] = {
             "", "0", "3", "80", "90", "02", "09", "a0", "-00", " 00", "00 ", "00\n",   // rise and picture
-            "00X", "00A1", "00D1", "00R2", "00 a1", "00a1 ", "00,a1", "00a1,b2",       // what is no item
-            "00x 1", "00x+1", "00x1.5", "00x1,a2", "00z_", "00{", "00`1",              // ... or no number
+            "00x", "00A1", "00d1", "00R2", "00 a1", "00a1 ", "00,a1", "00a1,b2",       // what is no item
+            "00S5", "00t5", "30a17b45s12w3", "00d17a5",                                // (one the sign does not know)
             "00a", "00a-", "00a--1", "00a+1", "00ab1", "00a100", "00a-100", "00a1.5",  // an obstacle's column
             "00a1a2a3a4a5", "00a1b2c3a4b5", "00r1a1a2a3a4a5",                          // a fifth obstacle
             "00r", "00r-", "00r100", "00r1r2", "00r2r2",                               // the runner's column
@@ -253,23 +253,6 @@ int main() {
     {
         GamePicture pic;
         assert(!gameRender(nullptr, DREAMSTATE.data, pic)); // a message without a text
-        checks++;
-    }
-
-    // Items the sign does not know (a lowercase letter that is none of a b c e p r s, with the
-    // digits and '-' after it) are skipped: the frame is the picture of the frame without them
-    static const char* const SKIPPED[][2] = {
-            {"00x", "00"}, {"00d1", "00"}, {"00d17a5", "00a5"}, {"30a17z-12b45", "30a17b45"},
-            {"00q99s5", "00s5"}, {"30a17b45s12w3", "30a17b45s12"}, {"00t123456", "00"}, {"00f--1-", "00"},
-            {"20xyzp34", "20p34"}, {"00d1d2d3d4d5d6", "00"}, {"00a1a2a3a4d5", "00a1a2a3a4"}, {"00e2k0s7", "00e2s7"},
-    };
-    for (const char* const* row : SKIPPED) {
-        GamePicture with, without;
-        if (!gameRender(row[0], DREAMSTATE.data, with) || !gameRender(row[1], DREAMSTATE.data, without) ||
-            memcmp(&with, &without, sizeof with)) {
-            printf("FAILED: \"%s\" is not drawn as \"%s\"\n", row[0], row[1]);
-            return 1;
-        }
         checks++;
     }
 

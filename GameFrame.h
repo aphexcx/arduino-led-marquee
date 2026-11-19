@@ -16,8 +16,6 @@
 //                            (none without it); at most once
 //   <col> is -99 to 99: an optional '-' and one or two digits. Column 0 is a face's left edge; what
 //   is left of it or right of column 59 is cut off.
-// An item this sign does not know (another lowercase letter, with the digits and '-' after it) is
-// skipped, so that an app that knows more items than the sign still gets its frames drawn.
 // Anything else makes the whole frame a bad one: nothing of it is drawn.
 //
 // One colour per column is the display's rule: a column an obstacle lights is in the obstacles'
@@ -153,10 +151,6 @@ static bool gameRender(const char* s, const uint8_t* runner, GamePicture& pic) {
             once = 8;
             if (!gameReadCol(s, stars) || stars < 0 || stars >= GAME_COLS) {
                 return false;
-            }
-        } else if (item >= 'a' && item <= 'z') {
-            while (*s == '-' || (*s >= '0' && *s <= '9')) { // an item this sign does not know
-                s++;
             }
         } else {
             return false;

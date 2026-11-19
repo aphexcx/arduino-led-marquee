@@ -4,9 +4,8 @@
   pictures  every frame of a list is drawn as its text reads: the runner (the Dreamstate icon of
             Icons.h) at its column and its rise, cut off at the top edge and at the sides; the
             obstacles at their columns; the colours; the two effects; the moving stars, moved by
-            the frame's number, in no column of the play; items the sign does not know, skipped.
-            One frame of 120 columns for each, both faces equal. Then a message of another kind
-            ends the game and is shown.
+            the frame's number, in no column of the play. One frame of 120 columns for each, both
+            faces equal. Then a message of another kind ends the game and is shown.
   misses    ONE table of answers that are not a good frame (absent, torn, no JSON, an object that
             is no message, a frame the sign cannot read, late). For every row: nothing is drawn and
             the picture before stays, the sign says nothing to the app but its request, it asks
@@ -14,8 +13,10 @@
             and an answer that never ends: the sign leaves the game after GAME_LEAVE_MS and asks
             the ordinary way.
   pace      a scripted game at three reaction times of the app, without and with the moving
-            stars: frames a second, and the time from the app having a button press to the runner
-            moving on the LEDs.
+            stars: frames a second, and the frame delivery latency: the time from the app having
+            something new (a button press) to the frame that carries it being on the LEDs. (When
+            the runner is seen to move is the app's matter: its jump has no row yet in the frames
+            of its first milliseconds.)
 
 A scripted peer answers each of the sign's requests with the next item of a list; sign-emu runs the
 firmware headless and writes a frames dump; everything is checked from that dump. What a picture
@@ -28,11 +29,12 @@ import json
 import math
 import os
 import re
-import socket
-import subprocess
 import sys
 import threading
 import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
+import sign_emu  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ads_test as A  # noqa: E402
@@ -46,7 +48,7 @@ SHAPES = {"a": [1, 2, 1], "b": [3, 3], "c": [1, 2, 3, 2, 1]}
 # The moving stars at 0 (the contract note): the column and the row of each; and their colour's place
 STARS = [(2, 7), (9, 5), (19, 6), (25, 4), (33, 7), (40, 5), (47, 4), (55, 6)]
 STAR_COLOUR = 8
-ITEM = r"[abcr]-?[0-9]{1,2}|p[0-7]{2}|e[0-2]|s[0-9]{1,2}|[df-oqt-z][-0-9]*"   # (the last: one the sign does not know)
+ITEM = r"[abcr]-?[0-9]{1,2}|p[0-7]{2}|e[0-2]|s[0-9]{1,2}"
 
 
 def frame_bytes(text, keys=2):
@@ -152,23 +154,12 @@ class Run:
     def __init__(self, env, name, answers, port, seconds, options=()):
         dump = os.path.join(env["work"], name + ".jsonl")
         log = os.path.join(env["work"], name + ".log")
-        with open(log, "w") as err:
-            emu = subprocess.Popen(
-                [env["emu"], "--headless", "--port", str(port), "--wait-client", "30", "--link-directives",
-                 "--until-requests", str(len(answers) + 1), "--duration", str(seconds), "--frames", dump]
-                + list(options) + [env["hex"]], stderr=err)
+        emu = sign_emu.Emu(
+            [env["emu"], "--headless", "--port", str(port), "--wait-client", "30", "--link-directives",
+             "--until-requests", str(len(answers) + 1), "--duration", str(seconds), "--frames", dump]
+            + list(options) + [env["hex"]], port, log=log)
         try:
-            deadline = time.monotonic() + 30
-            while True:
-                try:
-                    sock = socket.create_connection(("127.0.0.1", port), timeout=2)
-                    break
-                except OSError:
-                    if time.monotonic() > deadline or emu.poll() is not None:
-                        raise RuntimeError("%s: cannot connect to sign-emu on port %d" % (name, port))
-                    time.sleep(0.05)
-            sock.settimeout(None)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock = emu.connect()
 
             def serve():
                 sent = 0
@@ -188,8 +179,7 @@ class Run:
             status = emu.wait(timeout=900)
             sock.close()
         finally:
-            if emu.poll() is None:
-                emu.kill()
+            emu.end()
         if status != 0:
             raise RuntimeError("%s: sign-emu exited with status %s: %s"
                                % (name, status, open(log).read().strip()[-300:]))
@@ -250,7 +240,6 @@ PICTURES = (
     + ["00e1", "00e1", "30e1a20b40", "30e1a20b40", "00e1p34r20", "00e1"]            # the sparkle
     + ["70s0", "70s23", "00s0", "00s1", "30a17b45s12", "50s59c30a55", "00c5s7b24", "20r40s33"]     # the moving stars
     + ["00s5e1", "00s6e1", "71e1s30", "00s40e2a20", "00p02s12", "00s12p20b9", "00p00s48a45"]       # ... with the rest
-    + ["00d17", "30a17z-5s12q", "00x", "20t123456p34"]                              # items the sign does not know
     + ["00e0p21r5a30", "10b7p45e0r30", "71a-99b-99c-99a-99r-99p77e2"]               # any order; the longest
 )
 
@@ -304,7 +293,7 @@ def miss_table(env):
         ("a frame with nine keys", frame_bytes("30a17", 9)),
         ("a frame with no rise", frame_bytes("")),
         ("a rise of 8", frame_bytes("80a17")),
-        ("a capital letter for an item", frame_bytes("30A17")),
+        ("a shape the sign does not have", frame_bytes("30d17")),
         ("stars moved by 60", frame_bytes("30a17s60")),
         ("five obstacles", frame_bytes("30a1a9b20b30c40")),
         ("a column of three digits", frame_bytes("30a100")),
@@ -442,19 +431,20 @@ def pace_of(env, name, port, latency, stars):
     heard = [run.requests[i] + BYTE_S for i in range(len(script))]         # the app has the request
     rate = (len(shown) - 1) / (shown[-1] - shown[0])
     exchange = [(b - a) * 1000 for a, b in zip(shown, shown[1:])]
-    # A press the app has before it hears request i goes into answer i and is on the LEDs when
-    # that frame is latched. For presses at every moment of the game alike:
+    # Frame delivery latency. What the app has before it hears request i (a press) goes into
+    # answer i and is on the LEDs when that frame is latched. For every moment of the game alike:
     soonest = min(s - h for s, h in zip(shown[1:], heard[1:])) * 1000
     latest = max(s - h for s, h in zip(shown[1:], heard)) * 1000
     span = heard[-1] - heard[0]
     mean = sum((b - a) * (s - (a + b) / 2) for a, b, s in zip(heard, heard[1:], shown[1:])) / span * 1000
     sizes = [len(frame_bytes(t)) for t in script]
-    log.append("        frames of %d to %d bytes: %.1f frames a second (a frame every %.1f to %.1f ms); a press is "
-               "on the LEDs %.0f to %.0f ms after the app has it, %.0f ms on average"
+    log.append("        frames of %d to %d bytes: %.1f frames a second (a frame every %.1f to %.1f ms); frame "
+               "delivery latency (the app has a press -> the frame with it is on the LEDs) %.0f to %.0f ms, "
+               "%.0f ms on average"
                % (min(sizes), max(sizes), rate, min(exchange), max(exchange), soonest, latest, mean))
     env["measured"][latency, stars] = (rate, soonest, mean, latest)
     check(log, rate >= env["least_rate"] and latest <= 2000 / env["least_rate"],
-          "at least %d frames a second, and no press waits longer than two frames at that rate (%d ms)"
+          "at least %d frames a second, and no frame is delivered later than two frames at that rate (%d ms)"
           % (env["least_rate"], 2000 / env["least_rate"]))
     return log
 
