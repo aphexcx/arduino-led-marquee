@@ -45,7 +45,7 @@ emulator/fake_app.py -i            # plain text scrolls; ":F HELLO" sends type F
 Play the jump game, in one window (124 columns by 32 rows or larger):
 
 ```sh
-emulator/game_app.py               # g or Enter starts, SPACE or the up arrow jumps, q quits
+emulator/game_app.py               # g or Enter starts, SPACE or the up arrow jumps, q or Ctrl-C quits
 ```
 
 `game_app.py` starts the emulator with its live view and plays the app's side
@@ -53,9 +53,15 @@ itself: a stand-in with the app's rules and shows, by this computer's clock,
 so the emulator runs at real-time speed. `--auto 4` presses for the first four
 obstacles by itself; options after `--` go to the emulator (`--record game.gif`).
 It connects only when its own emulator has said that it listens, and ends with
-a status that is not 0 when that never comes or the emulator ends with an error.
-However it ends (`q`, the window closed, a signal, an error, killed outright),
-its emulator ends too.
+a status that is not 0 when that never comes or the emulator ends with an error
+(also one it makes as it ends: a recording it could not finish). However it
+ends (`q`, Ctrl-C, the window closed, a signal, an error, killed outright), its
+emulator ends too.
+
+Every tool and test here that starts an emulator and plays to it does so
+through `sign_emu.py`: it waits for the line in which that emulator says it
+listens before anything connects, and ends that process by its number. Nothing
+connects to an emulator somebody else started or ends one.
 
 ## What you see
 

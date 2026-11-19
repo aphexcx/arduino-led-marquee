@@ -11,8 +11,10 @@
             again when the row says, and the frames after it are drawn. Then no answers at all,
             and an answer that never ends: the sign leaves the game after GAME_LEAVE_MS and asks
             the ordinary way.
-  pace      a scripted game at three reaction times of the app: frames a second, and the time
-            from the app having a button press to the runner moving on the LEDs.
+  pace      a scripted game at three reaction times of the app: frames a second, and the frame
+            delivery latency: the time from the app having something new (a button press) to the
+            frame that carries it being on the LEDs. (When the runner is seen to move is the app's
+            matter: its jump has no row yet in the frames of its first milliseconds.)
 
 A scripted peer answers each of the sign's requests with the next item of a list; sign-emu runs the
 firmware headless and writes a frames dump; everything is checked from that dump. What a picture
@@ -25,11 +27,12 @@ import json
 import math
 import os
 import re
-import socket
-import subprocess
 import sys
 import threading
 import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
+import sign_emu  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ads_test as A  # noqa: E402
@@ -135,23 +138,12 @@ class Run:
     def __init__(self, env, name, answers, port, seconds, options=()):
         dump = os.path.join(env["work"], name + ".jsonl")
         log = os.path.join(env["work"], name + ".log")
-        with open(log, "w") as err:
-            emu = subprocess.Popen(
-                [env["emu"], "--headless", "--port", str(port), "--wait-client", "30", "--link-directives",
-                 "--until-requests", str(len(answers) + 1), "--duration", str(seconds), "--frames", dump]
-                + list(options) + [env["hex"]], stderr=err)
+        emu = sign_emu.Emu(
+            [env["emu"], "--headless", "--port", str(port), "--wait-client", "30", "--link-directives",
+             "--until-requests", str(len(answers) + 1), "--duration", str(seconds), "--frames", dump]
+            + list(options) + [env["hex"]], port, log=log)
         try:
-            deadline = time.monotonic() + 30
-            while True:
-                try:
-                    sock = socket.create_connection(("127.0.0.1", port), timeout=2)
-                    break
-                except OSError:
-                    if time.monotonic() > deadline or emu.poll() is not None:
-                        raise RuntimeError("%s: cannot connect to sign-emu on port %d" % (name, port))
-                    time.sleep(0.05)
-            sock.settimeout(None)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock = emu.connect()
 
             def serve():
                 sent = 0
@@ -171,8 +163,7 @@ class Run:
             status = emu.wait(timeout=900)
             sock.close()
         finally:
-            if emu.poll() is None:
-                emu.kill()
+            emu.end()
         if status != 0:
             raise RuntimeError("%s: sign-emu exited with status %s: %s"
                                % (name, status, open(log).read().strip()[-300:]))
@@ -351,12 +342,14 @@ def misses(env, name, port):
     ordinary = last_good + 1 + len(quick)
     drawn_at = run.between(last_good)[-1].t if run.between(last_good) else None
     left_after = (run.requests[ordinary] - drawn_at) * 1000 if drawn_at is not None and run.asked(ordinary) else None
-    check(log, left_after is not None and env["leave"] <= left_after <= env["leave"] + env["miss"] + env["quiet"] + 10
+    # (the sign counts in the milliseconds of its own clock: up to 2.5 ms less, as in the rows above)
+    check(log, left_after is not None
+          and env["leave"] - 2.5 <= left_after <= env["leave"] + env["miss"] + env["quiet"] + 10
           and not run.between(last_good + 1, ordinary),
           "no answers: the last picture stays and the sign asks every %s ms, %d times; %s ms after the last good "
-          "frame (%d to %d) it leaves the game"
+          "frame (%.1f to %d) it leaves the game"
           % ("/".join(sorted({"%.0f" % run.gap_ms(k) for k in quick})) or "?", len(quick),
-             "%.0f" % left_after if left_after is not None else "?", env["leave"],
+             "%.1f" % left_after if left_after is not None else "?", env["leave"] - 2.5,
              env["leave"] + env["miss"] + env["quiet"] + 10))
     stars = run.between(ordinary)
     gap = run.gap_ms(ordinary)
@@ -409,19 +402,20 @@ def pace(env, name, port, latency):
     heard = [run.requests[i] + BYTE_S for i in range(len(script))]         # the app has the request
     rate = (len(shown) - 1) / (shown[-1] - shown[0])
     exchange = [(b - a) * 1000 for a, b in zip(shown, shown[1:])]
-    # A press the app has before it hears request i goes into answer i and is on the LEDs when
-    # that frame is latched. For presses at every moment of the game alike:
+    # Frame delivery latency. What the app has before it hears request i (a press) goes into
+    # answer i and is on the LEDs when that frame is latched. For every moment of the game alike:
     soonest = min(s - h for s, h in zip(shown[1:], heard[1:])) * 1000
     latest = max(s - h for s, h in zip(shown[1:], heard)) * 1000
     span = heard[-1] - heard[0]
     mean = sum((b - a) * (s - (a + b) / 2) for a, b, s in zip(heard, heard[1:], shown[1:])) / span * 1000
     sizes = [len(frame_bytes(t)) for t in script]
-    log.append("        frames of %d to %d bytes: %.1f frames a second (a frame every %.1f to %.1f ms); a press is "
-               "on the LEDs %.0f to %.0f ms after the app has it, %.0f ms on average"
+    log.append("        frames of %d to %d bytes: %.1f frames a second (a frame every %.1f to %.1f ms); frame "
+               "delivery latency (the app has a press -> the frame with it is on the LEDs) %.0f to %.0f ms, "
+               "%.0f ms on average"
                % (min(sizes), max(sizes), rate, min(exchange), max(exchange), soonest, latest, mean))
     env["measured"][latency] = (rate, soonest, mean, latest)
     check(log, rate >= env["least_rate"] and latest <= 2000 / env["least_rate"],
-          "at least %d frames a second, and no press waits longer than two frames at that rate (%d ms)"
+          "at least %d frames a second, and no frame is delivered later than two frames at that rate (%d ms)"
           % (env["least_rate"], 2000 / env["least_rate"]))
     return log
 
