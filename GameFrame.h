@@ -12,8 +12,12 @@
 //     r<col>                 the runner's left column (2 without it); at most once
 //     p<runner><obstacles>   two colour digits, 0 to 7 (p62 without it: blue, red); at most once
 //     e<digit>               0 nothing, 1 sparkle, 2 flash; at most once
+//     s<number>              the moving stars, 0 to 59 columns to the left of where they are at 0
+//                            (none without it); at most once
 //   <col> is -99 to 99: an optional '-' and one or two digits. Column 0 is a face's left edge; what
 //   is left of it or right of column 59 is cut off.
+// An item this sign does not know (another lowercase letter, with the digits and '-' after it) is
+// skipped, so that an app that knows more items than the sign still gets its frames drawn.
 // Anything else makes the whole frame a bad one: nothing of it is drawn.
 //
 // One colour per column is the display's rule: a column an obstacle lights is in the obstacles'
@@ -50,6 +54,15 @@ static const uint8_t gameShapes[] PROGMEM = {
         0x02, 0x06, 0x0E, 0x06, 0x02,
 };
 static const uint8_t gameShapeAt[] PROGMEM = {0, 3, 5, 10}; // where each shape begins, and the end
+
+// The moving stars: a fixed pattern as wide as a face, one LED each, drawn where the play leaves a
+// column dark and moved to the left by the frame's number; what leaves on the left comes in on the
+// right. A byte a star: its column at 0 in bits 0 to 5, and in bits 6 and 7 how many rows it is
+// above row 4, so that no star is in the three rows the obstacles stand in.
+//   columns 2 9 19 25 33 40 47 55, rows 7 5 6 4 7 5 4 6
+#define GAME_STARS 8
+#define GAME_STAR_COLOUR GAME_COLOURS // their colour: the one after the digits' (GameDisplay.h)
+static const uint8_t gameStars[GAME_STARS] PROGMEM = {0xC2, 0x49, 0x93, 0x19, 0xE1, 0x68, 0x2F, 0xB7};
 
 struct GamePicture {
     uint8_t rows[GAME_COLS];   // the lit rows of each column
@@ -102,7 +115,8 @@ static bool gameRender(const char* s, const uint8_t* runner, GamePicture& pic) {
     int8_t runnerCol = GAME_RUNNER_COL;
     uint8_t runnerColour = GAME_RUNNER_COLOUR;
     uint8_t obstacleColour = GAME_OBSTACLE_COLOUR;
-    uint8_t seen = 0;         // which of r, p, e have come: each at most once
+    int8_t stars = -1;        // how far the moving stars are moved; none below 0
+    uint8_t seen = 0;         // which of r, p, e, s have come: each at most once
     uint8_t obstacles = 0;
     uint8_t shape[GAME_MAX_OBSTACLES];
     int8_t at[GAME_MAX_OBSTACLES];
@@ -135,6 +149,15 @@ static bool gameRender(const char* s, const uint8_t* runner, GamePicture& pic) {
                 return false;
             }
             pic.effect = *s++ - '0';
+        } else if (item == 's') {
+            once = 8;
+            if (!gameReadCol(s, stars) || stars < 0 || stars >= GAME_COLS) {
+                return false;
+            }
+        } else if (item >= 'a' && item <= 'z') {
+            while (*s == '-' || (*s >= '0' && *s <= '9')) { // an item this sign does not know
+                s++;
+            }
         } else {
             return false;
         }
@@ -159,6 +182,18 @@ static bool gameRender(const char* s, const uint8_t* runner, GamePicture& pic) {
             const uint8_t lit = pic.colour[c] ? pic.rows[c] : 0;
             pic.rows[c] = (uint8_t) ~lit & 0xFE; // (bit 0 is no row)
             pic.colour[c] = obstacleColour;
+        }
+    } else if (stars >= 0) {
+        for (uint8_t n = 0; n < GAME_STARS; n++) {
+            const uint8_t star = pgm_read_byte_near(gameStars + n);
+            int8_t col = (int8_t) ((star & 0x3F) - stars);
+            if (col < 0) {
+                col += GAME_COLS;
+            }
+            if (!pic.rows[col]) { // (a column of the play has no star, in colour 0 too)
+                pic.rows[col] = (uint8_t) (0x10 << (star >> 6));
+                pic.colour[col] = GAME_STAR_COLOUR;
+            }
         }
     }
     return true;

@@ -3,8 +3,8 @@
 
 This is a STAND-IN for the Android app's side of the game: the app's rules and its three shows
 (energy-sign, JumpGame.kt: the 900 ms jump, 30 rising to 54 columns a second, the three obstacle
-kinds and their spacing, the collisions LED for LED), written again here so that the game can be
-played without the app. The sign's side is the real firmware image, running in sign-emu.
+kinds and their spacing, the collisions LED for LED, the stars behind the play that move at a
+quarter of the ground's speed), written again here so that the game can be played without the app. The sign's side is the real firmware image, running in sign-emu.
 
 It starts sign-emu with its live view, answers every request of the sign itself and reads the
 keys in the same window:
@@ -60,12 +60,19 @@ class Rules:
     tick_ms = 10
     longest_ms = 180000
     stride_ms = 160
+    stars_share = 0.25          # the stars behind the play move at this share of the ground's speed
+    star_columns = 60           # ... and their place is a column, counted up to this
+
+    @classmethod
+    def stars(cls, ground_columns):
+        """Where the stars stand when the ground has moved that many columns (before the start: less than none)."""
+        return math.floor(ground_columns * cls.stars_share + 1e-6) % cls.star_columns
 
 
 class Frame:
-    def __init__(self, rise, picture, obstacles, runner_at=None, colours=None, effect=0):
+    def __init__(self, rise, picture, obstacles, runner_at=None, colours=None, effect=0, stars=None):
         self.rise, self.picture, self.obstacles = rise, picture, obstacles
-        self.runner_at, self.colours, self.effect = runner_at, colours, effect
+        self.runner_at, self.colours, self.effect, self.stars = runner_at, colours, effect, stars
 
     def text(self):
         """The frame as the sign reads it (the firmware's GameFrame.h)."""
@@ -78,6 +85,8 @@ class Frame:
             out += "p%d%d" % tuple(min(max(c, 0), 7) for c in self.colours)
         if self.effect in (1, 2):
             out += "e%d" % self.effect
+        if self.stars is not None:
+            out += "s%d" % (self.stars % Rules.star_columns)
         return out
 
 
@@ -89,12 +98,14 @@ class JumpGame:
         self.jumped_at = -1
         self.coming = []            # [kind, x, passed]
         self.next_after = 0.0
+        self.ground = 0.0           # the columns the ground has moved since the game began: what the stars go by
 
     def start(self, now):
         self.running, self.ended, self.score = True, None, 0
         self.started_at, self.ticks, self.jumped_at = now, 0, -1
         self.coming = []
         self.next_after = float(self.rules.first_after_columns)
+        self.ground = 0.0
 
     def jump(self, now):
         self.work_out_to(now)
@@ -110,7 +121,8 @@ class JumpGame:
         r = self.rules
         stride = 0 if self.jumped_at >= 0 else self.ticks * r.tick_ms // r.stride_ms % 2
         return Frame(min(self.rise(), r.rows), stride,
-                     [(kind, math.floor(x)) for kind, x, _ in self.coming if x < r.face_columns])
+                     [(kind, math.floor(x)) for kind, x, _ in self.coming if x < r.face_columns],
+                     stars=r.stars(self.ground))
 
     def speed(self):
         r = self.rules
@@ -128,6 +140,7 @@ class JumpGame:
             self.jumped_at = -1                                   # landed
         speed = self.speed()
         moved = speed * r.tick_ms / 1000.0
+        self.ground += moved
         for obstacle in self.coming:
             obstacle[1] -= moved
             if not obstacle[2] and obstacle[1] + len(r.obstacles[obstacle[0]]) <= r.runner_at:
@@ -177,12 +190,15 @@ class Shows:
             colour_message("I", "D", self.runner_colour),
             colour_message("C", "READY?", self.score_colour, dly=600, scroll=False),
             self.flash("JUMP!"),
-            (500, lambda t: Frame(0, t // 100 % 2, [], runner_at=-12 + 14 * t // 500, effect=1)),
+            # (the stars slide at the game's first speed into the place the game begins at)
+            (500, lambda t: Frame(0, t // 100 % 2, [], runner_at=-12 + 14 * t // 500, effect=1,
+                                  stars=Rules.stars(-(500 - t) * Rules.start_speed / 1000.0))),
         ]
 
     def hit(self, last):
         return (700, lambda t: Frame(last.rise if last else 0, 0, last.obstacles if last else [],
-                                     colours=(2 if t // 100 % 2 == 0 else 0, 2), effect=2 if t < 100 else 0))
+                                     colours=(2 if t // 100 % 2 == 0 else 0, 2), effect=2 if t < 100 else 0,
+                                     stars=last.stars if last else None))      # (the stars stand where they stood)
 
     def over(self, score, best, last):
         return [
@@ -202,7 +218,8 @@ class Shows:
             self.flash("NEW" + VT + "BEST!"),
             colour_message("C", digits.rjust((6 + len(digits)) // 2).ljust(6), self.score_colour, dly=1500, scroll=False),
             (2000, lambda t: Frame(int(abs(math.sin(t / 140.0)) * 3), 0, [], runner_at=2 + 45 * t // 2000,
-                                   colours=(1 + t // 120 % 7, 2), effect=1)),
+                                   colours=(1 + t // 120 % 7, 2), effect=1,
+                                   stars=Rules.stars(t * Rules.top_speed / 1000.0))),   # (as at the top speed)
             {"str": "", "type": "S", "stars": 600},
         ]
 
