@@ -29,6 +29,7 @@ import pty
 import random
 import select
 import signal
+import socket
 import subprocess
 import sys
 import termios
@@ -321,7 +322,7 @@ def main():
     p.add_argument("--hex", default=os.path.join(HERE, "build", "firmware", "LED_Marquee.hex"))
     p.add_argument("--port", type=int, default=0, help="TCP port for the serial link (default: a free one)")
     p.add_argument("--auto", type=int, default=0, help="press the button itself for the first n obstacles of a game")
-    p.add_argument("--start", action="store_true", help="start a game at once (with --auto: start one after another)")
+    p.add_argument("--start", action="store_true", help="start a game at once (with --auto: that one game, then it ends: a recording)")
     p.add_argument("emu_options", nargs="*", help="after --: more options for sign-emu (--record out.gif)")
     args = p.parse_args()
     for path in (args.emu, args.hex):

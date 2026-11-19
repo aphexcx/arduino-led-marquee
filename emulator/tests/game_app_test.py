@@ -8,7 +8,8 @@ controlling terminal, as a window is). Most are emulator/game_app.py:
     port): it must end with a status that is not 0, say why, and leave the other emulator alone:
     not connected to, still running afterwards. The same for tests/game_test.py's run.
   - it begins well and ends in the ways there are: q is typed, Ctrl-C is typed (both: status 0,
-    the screen put back), the window is closed, it is told to end (SIGTERM), it is killed outright
+    the screen put back), the window is closed, it is told to end (SIGTERM), it is killed outright.
+    And once started as the README and a launcher start it, with no port named: it finds one
   - its emulator fails as it ends (a recording it cannot finish: status 4), or does not end when
     asked: q is typed, and the status is not 0 all the same
 
@@ -135,6 +136,7 @@ def main():
             f.write(text)
         os.chmod(path, 0o755)
     app = [sys.executable, os.path.join(root, "emulator", "game_app.py"), "--hex", image, "--port", str(port), "--emu", its]
+    no_port = [a for a in app if a not in ("--port", str(port))]
     run = [sys.executable, "-c", ITS_RUN, os.path.dirname(os.path.abspath(__file__)), its, image, work, str(port)]
     listen, score = "did not come to listen", "best score of this sitting"
     # what it is; the program; the emulator it gets; is another emulator on the port; how it is
@@ -145,6 +147,7 @@ def main():
         ("game_test.py's run, and another emulator has the port", run, emu, True, None, False, [listen]),
         ("the emulator is there, and q is typed", app, emu, False, "q", True, [score, SCREEN_BACK]),
         ("the emulator is there, and Ctrl-C is typed", app, emu, False, "ctrl-c", True, [score, SCREEN_BACK]),
+        ("no port is named (it finds a free one), and q is typed", no_port, emu, False, "q", True, [score, SCREEN_BACK]),
         ("the emulator is there, and the window is closed", app, emu, False, "close", False, []),
         ("the emulator is there, and it is told to end (SIGTERM)", app, emu, False, signal.SIGTERM, False, []),
         ("the emulator is there, and it is killed outright", app, emu, False, signal.SIGKILL, False, []),
