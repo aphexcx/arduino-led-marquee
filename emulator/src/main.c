@@ -1,6 +1,7 @@
 // sign-emu: runs the sign's real firmware image on a simulated ATmega328P
 // (simavr) and shows what the LEDs would show. See ../README.md.
 #include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
@@ -20,6 +21,7 @@ static struct {
     int band;
     double duration_s;        // 0 = run until stopped
     long until_requests;      // 0 = off
+    int until_disconnect;     // stop when the app hangs up
     double speed;             // 0 = as fast as possible
     int speed_set;
     const char *gif, *png_dir, *events;
@@ -49,6 +51,8 @@ static void usage(FILE *f)
 "    --duration <s>         stop after this much simulated time\n"
 "    --until-requests <n>   stop when the sign asks for its n-th message\n"
 "                           (it has then finished drawing the first n-1)\n"
+"    --until-disconnect     stop when the app hangs up (an app that plays a list once\n"
+"                           hangs up at the request after its last message)\n"
 "    --speed <x>            pace to x times real time (live default 1, 0 = flat out)\n"
 "  views\n"
 "    --headless             no terminal view (default when stdout is not a terminal)\n"
@@ -68,7 +72,9 @@ static void usage(FILE *f)
 "                           whole reply (one JSON object) to arrive (default 1000,\n"
 "                           0 = never hold: replies go on the wire as they arrive)\n"
 "    --link-directives      let the app place a reply itself: \"@<ms>\\n\" before a reply\n"
-"                           replaces --link-latency-ms for it, \"@none\\n\" sends none\n"
+"                           replaces --link-latency-ms for it, \"@none\\n\" sends none;\n"
+"                           and hold the line LOW: \"@break<ms>\\n\" (a UART break),\n"
+"                           \"@after<ms>\\n\" for a gap after the item before\n"
 "    --request-chars <s>    bytes that count as a request (default \"~?\")\n"
 "  inputs\n"
 "    --bpm <n>              pulse the beat input (A0) n times a minute\n"
@@ -151,8 +157,12 @@ static void on_frame(const image_t *img, uint64_t latch_cycle, const ws_frame_in
 // While a request is being answered (g_hold.active), a reply is placed
 // relative to the end of that request's stop bit. Anything else the app sends
 // is placed relative to the moment it arrives.
+// With "@batch" in front of the reply the hold does not end when the reply
+// is complete (reply_seen) but at "@end": what the app sends in between is
+// read with the clock standing still.
 static struct {
     int active, done;
+    int keep, reply_seen;
     uint64_t base;
 } g_hold;
 
@@ -162,18 +172,51 @@ static uint64_t ms_to_cycles(double ms)
 {
     return (uint64_t) llround(ms * (F_CPU_HZ / 1000.0));
 }
-static uint64_t g_unfinished_replies, g_link_changes;
+static uint64_t g_unfinished_replies, g_link_changes, g_breaks;
 
-static void deliver(const uint8_t *data, size_t n, int has_delay, double delay_ms, int complete,
-                    void *param)
+static void deliver(const reply_t *r, void *param)
 {
-    int answering = g_hold.active && !g_hold.done;
+    int held = g_hold.active && !g_hold.done;
+    int answering = held && !g_hold.reply_seen;
+    if (r->batch || r->end) {
+        if (held && r->batch)
+            g_hold.keep = 1;
+        if (held && r->end)
+            g_hold.done = 1;
+        return;
+    }
     uint64_t base = answering ? g_hold.base : avr->cycle;
-    double ms = has_delay ? delay_ms : answering ? opt.latency_ms : 0;
-    if (n)
-        uart_rx_enqueue(data, n, base + ms_to_cycles(ms));
-    if (answering && complete)
-        g_hold.done = 1;
+    double ms = r->has_delay ? r->delay_ms : answering ? opt.latency_ms : 0;
+    uint64_t after = r->has_after ? ms_to_cycles(r->after_ms) : 0;
+    if (r->break_ms > 0) {
+        // A break is placed like a reply. At least one cycle long.
+        uint64_t low = ms_to_cycles(r->break_ms);
+        uart_rx_enqueue_break(low ? low : 1, base + ms_to_cycles(ms), after);
+    } else if (r->n) {
+        uart_rx_enqueue(r->data, r->n, base + ms_to_cycles(ms), after);
+    }
+    if (answering && r->complete) {
+        if (g_hold.keep)
+            g_hold.reply_seen = 1;
+        else
+            g_hold.done = 1;
+    }
+}
+
+// The app holds the line to the sign LOW. Recorded when it falls, with the
+// cycle it will rise again.
+static void on_break(uint64_t start_cycle, uint64_t due_cycle, uint64_t end_cycle)
+{
+    char extra[128];
+    g_breaks++;
+    snprintf(extra, sizeof(extra), "\"due\":%llu,\"end\":%llu,\"ms\":%.6f",
+             (unsigned long long) due_cycle, (unsigned long long) end_cycle,
+             (double) (end_cycle - due_cycle) / (F_CPU_HZ / 1000.0));
+    rec_event("break", start_cycle, extra);
+    tail_append(g_last_rx, sizeof(g_last_rx), '_');   // the view shows a break as a low line
+    if (opt.verbose)
+        fprintf(stderr, "[%10.6f] app -> sign: line LOW for %.3f ms\n", cycles_to_s(start_cycle),
+                (double) (end_cycle - due_cycle) / (F_CPU_HZ / 1000.0));
 }
 
 // The client changed: it closed, a read or write on it failed, or another
@@ -190,6 +233,8 @@ static void on_link_change(int connected)
     g_link_changes++;
     reply_reset();
     g_hold.active = 0;
+    if (!connected && opt.until_disconnect)
+        g_stop = 1;
     if (opt.verbose)
         fprintf(stderr, "[%10.6f] link: %s\n", cycles_to_s(avr->cycle),
                 connected ? "a client connected" : "the client is gone");
@@ -236,6 +281,8 @@ static void on_tx(uint8_t byte, int framing_ok, uint64_t start_cycle, uint64_t e
         reply_new_exchange(0);      // this request's reply starts outside any object
         g_hold.active = 1;
         g_hold.done = 0;
+        g_hold.keep = 0;
+        g_hold.reply_seen = 0;
         g_hold.base = end_cycle;
         // on_link_change() ends the hold (g_hold.active = 0) if the client
         // goes away or is replaced while the clock is held for it.
@@ -251,8 +298,7 @@ static void on_tx(uint8_t byte, int framing_ok, uint64_t start_cycle, uint64_t e
             // The reply did not finish in time. What has arrived of it goes
             // where a reply goes; the rest goes on the wire when it comes.
             g_unfinished_replies++;
-            reply_flush(deliver, NULL);
-            reply_new_exchange(1);  // and it is given up: it must not swallow later replies
+            reply_give_up(deliver, NULL);   // it must not swallow or delay later replies
         }
         g_hold.active = 0;
         // Anything the client sent after its reply in the same breath is not
@@ -366,6 +412,7 @@ int main(int argc, char **argv)
         // GIF's 16-bit sizes, the port in 16.
         if (!strcmp(a, "--duration")) opt.duration_s = arg_num(argc, argv, &i, 1e-6, 1e9);
         else if (!strcmp(a, "--until-requests")) opt.until_requests = arg_int(argc, argv, &i, 1, 1000000000);
+        else if (!strcmp(a, "--until-disconnect")) opt.until_disconnect = 1;
         else if (!strcmp(a, "--speed")) { opt.speed = arg_num(argc, argv, &i, 0, 1000); opt.speed_set = 1; }
         else if (!strcmp(a, "--headless")) opt.headless = 1;
         else if (!strcmp(a, "--band")) opt.band = 1;
@@ -396,6 +443,20 @@ int main(int argc, char **argv)
     if (!opt.speed_set)
         opt.speed = opt.headless ? 0 : 1;
 
+    // The firmware is opened once and read from that descriptor, which stays
+    // open to the end of the run: the file the outputs are compared with
+    // (record.c, "whose file is whose") is the file that was loaded.
+    int hex_fd = open(opt.hex, O_RDONLY);
+    FILE *hex_file = hex_fd >= 0 ? fdopen(hex_fd, "r") : NULL;
+    if (!hex_file || rec_hold_input(hex_fd, "the firmware file") != 0) {
+        fprintf(stderr, "sign-emu: cannot read Intel HEX file %s\n", opt.hex);
+        return 1;
+    }
+    // The report of the run goes to standard error: an output that is that
+    // very file would have the report written into it. (No matter if there
+    // is no standard error to identify.)
+    rec_hold_input(STDERR_FILENO, "standard error (this report)");
+
     // The simulated chip.
     avr = avr_make_mcu_by_name("atmega328p");
     if (!avr) {
@@ -411,7 +472,7 @@ int main(int argc, char **argv)
     avr->sleep = no_sleep;
     static uint8_t flash[32768];
     memset(flash, 0xff, sizeof(flash));
-    long size = load_ihex(opt.hex, flash, sizeof(flash));
+    long size = load_ihex_file(hex_file, flash, sizeof(flash));
     if (size <= 0) {
         fprintf(stderr, "sign-emu: cannot read Intel HEX file %s\n", opt.hex);
         return 1;
@@ -429,6 +490,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "sign-emu: simavr's atmega328p has no port B or port D to attach to\n");
         return 1;
     }
+    uart_on_break(on_break);
     reply_init(opt.directives);
     if (opt.bpm > 0) {
         // bpm is 1..600: a period of 0.1 to 60 s, always longer than the pulse.
@@ -443,11 +505,11 @@ int main(int argc, char **argv)
         avr_cycle_timer_register(avr, g_beat_period, beat_timer, NULL);
     }
 
-    if ((opt.gif && rec_gif_open(opt.gif)) || (opt.png_dir && rec_png_open(opt.png_dir))) {
-        fprintf(stderr, "sign-emu: recording failed: %s\n", rec_error());
-        return EXIT_RECORDING;
-    }
-    if (opt.events) {
+    // The outputs. Each is opened without being emptied and must be a file of
+    // its own: not the firmware, not another output, under whatever name.
+    // Only when all of them are open and all differ is anything emptied.
+    int refused = (opt.gif && rec_gif_open(opt.gif)) || (opt.png_dir && rec_png_open(opt.png_dir));
+    if (!refused && opt.events) {
         char settings[512];
         int n = snprintf(settings, sizeof(settings),
                  "\"f_cpu\":16000000,\"rows\":%d,\"cols\":%d,"
@@ -457,12 +519,19 @@ int main(int argc, char **argv)
                  ROWS, COLS, PANEL_COLS, opt.reset_us, opt.latency_ms, opt.bpm);
         if (n < 0 || n >= (int) sizeof(settings)) {
             fprintf(stderr, "sign-emu: internal error: settings do not fit the meta line\n");
+            rec_abandon();
             return 1;
         }
-        if (rec_events_open(opt.events, opt.hex, settings)) {
-            fprintf(stderr, "sign-emu: recording failed: %s\n", rec_error());
-            return EXIT_RECORDING;
+        refused = rec_events_open(opt.events, opt.hex, settings) != 0;
+    }
+    if (refused) {
+        rec_abandon();
+        if (rec_same_file()) {
+            fprintf(stderr, "sign-emu: %s: nothing was written\n", rec_error());
+            return 2;
         }
+        fprintf(stderr, "sign-emu: recording failed: %s\n", rec_error());
+        return EXIT_RECORDING;
     }
 
     signal(SIGINT, on_signal);
@@ -474,6 +543,7 @@ int main(int argc, char **argv)
         link_on_change(on_link_change);
         if (link_listen(opt.port)) {
             fprintf(stderr, "sign-emu: cannot listen on 127.0.0.1:%d: %s\n", opt.port, strerror(errno));
+            rec_abandon();
             return 1;
         }
         if (opt.wait_client_s > 0) {
@@ -483,9 +553,17 @@ int main(int argc, char **argv)
                 ;
             if (!link_connected()) {
                 fprintf(stderr, "sign-emu: no app connected within %d s\n", opt.wait_client_s);
+                rec_abandon();
                 return 1;
             }
         }
+    }
+
+    // The run begins: only now are the outputs emptied and begun. (Whatever
+    // stopped it before this left every file as it was.)
+    if (rec_start()) {
+        fprintf(stderr, "sign-emu: recording failed: %s\n", rec_error());
+        return EXIT_RECORDING;
     }
 
     if (!opt.headless)
@@ -589,6 +667,9 @@ int main(int argc, char **argv)
     fprintf(out, "sign-emu: serial: sign sent %llu bytes (%llu requests), app sent %llu bytes\n",
             (unsigned long long) g_tx_bytes, (unsigned long long) g_requests,
             (unsigned long long) g_rx_bytes);
+    if (g_breaks)
+        fprintf(out, "sign-emu: serial: the app held the line LOW %llu time(s)\n",
+                (unsigned long long) g_breaks);
     if (g_unfinished_replies)
         fprintf(out, "sign-emu: NOTE: %llu request(s) had no complete reply within %d ms of real "
                      "time; from there this run's timing depends on this computer\n",
@@ -598,7 +679,9 @@ int main(int argc, char **argv)
                      "sign was full\n", uart_rx_dropped());
     if (g_rx_wire_errors)
         fprintf(out, "sign-emu: WARNING: %llu byte(s) to the sign were not seen on the wire as "
-                     "they were sent (emulator fault)\n", (unsigned long long) g_rx_wire_errors);
+                     "they were sent (an emulator fault, unless bytes were sent with no gap behind "
+                     "a break: their first start bit is then no edge)\n",
+                (unsigned long long) g_rx_wire_errors);
     if (g_marginal || g_partial || g_framing_errors)
         fprintf(out, "sign-emu: WARNING: %llu marginal WS2812 pulses, %llu frames with a partial "
                      "pixel, %llu serial framing errors\n",

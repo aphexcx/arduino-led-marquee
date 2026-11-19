@@ -21,6 +21,12 @@ from fractions import Fraction
 BIT_CYCLES = Fraction(16000000, 14400)          # CPU cycles in one bit time
 REQUEST_CYCLES = -(-10 * BIT_CYCLES // 1)       # 10 bit times, rounded up to a whole cycle
 failures = []
+# Several cases here send a reply in pieces with pauses of real time in between, and expect the
+# same dump as without the pauses. That holds while the pieces arrive within the emulator's
+# wait for the reply (--link-wait-ms, 1 s unless told otherwise). So that a busy computer
+# cannot stretch a 0.6 s pause past it, every run gets a wait of 20 s; the cases that are
+# about the wait running out name their own (a later option wins).
+LONG_WAIT = ("--link-wait-ms", "20000")
 
 
 def nearest_cycle(bits):
@@ -35,7 +41,7 @@ def check(ok, text):
 
 
 class Run:
-    def __init__(self, lines, wall_s, log, status):
+    def __init__(self, lines, wall_s, log, status, tolerate_wire=False):
         self.lines = lines                     # the dump, without its meta line
         self.wall_s = wall_s
         self.log = log
@@ -46,12 +52,15 @@ class Run:
         # Each rx line is a byte a listener decoded from the pin: "cycle" is when
         # its start bit was seen to fall, "due" is when the model had it due.
         self.rx = [e for e in events if e["type"] == "rx"]
+        # Each break line is the app holding the line LOW: "cycle" is when it was
+        # seen to fall, "due" when it was due to, "end" when it is due to rise.
+        self.breaks = [e for e in events if e["type"] == "break"]
         late = [e["cycle"] - e["due"] for e in self.rx]
-        if late and not (0 <= min(late) and max(late) <= 4):
+        if late and not (0 <= min(late) and max(late) <= 4) and not tolerate_wire:
             raise RuntimeError("a start bit was seen on the pin %d..%d cycles after it was due; "
                                "it must be there at the first instruction boundary (0 to 4 "
                                "cycles)" % (min(late), max(late)))
-        if "WARNING" in log:
+        if "WARNING" in log and not tolerate_wire:
             raise RuntimeError("sign-emu warned: %s" % log.strip()[-300:])
         self.frames = sum(1 for e in events if e["type"] == "frame")
 
@@ -62,7 +71,7 @@ class Run:
         return bytes(e["byte"] for e in self.tx).decode("latin-1")
 
 
-def run_case(env, name, plan, requests, flags=()):
+def run_case(env, name, plan, requests, flags=(), tolerate_wire=False):
     """plan: for each request, a list of (bytes, pause before sending, in real seconds)."""
     dump = os.path.join(env["work"], name + ".jsonl")
     log = os.path.join(env["work"], name + ".log")
@@ -70,7 +79,7 @@ def run_case(env, name, plan, requests, flags=()):
         emu = subprocess.Popen(
             [env["emu"], "--headless", "--port", str(env["port"]), "--wait-client", "30",
              "--until-requests", str(requests), "--duration", "120", "--frames", dump,
-             *flags, env["hex"]], stderr=err)
+             *LONG_WAIT, *flags, env["hex"]], stderr=err)
     try:
         deadline = time.monotonic() + 30
         while True:
@@ -111,7 +120,7 @@ def run_case(env, name, plan, requests, flags=()):
         if emu.poll() is None:
             emu.kill()
     lines = open(dump, encoding="utf-8").read().splitlines()
-    return Run(lines[1:], wall, open(log).read(), emu.returncode)
+    return Run(lines[1:], wall, open(log).read(), emu.returncode, tolerate_wire)
 
 
 class Session:
@@ -125,7 +134,7 @@ class Session:
             self.emu = subprocess.Popen(
                 [env["emu"], "--headless", "--port", str(self.port), "--wait-client", "30",
                  "--until-requests", str(requests), "--duration", "120", "--frames", self.dump,
-                 *flags, env["hex"]], stderr=err)
+                 *LONG_WAIT, *flags, env["hex"]], stderr=err)
         self.start = time.monotonic()
 
     def connect(self):
@@ -167,6 +176,23 @@ class Session:
         lines = open(self.dump, encoding="utf-8").read().splitlines()
         return Run(lines[1:], time.monotonic() - self.start, open(self.log).read(),
                    self.emu.returncode)
+
+
+def rejected(run):
+    """The sign did not take the first reply for a message. Firmware up to PR 4 says so on the
+    wire and flashes it ("InvalidInput", "IncompleteInput"). The contract 3 firmware takes
+    bytes that are not a whole message for the rest of something it did not hear the start
+    of, lets them go by, and asks again: its second request then comes within a second and a
+    half of the last of those bytes (the longest it waits for one more byte is a second).
+    (A reply it took for a message keeps it busy for longer than that before it asks again:
+    showing HELLO takes 2.8 s. main() checks that this says no for such a run.)"""
+    if "InvalidInput" in run.tx_text() or "IncompleteInput" in run.tx_text():
+        return True
+    asks = [e for e in run.tx if e.get("char") in ("~", "?")]
+    if len(asks) < 2:
+        return False
+    reply = [e for e in run.rx if e["cycle"] < asks[1]["cycle"]]
+    return bool(reply) and asks[1]["cycle"] - reply[-1]["cycle"] < 24000000
 
 
 def split(reply, *cuts, pause=0.3):
@@ -297,6 +323,10 @@ def main():
     check(whole.tx_text() == "~~~" and whole.rx_text() == (hello + stars).decode(),
           "single writes: the sign asked three times and parsed both replies "
           "(sent %r, %d frames, %.1f s real)" % (whole.tx_text(), whole.frames, whole.wall_s))
+    check(not rejected(whole),
+          "(and by this file's own measure the sign did not reject the first: it asked again "
+          "%.2f s after HELLO's last byte, having shown it)"
+          % ((whole.tx[1]["cycle"] - whole.rx[len(hello) - 1]["cycle"]) / 16e6))
     cases = [
         ("after the first byte", [split(hello, 1), split(stars, 1)], ()),
         ("in the middle", [split(hello, 13), split(stars, 16)], ()),
@@ -383,7 +413,7 @@ def main():
           '"@none\\n": the request gets no reply and the clock is not held for one '
           "(next request %.3f s later)" % (none.tx[1]["t"] - none.tx[0]["t"]))
     raw = run_case(env, "nodirectives", [[(b"@250\n" + hello, 0)]], 2)
-    check(raw.rx_text().startswith("@250\n{") and "InvalidInput" in raw.tx_text(),
+    check(raw.rx_text().startswith("@250\n{") and rejected(raw),
           "without --link-directives the same bytes go on the wire as they are "
           "(the sign answered %r)" % raw.tx_text()[:16])
 
@@ -394,7 +424,7 @@ def main():
                         ("far too long", b"@" + b"1" * 40 + b"\n")]:
         run = run_case(env, "malformed-" + label.replace(" ", "-"),
                        [[(text + hello, 0)], [(stars, 0)]], 3, d)
-        check(run.rx_text() == (text + hello + stars).decode() and "InvalidInput" in run.tx_text(),
+        check(run.rx_text() == (text + hello + stars).decode() and rejected(run),
               "a mistyped directive (%s) is not swallowed: its bytes go to the sign, which "
               "rejects that reply, and the next reply arrives as usual" % label)
 
@@ -437,10 +467,20 @@ def main():
           "a late reply that is over before the second request does not move the second "
           "reply: it starts 5 ms after its own request (%d cycles)" % gap)
 
-    check("InvalidInput" in early.tx_text(),
-          "that reply arrived while the firmware showed stars after a timed-out read, still "
-          "listening: it left damaged bytes in the receive buffer and the next read failed "
-          "(the sign sent %r)" % early.tx_text())
+    # What the firmware made of that reply is its own code, and it differs by
+    # firmware. Master's readSerialData() returns from a timed-out read without
+    # stopSerial(), so it is still listening while it draws the stars. The
+    # firmware with chooser contract 3 stops listening there.
+    if "InvalidInput" in early.tx_text():
+        check(early.tx_text() == "~~InvalidInput~",
+              "that reply arrived while the firmware showed stars after a timed-out read, "
+              "still listening: it left damaged bytes in the receive buffer and the next "
+              "read failed, once (the sign sent %r)" % early.tx_text())
+    else:
+        check(early.tx_text() == "~~~",
+              "that reply arrived while the firmware showed stars after a timed-out read. This "
+              "firmware had stopped listening: nothing of it was received and the next read "
+              "was clean (the sign sent %r)" % early.tx_text())
 
     print("a reply cut short by a client that stays connected")
     # The first reply stops inside a string and the wait for it runs out. The
@@ -448,10 +488,14 @@ def main():
     # be seen as whole replies at once, not as more of the string.
     short_wait = ("--link-wait-ms", "400")
     run = run_case(env, "cut-short", [[(hello[:21], 0)], [(hello, 0)], [(stars, 0)]], 4, short_wait)
-    check(run.rx_text() == (hello[:21] + hello + stars).decode()
-          and run.tx_text().count("IncompleteInput") == 1 and run.tx_text().count("~") == 4,
-          "the cut reply goes to the sign when the wait runs out (it answers IncompleteInput "
-          "once); the next two replies arrive whole")
+    check(run.rx_text() == (hello[:21] + hello + stars).decode() and rejected(run)
+          and run.tx_text().count("IncompleteInput") <= 1 and run.tx_text().count("~") == 4,
+          "the cut reply goes to the sign when the wait runs out; the sign does not take it for "
+          "a message (%s) and the next two replies arrive whole"
+          % ("it answers IncompleteInput once" if "IncompleteInput" in run.tx_text() else
+             "it lets it go by and asks again %.2f s after its last byte"
+             % ((run.tx[1]["cycle"] - run.rx[20]["cycle"]) / 16e6 if len(run.tx) > 1 and len(run.rx) > 20
+                else -1)))
     check("NOTE: 1 request(s)" in run.log,
           "only that one request waited out --link-wait-ms; the later ones were answered at "
           "once (%s)" % ([l for l in run.log.splitlines() if "NOTE" in l] or ["no NOTE"])[0][10:60])
@@ -464,12 +508,28 @@ def main():
           and offset(run, 0, 1) == request_cycles + 5 * 16000,
           "a directive whose reply never came is dropped when the wait runs out: the next "
           "request's reply is placed by --link-latency-ms, not by the stale delay")
+    run = run_case(env, "cut-open-directive",
+                   [[(b"@250", 0)], [(hello, 0)], [(stars, 0)]], 4, short_wait + d)
+    asked = [i for i, e in enumerate(run.tx) if e.get("char") == "~"]
+    check(run.rx_text() == "@250" + (hello + stars).decode() and len(asked) == 4
+          and offset(run, 4, asked[1]) == request_cycles + 5 * 16000,
+          "a directive that never got its newline goes to the sign as the bytes it is when the "
+          "wait runs out (the sign sent %r), and does not delay the next reply: that one "
+          "starts 5 ms after its own request" % run.tx_text()[:16])
 
     print("bytes sent after a reply in the same write")
+    # They are no part of the answer: they go on the wire when the emulator has read them,
+    # behind the reply. One write is not one read, so "when" is not a cycle this test can
+    # name (if the same read brought them it is the reply's last stop bit; if a later one
+    # did, later). What holds however TCP cut the write: behind the reply, in order, and
+    # long before the sign's next request, which is seconds away.
     run = run_case(env, "trailing", [[(hello + b"xyz", 0)], [(stars, 0)]], 3)
+    reply_end = run.rx[0]["due"] + nearest_cycle(10 * len(hello))
+    tail = run.rx[len(hello):len(hello) + 3]
     check(run.rx_text() == (hello + b"xyz" + stars).decode()
-          and run.rx[len(hello)]["due"] == run.rx[0]["due"] + nearest_cycle(10 * len(hello)),
-          "they go on the wire straight after the reply, not held back until the next one")
+          and reply_end <= tail[0]["due"] and tail[2]["cycle"] < run.tx[1]["cycle"],
+          "they go on the wire behind the reply (not before its last stop bit), not held "
+          "back until the next one")
 
     print("a newline after each reply")
     nl_same = run_case(env, "nl-same", [[(hello + b"\n", 0)], [(stars + b"\n", 0)]], 3)
@@ -478,6 +538,110 @@ def main():
           "the newline travels in front of the next reply and the sign parses both")
     check(nl_same.lines == nl_later.lines,
           "sent with the reply or 0.3 s after it: identical dump")
+
+    print("the line held LOW (--link-directives)")
+    # While the sign draws HELLO it is not listening, so nothing here depends on
+    # what the firmware makes of a break: these checks are about the wire.
+    # What comes behind a reply is placed from the moment the emulator read it.
+    # One write is not one read: a read can end with the reply, the clock would
+    # run on, and the push behind it would be placed by this computer's timing.
+    # So every reply here that has something behind it is a batch ("@batch" ...
+    # "@end"): the clock stays held for the request until "@end" has arrived,
+    # and what is in between is placed with the clock where the request left
+    # it: the middle of the request's stop bit (9.5 bit times after its start
+    # bit began) and at most one instruction later.
+    after_reply = (19 * 16000000 + 14400) // (2 * 14400)
+    push = b"@300\n@break50\n@after20\n" + stars
+
+    def batch(*parts):
+        return b"@batch\n" + b"".join(parts) + b"@end\n"
+
+    run = run_case(env, "break", [[(batch(hello, push), 0)], [(stars, 0)]], 3, d)
+    b = run.breaks[0] if len(run.breaks) == 1 else {"cycle": 0, "due": 0, "end": 0, "ms": 0}
+    placed = b["due"] - run.tx[0]["cycle"] - 300 * 16000
+    check(len(run.breaks) == 1 and 0 <= b["cycle"] - b["due"] <= 4
+          and b["end"] - b["due"] == 50 * 16000 and b["ms"] == 50,
+          '"@break50\\n": the line falls at its due cycle and is due to rise exactly 50 ms later '
+          "(%d breaks, %d cycles)" % (len(run.breaks), b["end"] - b["due"]))
+    check(after_reply <= placed <= after_reply + 4,
+          '"@300\\n" in front of it: the break is placed 300 ms after the bytes were read '
+          "(%d cycles after that, expected %d to %d)" % (placed, after_reply, after_reply + 4))
+    first = run.rx[len(hello)] if len(run.rx) > len(hello) + 1 else {"due": 0}
+    check(run.rx_text() == (hello + stars + stars).decode() and first["due"] == b["end"] + 20 * 16000
+          and run.rx[len(hello) + 1]["due"] == first["due"] + nearest_cycle(10),
+          '"@after20\\n" before what follows: its first start bit is due exactly 20 ms after the '
+          "break ended, and its other bytes follow back to back (%d cycles after the break)"
+          % (first["due"] - b["end"]))
+    again = run_case(env, "break-again", [[(batch(hello, push), 0)], [(stars, 0)]], 3, d)
+    check(again.lines == run.lines, "the same run again: identical dump")
+    cut = run_case(env, "break-cut",
+                   [[(b"@batch\n" + hello, 0), (push[:9], 0.3), (push[9:] + b"@end\n", 0.3)],
+                    [(stars, 0)]], 3, d)
+    check(cut.lines == run.lines,
+          "the same sent in three writes 0.3 s apart, the first ending with the reply: the "
+          "clock stood still until @end, identical dump")
+    run = run_case(env, "break-answer", [[(b"@break10\n@after1\n" + hello, 0)]], 2, d)
+    cut = run_case(env, "break-answer-cut", [[(b"@break10\n", 0), (b"@after1\n" + hello, 0.3)]], 2, d)
+    b = run.breaks[0] if len(run.breaks) == 1 else {"due": 0, "end": 0}
+    check(len(run.breaks) == 1 and b["due"] == run.tx[0]["cycle"] + request_cycles + 5 * 16000
+          and run.rx[0]["due"] == b["end"] + 16000 and run.rx_text() == hello.decode(),
+          "a break sent as the answer to a request is placed like a reply (5 ms after the "
+          "request), and the reply behind it starts 1 ms after the line rises")
+    check(cut.lines == run.lines,
+          "a break is not a reply: the clock stays held for the reply that comes 0.3 s later "
+          "(identical dump)")
+    for label, text in [("no length", b"@break\n"), ("a length of 0", b"@break0\n"),
+                        ("a letter in the number", b"@after2x\n"), ("another word", b"@low50\n")]:
+        run = run_case(env, "notbreak", [[(text + hello, 0)]], 2, d)
+        check(not run.breaks and run.rx_text().startswith(text.decode() + "{"),
+              "a mistyped directive (%s) is not swallowed: its bytes go to the sign" % label)
+
+    print("the line has one level at a time")
+    # A reply with no gap behind a break: the line does not rise between the
+    # break and the reply's start bit, so that start bit is no falling edge and
+    # nothing can find the byte. (The first falling edge is the first 0 bit
+    # that follows a 1 bit inside the byte, at least a bit time later.)
+    glued = run_case(env, "break-glued",
+                     [[(batch(hello, b"@300\n@break10\n@after0\n" + stars), 0)], [(stars, 0)]], 3, d,
+                     tolerate_wire=True)
+    b = glued.breaks[0] if len(glued.breaks) == 1 else {"cycle": 0, "end": 0}
+    edges = [e["cycle"] for e in glued.rx if e["cycle"] >= b["cycle"]]
+    check(bool(edges) and min(edges) >= b["end"] + nearest_cycle(1),
+          '"@after0\\n": no falling edge at the end of the break; the first one a listener '
+          "finds is %d cycles later, inside the byte" % ((min(edges) - b["end"]) if edges else -1))
+    check("no gap behind" in glued.log,
+          "and the emulator says that those bytes were not seen on the wire as they were sent")
+    gap = run_case(env, "break-gap",
+                   [[(batch(hello, b"@300\n@break10\n@after0.5\n" + stars), 0)], [(stars, 0)]], 3, d)
+    b = gap.breaks[0] if len(gap.breaks) == 1 else {"end": 0}
+    check(gap.rx_text() == (hello + stars + stars).decode()
+          and gap.rx[len(hello)]["due"] == b["end"] + 8000,
+          '"@after0.5\\n": the line rises for half a millisecond and every byte is read')
+
+    # The guard is the wire's, not the exchange's. A break, its "@after20", and then nothing
+    # until the emulator has given up waiting for the reply (0.3 s of real time here, the
+    # reply 0.32 s after the break was written, the run paced so that the break is still on
+    # the wire when the reply comes): the reply still keeps the gap.
+    late = run_case(env, "break-then-late-reply", [[(b"@break50\n@after20\n", 0), (hello, 0.32)]], 2,
+                    d + ("--speed", "1", "--link-wait-ms", "300"))
+    b = late.breaks[0] if len(late.breaks) == 1 else {"end": 0}
+    check("NOTE: 1 request(s)" in late.log and late.rx_text() == hello.decode()
+          and late.rx[0]["due"] >= b["end"] + 20 * 16000,
+          "a reply that comes after the emulator stopped waiting for it, behind a break and its "
+          '"@after20": its first start bit is still no sooner than 20 ms after the line rose '
+          "(%d cycles after), and every byte is read"
+          % (late.rx[0]["due"] - b["end"] if late.rx else -1))
+
+    print("without a batch (--link-directives)")
+    # The same reply and push in one write with no batch around them. Where the
+    # push lands then depends on whether one read brought it all; what must hold
+    # either way: nothing is lost, and the push is on the wire behind the reply.
+    loose = run_case(env, "no-batch", [[(hello + push, 0)], [(stars, 0)]], 3, d)
+    lb = loose.breaks[0] if len(loose.breaks) == 1 else {"due": 0}
+    check(len(loose.breaks) == 1 and loose.rx_text() == (hello + stars + stars).decode()
+          and lb["due"] - loose.tx[0]["cycle"] >= after_reply + 300 * 16000,
+          "a reply and a push behind it in one write, no @batch: both are placed, the push no "
+          "sooner than 300 ms after the request was read")
 
     reconnection_tests(env, hello, stars, request_cycles)
 

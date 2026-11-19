@@ -6,6 +6,8 @@
 //   - a driver puts replies on PB2 as correctly timed 8N1 bits in simulated
 //     time, so the firmware's own receiver reads them. Bytes are put on the
 //     wire whether or not the firmware is listening, as on the real sign.
+//     It can also hold the line LOW for a given time (a UART break): the
+//     app's "attention" in chooser contract version 3.
 //   - a listener on each line (PB3, and PB2 itself) finds start bits, samples
 //     each bit in its middle and reports whole bytes. What is reported as
 //     "sent to the sign" is therefore what was seen on the wire, with the
@@ -105,7 +107,14 @@ static size_t g_rx_head, g_rx_tail;     // head = next byte to send
 static struct {
     size_t left;                        // bytes of this reply still to send
     uint64_t not_before;
+    uint64_t after;                     // and no sooner than this after the item before it ended
+    uint64_t low;                       // more than 0: not bytes but a break of this many cycles
 } g_reply[RX_REPLIES];
+#define PHASE_BREAK 100                 // g_rx_phase while the line is held LOW
+static uint64_t g_prev_end;             // the cycle the last item's last bit (or break) ended
+static int g_run_open;                  // the next byte may follow the last one back to back
+static int g_break_on;
+static uart_break_cb_t g_on_break;
 static size_t g_reply_head, g_reply_tail;
 static size_t g_rx_dropped;
 static int g_rx_active, g_rx_phase;
@@ -123,7 +132,18 @@ static listener_t g_rx_line = { .level = 1, .done = rx_done };
 
 static void rx_notify(struct avr_irq_t *irq, uint32_t value, void *param)
 {
+    if (g_break_on) {
+        // A break is not a byte: the listener does not try to read one from
+        // it. (What the firmware's own receiver makes of it is its business.)
+        g_rx_line.level = value & 1;
+        return;
+    }
     listen_edge(&g_rx_line, value & 1);
+}
+
+void uart_on_break(uart_break_cb_t cb)
+{
+    g_on_break = cb;
 }
 
 static void rx_set(int level)
@@ -149,19 +169,54 @@ size_t uart_rx_dropped(void)
 
 static avr_cycle_count_t rx_step(avr_t *avr, avr_cycle_count_t when, void *param)
 {
+    if (g_rx_phase == PHASE_BREAK) {
+        g_break_on = 0;                              // the break is over
+        g_prev_end = when;
+        g_rx_phase = 0;
+        // If the next item starts at this very cycle (no gap was asked for), the
+        // line does not rise in between: a wire has one level per moment. The
+        // start bit of a byte glued to a break is then no falling edge, and no
+        // receiver can find it, the firmware's or the listener here.
+        int glued = 0;
+        if (g_reply_head != g_reply_tail) {
+            uint64_t start = g_reply[g_reply_head].not_before;
+            if (g_reply[g_reply_head].after && g_prev_end + g_reply[g_reply_head].after > start)
+                start = g_prev_end + g_reply[g_reply_head].after;
+            glued = start <= when;
+        }
+        if (!glued)
+            rx_set(1);
+        return rx_step(avr, when, param);            // the next item, or wait for one
+    }
     if (g_rx_phase == 0) {
         if (g_reply_head == g_reply_tail) {
             g_rx_active = 0;
             return 0;
         }
-        if (when < g_reply[g_reply_head].not_before)
-            return g_reply[g_reply_head].not_before;   // the line idles until then
-        if (when != g_run_start + half_bits(2 * g_run_bits)) {
+        uint64_t start = g_reply[g_reply_head].not_before;
+        if (g_reply[g_reply_head].after && g_prev_end + g_reply[g_reply_head].after > start)
+            start = g_prev_end + g_reply[g_reply_head].after;
+        if (when < start)
+            return start;                            // the line idles until then
+        if (g_reply[g_reply_head].low) {
+            uint64_t end = when + g_reply[g_reply_head].low;
+            g_reply_head = (g_reply_head + 1) % RX_REPLIES;
+            g_run_open = 0;                          // what follows a break starts a new run
+            g_break_on = 1;
+            g_rx_phase = PHASE_BREAK;
+            rx_set(0);
+            if (g_on_break)
+                g_on_break(g_avr->cycle, when, end);
+            return end;
+        }
+        if (!g_run_open || when != g_run_start + half_bits(2 * g_run_bits)) {
             g_run_start = when;                        // not back to back: a new run
             g_run_bits = 0;
+            g_run_open = 1;
         }
         g_rx_byte = g_rxq[g_rx_head];
         g_rx_head = (g_rx_head + 1) % RXQ_SIZE;
+        g_reply[g_reply_head].after = 0;             // the gap is in front of the first byte only
         if (--g_reply[g_reply_head].left == 0)
             g_reply_head = (g_reply_head + 1) % RX_REPLIES;
         g_rx_start = when;
@@ -172,6 +227,7 @@ static avr_cycle_count_t rx_step(avr_t *avr, avr_cycle_count_t when, void *param
         rx_set(1);                                   // stop bit
     } else {
         g_rx_phase = 0;
+        g_prev_end = when;                           // the stop bit has ended
         return rx_step(avr, when, param);            // next byte, or wait for the next reply
     }
     g_rx_phase++;
@@ -179,7 +235,37 @@ static avr_cycle_count_t rx_step(avr_t *avr, avr_cycle_count_t when, void *param
     return g_run_start + half_bits(2 * g_run_bits);
 }
 
-void uart_rx_enqueue(const uint8_t *buf, size_t n, uint64_t not_before_cycle)
+// The queue was empty and idle: start the driver for the item just added.
+static void rx_start(uint64_t not_before_cycle)
+{
+    if (g_rx_active)
+        return;
+    g_rx_active = 1;
+    g_rx_phase = 0;
+    uint64_t now = g_avr->cycle;
+    avr_cycle_timer_register(g_avr, not_before_cycle > now ? not_before_cycle - now : 1,
+                             rx_step, NULL);
+}
+
+void uart_rx_enqueue_break(uint64_t low_cycles, uint64_t not_before_cycle, uint64_t after_cycles)
+{
+    size_t next_reply = (g_reply_tail + 1) % RX_REPLIES;
+    if (!low_cycles)
+        return;
+    if (next_reply == g_reply_head) {
+        g_rx_dropped++;                              // too many items waiting; counted as a byte
+        return;
+    }
+    g_reply[g_reply_tail].left = 0;
+    g_reply[g_reply_tail].not_before = not_before_cycle;
+    g_reply[g_reply_tail].after = after_cycles;
+    g_reply[g_reply_tail].low = low_cycles;
+    g_reply_tail = next_reply;
+    rx_start(not_before_cycle);
+}
+
+void uart_rx_enqueue(const uint8_t *buf, size_t n, uint64_t not_before_cycle,
+                     uint64_t after_cycles)
 {
     size_t stored = 0;
     size_t next_reply = (g_reply_tail + 1) % RX_REPLIES;
@@ -199,14 +285,10 @@ void uart_rx_enqueue(const uint8_t *buf, size_t n, uint64_t not_before_cycle)
         return;
     g_reply[g_reply_tail].left = stored;
     g_reply[g_reply_tail].not_before = not_before_cycle;
+    g_reply[g_reply_tail].after = after_cycles;
+    g_reply[g_reply_tail].low = 0;
     g_reply_tail = next_reply;
-    if (!g_rx_active) {
-        g_rx_active = 1;
-        g_rx_phase = 0;
-        uint64_t now = g_avr->cycle;
-        avr_cycle_timer_register(g_avr, not_before_cycle > now ? not_before_cycle - now : 1,
-                                 rx_step, NULL);
-    }
+    rx_start(not_before_cycle);
 }
 
 int uart_init(avr_t *avr, unsigned baud, uart_tx_cb_t on_tx, uart_rx_cb_t on_rx)

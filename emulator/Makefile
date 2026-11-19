@@ -2,6 +2,8 @@
 #
 #   make            build the firmware image and the emulator
 #   make firmware   build only the firmware (build/firmware/LED_Marquee.elf and .hex)
+#   make firmware-debug   the same sketch with FW_DEBUG_FLAGS (the chooser's measurements
+#                   on panel B), in build/firmware-debug/. For the bench, not for a show
 #   make run        live terminal view (start ./fake_app.py in another terminal)
 #   make test       the smoke test (no human needed)
 #   make test-ads   only the ads' test: the O and C styles on the real firmware (half a minute)
@@ -42,7 +44,7 @@ SIM_WARN  := -w
 EMU_NAMES := main ihex reply ws2812 softuart link view record
 EMU_OBJS  := $(EMU_NAMES:%=$(OBJ)/%.o)
 
-.PHONY: all firmware emu run test test-ads clean
+.PHONY: all firmware firmware-debug emu run test test-ads clean
 all: firmware emu
 
 # ---- firmware ---------------------------------------------------------------
@@ -55,6 +57,28 @@ firmware: $(FW_DIR)/Makefile
 	$(MAKE) --no-print-directory -C $(FW_DIR) LED_Marquee
 	@$(AVR_SIZE) $(FW_ELF)
 	@shasum -a 256 $(FW_HEX)
+
+# The same sketch with extra compiler flags, in its own build tree.
+FW_DEBUG_FLAGS ?= -DCHOOSER_DEBUG_PANEL_B=1
+FW_DEBUG_DIR   := $(BUILD)/firmware-debug
+
+# The flags reach the compiler through CMake's cache, which a later run would
+# otherwise reuse whatever FW_DEBUG_FLAGS says. So the flags the tree was
+# built with are kept beside it, and when they are not the ones asked for the
+# tree is thrown away and built afresh. (Reconfiguring alone is not enough:
+# this Mac's make compares file times in whole seconds, and does not rebuild
+# objects made in the same second as the new flags file.)
+FW_DEBUG_BUILT_WITH := $(FW_DEBUG_DIR)/built-with-flags.txt
+
+firmware-debug:
+	@if [ "$$(cat $(FW_DEBUG_BUILT_WITH) 2>/dev/null)" != "$(FW_DEBUG_FLAGS)" ]; then \
+	    cmake -E remove_directory $(FW_DEBUG_DIR); fi
+	@[ -f $(FW_DEBUG_DIR)/Makefile ] || cmake -S firmware -B $(FW_DEBUG_DIR) -G "Unix Makefiles" \
+	      -DCMAKE_BUILD_TYPE=Debug -DARDUINO_SDK_PATH=$(ARDUINO_SDK) "-DSIGN_FLAGS=$(FW_DEBUG_FLAGS)" > /dev/null
+	@printf '%s' "$(FW_DEBUG_FLAGS)" > $(FW_DEBUG_BUILT_WITH)
+	$(MAKE) --no-print-directory -C $(FW_DEBUG_DIR) LED_Marquee
+	@$(AVR_SIZE) $(FW_DEBUG_DIR)/LED_Marquee.elf
+	@shasum -a 256 $(FW_DEBUG_DIR)/LED_Marquee.hex
 
 # ---- emulator ---------------------------------------------------------------
 emu: $(EMU)

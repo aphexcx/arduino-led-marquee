@@ -92,7 +92,27 @@ emulator/fake_app.py emulator/playlists/demo.jsonl
   120 x 7 layout.
 
 Without the app, `--duration <seconds>` stops a run after that much simulated
-time; the startup animation takes the first 5.5 s.
+time; the startup animation takes the first 5.5 s. `--until-disconnect` stops
+it when the app hangs up (`fake_app.py --once` does, at the request after its
+last message).
+
+Every output replaces what was in its file, so no output may be the firmware
+file, and no two outputs the same file. Which file is which is decided by the
+file that was opened (its device and inode), never by its path: a link, a
+second name, another spelling, or another case on a volume that ignores case
+are all the same file. Every output is first opened without being emptied; if
+one of them is the firmware or another output the emulator stops with exit
+status 2, having emptied nothing, and removes what it had created. The file
+that standard error goes to counts as one the emulator holds (the report of
+the run is written there); a terminal or `/dev/null` is never a collision.
+Nothing is emptied until the run is about to begin, so a run that cannot start
+(no app connected, the port taken) leaves every file as it was.
+The pictures of `--png-dir` are the emulator's own files in the directory it
+opened. Each is checked as it is made: it is never written through a link,
+never onto a file that has a second name, and never onto a file the emulator
+holds; the run then stops with exit status 4 and that file is not touched.
+(An output that is the picture directory itself is no collision of files but
+an ordinary failure to create it: exit status 4.)
 
 **When each picture is shown.** A GIF cannot time frames finer than 1/100 s,
 and viewers slow down anything under 2/100 s. So the clip is cut into ticks of
@@ -133,9 +153,10 @@ One JSON object per line.
 | `type` | fields |
 | --- | --- |
 | `meta` | first line: firmware path, geometry, options used; `render` holds what is needed to redraw the GIF and PNG pictures from the frames (scale, tick, layout, gamma) |
-| `frame` | `t` seconds and `cycle` (CPU cycles) when the LEDs latched; `rows`: 7 strings, `rows[0]` the top row, each 120 x `RRGGBB` raw LED values, column 0 first; `bits`: bits clocked into a strip for this frame (2880 = all 120 columns; fewer means the columns beyond kept their old colour, more means the extra fell off the end of the strip); `gap_us`: longest pause inside the frame; `t0h_cycles`, `t1h_cycles`: shortest and longest high time of 0 and 1 bits; `marginal`, `partial_bits`: timing trouble, both 0 for a healthy frame |
+| `frame` | `t` seconds and `cycle` (CPU cycles) when the LEDs latched; `rows`: 7 strings, `rows[0]` the top row, each 120 x `RRGGBB` raw LED values, column 0 first; `bits`: bits clocked into a strip for this frame (2880 = all 120 columns; fewer means the columns beyond kept their old colour, more means the extra fell off the end of the strip); `send_us`: how long the frame took to clock out, from its first rising edge to its last falling edge (interrupts are off for about that long); `gap_us`: longest pause inside the frame; `t0h_cycles`, `t1h_cycles`: shortest and longest high time of 0 and 1 bits; `marginal`, `partial_bits`: timing trouble, both 0 for a healthy frame |
 | `tx` | a byte the sign sent: `t` of its start bit, `byte`, `char` |
 | `rx` | a byte sent to the sign, as a listener on the sign's receive pin decoded it: `t` and `cycle` are when its start bit was seen to fall, `due` is the cycle the link's rules put it at (the pin shows it at the first instruction boundary, 0 to 4 cycles later), `byte`, `char` |
+| `break` | the app held the line to the sign LOW (see `@break` below): `t` and `cycle` are when the line was seen to fall, `due` the cycle it was due to fall, `end` the cycle it is due to rise again, `ms` the length. Written when it falls, so it is in time order with the frames |
 | `beat` | a rising edge on the beat input |
 | `end` | last line: `t` and `cycle` when the run stopped |
 
@@ -155,10 +176,20 @@ The link is exposed as a TCP port on localhost, default `127.0.0.1:14400`
 carries, nothing added:
 
 - the sign sends one request byte: `~` ("send the next message") or `?`
-  (chooser poll)
+  (chooser poll). The bench build of the contract 3 firmware
+  (`make firmware-debug`) may send 27 characters of text in front of a `~`,
+  `#SSS fFFF eEEE aAA bBB lLLL`: what it measured at the last attention (see
+  `ChooserDisplay.h`). They are not a request; the `~` behind them is, and is
+  answered as usual. `fake_app.py` logs them as "sign said"
 - the peer answers with one JSON object and no newline, for example
   `{"type":"F","str":"HELLO"}`; to `?` it may answer with a checksum report,
   `{"c":13345}` (chooser contract version 2; version 1 used `{}`)
+- in chooser contract version 3.1 the peer also speaks unasked: it holds the
+  line LOW for 50 ms (a UART break), waits 20 ms and sends the new chooser
+  message. When it leaves chooser mode it holds the line LOW and sends nothing;
+  the sign then asks with `~`. A break is not bytes, so on the TCP port it is a
+  directive line, `@break50` (see below; the emulator must run with
+  `--link-directives`)
 
 To connect another program, open a TCP connection to that port and do the
 same. One client at a time; a new connection replaces the old one. A quick
@@ -198,12 +229,14 @@ how long the peer took, and not on how TCP cut its bytes into pieces.
 5. **Every byte is put on the wire at its moment, whether or not the firmware
    is listening.** The emulator never drops, repairs or re-times them. What
    becomes of them is the firmware's own code running. Two cases the link
-   tests show with the current firmware: a late reply that lands inside a
-   later request's window is read as that request's answer; and a late reply
-   that lands after a read timed out with nothing received, while stars are
-   showing, is half received (`readSerialData()` returns without
-   `stopSerial()` there, and interrupts are off while pixels go out), stays in
-   the receive buffer, and makes the next read fail with `InvalidInput`.
+   tests show: a late reply that lands inside a later request's window is read
+   as that request's answer; and a late reply that lands after a read timed
+   out with nothing received, while stars are showing, is half received by
+   master's firmware (`readSerialData()` returns without `stopSerial()` there,
+   and interrupts are off while pixels go out), stays in the receive buffer,
+   and makes the next read fail with `InvalidInput`. Firmware with chooser
+   contract 3 stops listening after a timed-out read, receives nothing of such
+   a reply, and reads cleanly next time. The link test says which it saw.
 
 So a late reply is modelled by its delay alone. `--link-latency-ms 80` makes
 every reply 80 ms late, which is past a 60 ms poll timeout and inside the next
@@ -217,17 +250,37 @@ and does not put on the wire:
 | --- | --- |
 | `@250` newline, then the reply | this reply's start bit begins 250 ms (simulated, fractions allowed) after its request, instead of `--link-latency-ms` |
 | `@none` newline | this request gets no reply, and the clock is not held waiting for one |
+| `@break50` newline | the line to the sign is held LOW for 50 ms (simulated, fractions allowed, more than 0): a UART break. It is an item of its own and takes its turn on the wire like a reply (rule 4). It is not a reply: a request that is waiting for its answer goes on waiting. A `@250` or `@after20` line in front of it applies to it |
+| `@after20` newline, then a reply or `@break` | that item starts no sooner than 20 ms after the item before it ended (its last stop bit, or the end of a break), whenever that was. This is the guard between a break and the message behind it. With `@after0` (or none) the item is glued to a break: the line has one level at a time and does not rise in between, so a byte's start bit is then no falling edge and no receiver finds it |
+| `@batch` newline in front of a reply, `@end` newline after it | the clock stays held for the request until `@end` has arrived, not only until the reply is complete. Everything in between (the reply, and pushes behind it) is read with the clock standing still, in however many pieces TCP delivers it, and is placed the same in every run |
+
+A push in chooser contract version 3.1 is therefore `@break50`, `@after20` and
+the message, each directive on its own line; leaving chooser mode is
+`@break50` alone, and whatever the peer sends next (the answer to the sign's
+request) gets `@after20` in front, so that nothing follows a break sooner
+than the guard, however soon that request comes. Written in one piece when no
+request is waiting, the break starts at the simulated moment the bytes arrive
+(put `@<ms>` in front to place it later), and the message starts exactly 20 ms
+after the line rises.
+
+What the firmware makes of a break is its own code running: its receiver, if
+it is listening when the line falls, reads one `0x00` byte; if it is not, it
+receives nothing, and only code that looks at the level of the pin sees it.
+The emulator's own listener on that line does not report a break as a byte.
 
 A reply can be delayed past the firmware's timeout and into a later request's
 window; rule 4 then decides the order on the wire. Without
 `--link-directives` an `@` is an ordinary byte and goes to the sign.
 
-Only those two forms are directives: `@`, then `none` or a plain number of
-milliseconds, then a newline, where a reply would start. Anything else that
+Only those six forms are directives: `@`, then `none`, `batch`, `end`, or a
+plain number of milliseconds with `break` or `after` or nothing in front of
+it, then a newline, where a reply would start. Anything else that
 starts with `@` (a missing newline, a stray letter) is passed to the sign as
 the bytes it is, from the first byte that shows it is not a directive. A
-mistyped directive is therefore visible on the wire (the sign answers
-`InvalidInput`) and never swallows the replies after it.
+mistyped directive is therefore visible on the wire (the sign does not take
+those bytes for a message: older firmware answers `InvalidInput`, firmware
+with chooser contract 3 lets them go by and asks again) and never swallows
+the replies after it.
 
 **When a client goes away.** A client's connection ends when it closes, when
 a read or write on it fails, or when another client connects (the new one
@@ -254,8 +307,9 @@ out while no client is connected (nobody answers it).
 What is **not** repeatable, and how to tell:
 
 - A reply that is not complete within `--link-wait-ms` of real time. What has
-  arrived of it is placed as in rule 3, and the rest goes on the wire at
-  whatever simulated moment it arrives. The reply is then given up: the next
+  arrived of it is placed as in rule 3 (a directive that never got its
+  newline included: it goes to the sign as the bytes it is), and the rest
+  goes on the wire at whatever simulated moment it arrives. The reply is then given up: the next
   request's reply is looked for afresh, and a directive that was waiting for
   the late reply is dropped. The run's summary says
   `NOTE: n request(s) had no complete reply ...`.
@@ -263,13 +317,18 @@ What is **not** repeatable, and how to tell:
   arrives, all placed as in rule 3, so it is repeatable unless its client goes
   away part way through (the pieces already passed on are sent).
 - Bytes the peer sends when no request is waiting (a second object for the
-  same request, for example). They go on the wire at the simulated moment they
-  arrive, plus their directive's delay if they have one.
+  same request, a push, for example). They go on the wire at the simulated
+  moment they arrive, plus their directive's delay if they have one. There is
+  one way to make them repeatable, and `tests/push_test.py` uses it: send them
+  behind the reply to a request, inside `@batch` ... `@end`. They are then
+  read while the clock is still held for that request, and the moment they
+  arrive is the same in every run (the middle of the request's stop bit).
 - `--link-wait-ms 0`: the clock is never held, and everything is placed by
   arrival.
 
 `tests/link_test.py` checks rules 1 to 4 and the directives against the real
-firmware, and is a worked example of a peer.
+firmware, and is a worked example of a peer. `tests/push_test.py` is a worked
+example of a peer that pushes.
 
 ## Playlists
 
@@ -279,7 +338,10 @@ Keys starting with `_` are for the fake app and are not sent: `"_polls": n` on
 a chooser message says how long it stays selected before the playlist moves on
 (default 40, `--chooser-polls`).
 
-The fake app speaks both versions of the chooser contract:
+`"_seconds": s` says the same for `--contract 3`, in seconds (default 6,
+`--chooser-seconds`).
+
+The fake app speaks three versions of the chooser contract:
 
 - `--contract 1` (default): the next n `?` polls are answered with `{}`.
 - `--contract 2`: the next n requests are answered about the selected
@@ -289,6 +351,23 @@ The fake app speaks both versions of the chooser contract:
   when it moves on to anything else, `?` is answered like `~`. Use it with
   firmware that polls with `?`: firmware that only sends `~` gets the chooser
   message n times.
+- `--contract 3`: requests are answered as with `--contract 2`, for as long as
+  the chooser message is selected, which is now a time (`_seconds`), not a
+  number of requests: firmware for this version asks only rarely. When the
+  time is up the playlist moves on. If the next message is a chooser message
+  the app pushes it unasked: the line LOW for `--break-ms` (50), a wait of
+  `--guard-ms` (20), the message. If it is of another type the app has left
+  chooser mode: it holds the line LOW and sends nothing, and gives that
+  message to the sign's next request (contract 3.1: a push never takes a
+  message from the list), no sooner than `--guard-ms` after the line rose,
+  also when that request was already waiting (`--guard-ms` is at least 0.1:
+  with no wait the message is glued to the break). It counts this computer's seconds, so pace the
+  emulator, and the break needs the directives:
+
+  ```sh
+  emulator/build/sign-emu --speed 1 --link-directives emulator/build/firmware/LED_Marquee.hex
+  emulator/fake_app.py --contract 3 emulator/playlists/chooser_push.jsonl
+  ```
 
 To add one, copy `playlists/demo.jsonl`, edit, and pass the new file to
 `fake_app.py`. `playlists/ads.jsonl` has ads in both styles, short ones and
@@ -355,7 +434,9 @@ one in Afik's last CLion build directory.
   the real strips do has not been checked. LEDs change colour only at the
   latch, never part way through a frame.
 - The serial peer: an ideal UART at exactly 14400 baud on an ideal wire, with
-  the fixed answer delay described above. Each edge is due at the whole cycle
+  the fixed answer delay described above. A break is the line LOW for exactly
+  the time asked; how long the real app's `sendBreak` holds it, and how long
+  after the call it starts, is not known. Each edge is due at the whole cycle
   nearest its exact time and appears on the pin at the first instruction
   boundary from there (0 to 4 cycles later), which is the first moment the
   firmware could see it. The real app's delay is not known
@@ -398,20 +479,22 @@ Seen while building this; the firmware is not changed by this directory.
 
 | | |
 | --- | --- |
-| `Makefile` | `make`, `make firmware`, `make run`, `make test`, `make test-ads`, `make clean` |
+| `Makefile` | `make`, `make firmware`, `make firmware-debug` (a second image built with `FW_DEBUG_FLAGS`, default `-DCHOOSER_DEBUG_PANEL_B=1`: the chooser's measurements on panel B), `make run`, `make test`, `make test-ads`, `make clean` |
 | `firmware/` | CMake wrapper that builds the unmodified sketch (no upload target) |
 | `fetch_simavr.sh` | clones simavr at the pinned commit into `third_party/` |
-| `src/` | the emulator: `main.c`, `ihex.c` (firmware image reader), `ws2812.c` (LED decoder), `softuart.c` (serial pins and the queue of replies), `reply.c` (cuts the app's bytes into replies), `link.c` (TCP), `view.c` (terminal), `record.c` (GIF, PNG, frames dump) |
+| `src/` | the emulator: `main.c`, `ihex.c` (firmware image reader), `ws2812.c` (LED decoder), `softuart.c` (serial pins, the queue of replies and breaks), `reply.c` (cuts the app's bytes into replies and directives), `link.c` (TCP), `view.c` (terminal), `record.c` (GIF, PNG, frames dump) |
 | `fake_app.py` | the app's side of the link |
-| `playlists/` | `all_types.jsonl`, `demo.jsonl`, `ads.jsonl` |
+| `playlists/` | `all_types.jsonl`, `demo.jsonl`, `chooser_push.jsonl` (for `--contract 3`), `ads.jsonl` |
 | `test.sh` | runs every test below |
 | `tests/check_frames.py` | the smoke run's frames against `Fonts.h`, and its GIF against its frames |
 | `tests/gif_check.py` | what a recording must be, stated from the rules above in exact arithmetic: a strict GIF decoder, and the GIF and PNG pictures and their times against the frames dump |
 | `tests/gif_cases.py`, `tests/gif_case.c` | chosen, random and very long-held pictures through the GIF encoder |
-| `tests/link_test.py` | the serial link's timing model against the real firmware, with clients that come and go |
+| `tests/link_test.py` | the serial link's timing model against the real firmware, with clients that come and go; the line held LOW |
+| `tests/push_test.py` | chooser contract version 3.1 measured on the real firmware: how soon a push is on the LEDs (also one that falls into the sign's own read), how steady the scroll is between pushes, that nothing is sent while a text moves, that a change that was not pushed is found at the next stand-still, that the sign asks when the app leaves chooser mode. `run` plays a scripted app; `check` reads the dump of any run. For the bench image it also reads the numbers on panel B and the lines of numbers sent to the app, and holds them against what was on the wire. Skipped by `test.sh` for firmware without that contract |
 | `tests/ads_test.py` | the ads (`O` and `C`) on the real firmware: every frame against `Fonts.h`, both sides equal, 120 columns, the scroll of a text wider than a panel, and `dly` as real time |
 | `tests/record_fail_test.py` | recordings that cannot be created, written or closed |
-| `tests/cli_test.py` | command line values that are refused |
+| `tests/cli_test.py` | command line values that are refused; outputs that are the firmware, the report's file or one another under any name; and that nothing is emptied before the run begins |
+| `tests/fake_app_wire_test.py` | what `fake_app.py --contract 3` writes when it leaves chooser mode, as a listener on the sign's receive pin decodes it: nothing behind a break before the guard |
 | `tests/test_ihex.c` | the firmware image reader, built with the address and undefined-behaviour sanitizers |
 | `tests/test_fake_app.py`, `tests/check_meta.py` | the fake app's checksum and answers; the dump's first line |
 | `docs/demo.gif` | `demo.jsonl` recorded with `--bpm 128 --scale 4 --tick-cs 4` |

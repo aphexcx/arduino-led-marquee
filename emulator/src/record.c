@@ -18,11 +18,26 @@
 // failure is kept (rec_error), nothing more is written to that output, and
 // the caller is expected to stop and exit with an error. A PNG is listed in
 // index.tsv only after it has been written and closed whole.
+//
+// Whose file is whose. IDENTITY IS THE OPENED FILE, NEVER A PATH. Two paths
+// can name one file (a link, another spelling, another case on a volume that
+// ignores case), and a path can name a different file a moment later. So
+// every file written here is first opened WITHOUT being emptied, and the
+// device and inode of the open descriptor are compared with those of every
+// file the emulator already holds: the firmware it reads (rec_hold_input)
+// and every other output. The same file twice is refused. The outputs named
+// on the command line are all opened and compared (rec_gif_open,
+// rec_png_open, rec_events_open) before the first of them is emptied and
+// written to (rec_start); a picture the PNG recorder makes in its directory
+// goes through the same routine at the moment it is made.
 #include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <zlib.h>
 
 #include "emu.h"
@@ -93,6 +108,170 @@ static char *copy_string(const char *s)
     return c;
 }
 
+// ---- whose file is whose ------------------------------------------------------
+// Every file the emulator holds open, by what it is on the disk: the firmware
+// and where the report goes (rec_hold_input), the outputs, and the picture
+// that is being written. A picture leaves the list when it is closed (the
+// number of a file that is gone can be given to a new one).
+typedef struct {
+    dev_t dev;
+    ino_t ino;
+    const char *what;              // "--record", ... for the message
+    char *path;                    // outputs opened before the run: for rec_abandon
+    int made;                      // this run created it (it did not exist)
+} held_t;
+static held_t *g_held;
+static size_t g_held_n, g_held_cap;
+static int g_same_file;            // the first failure is "the same file twice"
+static char *g_made_dir;           // --png-dir, if this run created the directory
+
+static int hold(const struct stat *st, const char *what, const char *path, int made)
+{
+    if (g_held_n == g_held_cap) {
+        size_t cap = g_held_cap ? g_held_cap * 2 : 16;
+        held_t *bigger = realloc(g_held, cap * sizeof(*bigger));
+        if (!bigger)
+            return -1;
+        g_held = bigger;
+        g_held_cap = cap;
+    }
+    char *kept = path ? copy_string(path) : NULL;
+    if (path && !kept)
+        return -1;
+    g_held[g_held_n++] = (held_t) { st->st_dev, st->st_ino, what, kept, made };
+    return 0;
+}
+
+// The file is closed: it is no longer held. (Only pictures are let go.)
+static void let_go(dev_t dev, ino_t ino)
+{
+    for (size_t i = g_held_n; i-- > 0;)
+        if (g_held[i].dev == dev && g_held[i].ino == ino && !g_held[i].path) {
+            g_held[i] = g_held[--g_held_n];
+            return;
+        }
+}
+
+// Removes a file this run created and has not written to, if `path` still
+// names that very file (through a link too): the check is made on the file
+// the path leads to, not on the name.
+static void unmake(const char *path, dev_t dev, ino_t ino)
+{
+    char real[PATH_MAX];
+    struct stat now;
+    if (realpath(path, real) && lstat(real, &now) == 0 && S_ISREG(now.st_mode) &&
+        now.st_dev == dev && now.st_ino == ino && now.st_size == 0)
+        unlink(real);
+}
+
+// Opens a file for writing WITHOUT emptying it and takes it as `what`.
+// Returns the descriptor. Returns -1, with the reason kept, if it cannot be
+// opened or if the opened file is one the emulator already holds: it is then
+// closed again untouched (and removed, if this call had created it).
+// (A character device, a terminal or /dev/null, is not compared and not held:
+// two outputs there lose nothing.)
+// An output named on the command line (dir is AT_FDCWD, name its path) may be
+// a link: the file it leads to is the output. A picture (dir is the picture
+// directory, name the picture's name in it) is made by the emulator and is
+// never written through a link, and never onto a file that has a second name.
+// `path` is for messages and, with keep_path, for rec_abandon.
+static int claim(int dir, const char *name, const char *path, const char *what, int keep_path)
+{
+    int picture = dir != AT_FDCWD && !keep_path;
+    int nofollow = picture ? O_NOFOLLOW : 0;
+    int made = 1;
+    int fd = openat(dir, name, O_WRONLY | O_CREAT | O_EXCL, 0666);
+    if (fd < 0 && errno == EEXIST) {
+        made = 0;
+        fd = openat(dir, name, O_WRONLY | nofollow);       // it is there: opened as it is
+        if (fd < 0 && errno == ENOENT && !picture) {
+            // a link to a file that is not there: the file is created through it
+            fd = openat(dir, name, O_WRONLY | O_CREAT, 0666);
+            made = 1;
+        }
+    }
+    if (fd < 0) {
+        if (picture && errno == ELOOP) {
+            errno = 0;
+            fail(path, "is a link: a picture is not written through one");
+        } else {
+            fail(path, "cannot create");
+        }
+        return -1;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        fail(path, "cannot tell which file this is");
+        close(fd);
+        return -1;
+    }
+    if (S_ISCHR(st.st_mode))
+        return fd;                 // a terminal, /dev/null: nothing there to protect or to mix up
+    for (size_t i = 0; i < g_held_n; i++) {
+        if (g_held[i].dev != st.st_dev || g_held[i].ino != st.st_ino)
+            continue;
+        if (!g_error[0]) {
+            g_same_file = 1;
+            snprintf(g_error, sizeof(g_error), "%s and %s are the same file (%s)",
+                     g_held[i].what, what, path);
+        }
+        close(fd);
+        if (made)
+            unmake(path, st.st_dev, st.st_ino);
+        return -1;
+    }
+    if (picture && (!S_ISREG(st.st_mode) || st.st_nlink != 1)) {
+        errno = 0;
+        fail(path, "has a second name, or is no ordinary file: a picture is not written onto it");
+        close(fd);
+        return -1;
+    }
+    if (hold(&st, what, keep_path ? path : NULL, made) != 0) {
+        errno = ENOMEM;
+        fail(path, "out of memory");
+        close(fd);
+        if (made)
+            unmake(path, st.st_dev, st.st_ino);
+        return -1;
+    }
+    return fd;
+}
+
+// Every identity is known and all differ: empties the claimed file and gives
+// the stream to write it with. On failure the descriptor is closed.
+static FILE *begin(int fd, const char *path, const char *mode)
+{
+    struct stat st;
+    // (only a regular file has contents to drop; a pipe or a device is written as it is)
+    if (fstat(fd, &st) != 0 || (S_ISREG(st.st_mode) && ftruncate(fd, 0) != 0)) {
+        fail(path, "cannot empty");
+        close(fd);
+        return NULL;
+    }
+    FILE *f = fdopen(fd, mode);
+    if (!f) {
+        fail(path, "cannot create");
+        close(fd);
+    }
+    return f;
+}
+
+int rec_hold_input(int fd, const char *what)
+{
+    struct stat st;
+    if (fstat(fd, &st) != 0)
+        return -1;
+    if (S_ISCHR(st.st_mode))
+        return 0;                  // a terminal, /dev/null: see claim()
+    // (never let go: its path is not NULL, as a picture's is)
+    return hold(&st, what, "", 0);
+}
+
+int rec_same_file(void)
+{
+    return g_same_file;
+}
+
 // ---- canvas ----------------------------------------------------------------
 static int g_scale = 6, g_band;
 static int g_w, g_h;
@@ -160,6 +339,7 @@ static void canvas_render(const image_t *img)
 
 // ---- GIF -------------------------------------------------------------------
 static FILE *g_gif;
+static int g_gif_fd = -1;          // claimed, not yet emptied (see rec_start)
 static char *g_gif_path;
 static uint8_t *g_index;           // palette indices for the canvas
 static uint16_t (*g_tree)[256];    // LZW dictionary
@@ -314,7 +494,10 @@ static void gif_write_hold(uint64_t cs)
 
 // ---- PNG -------------------------------------------------------------------
 static char *g_png_dir, *g_png_index_path;
+static int g_png_dir_fd = -1;      // the picture directory itself: pictures are made in IT,
+                                   // whatever its path comes to name later
 static FILE *g_png_index;
+static int g_png_index_fd = -1;    // claimed, not yet emptied (see rec_start)
 
 static void png_chunk(FILE *f, const char *type, const uint8_t *data, size_t n)
 {
@@ -330,9 +513,10 @@ static void png_chunk(FILE *f, const char *type, const uint8_t *data, size_t n)
     fwrite(c, 1, 4, f);
 }
 
-// Writes the canvas as a PNG. Returns 1 only if the whole file was written
-// and closed; otherwise the failure is recorded and no partial file is left.
-static int png_write(const char *path)
+// Writes the canvas as the picture `name` in the picture directory (`path` is
+// the same for messages). Returns 1 only if the whole file was written and
+// closed; otherwise the failure is recorded and no partial file is left.
+static int png_write(const char *name, const char *path)
 {
     size_t stride = (size_t) g_w * 3 + 1, raw_size = stride * (size_t) g_h;
     uLongf zn = compressBound((uLong) raw_size);
@@ -352,9 +536,18 @@ static int png_write(const char *path)
         fail(path, "compression failed");
         goto done;
     }
-    f = fopen(path, "wb");
+    // Opened without being emptied and compared with every file held (the
+    // firmware, the other outputs, the pictures before it) before a byte of
+    // it is touched: the name may be a link someone left in the directory.
+    struct stat st;
+    int fd = claim(g_png_dir_fd, name, path, "a picture of --png-dir", 0);
+    if (fd < 0)
+        goto done;
+    if (fstat(fd, &st) != 0)
+        memset(&st, 0, sizeof(st));
+    f = begin(fd, path, "wb");
     if (!f) {
-        fail(path, "cannot create");
+        let_go(st.st_dev, st.st_ino);
         goto done;
     }
     fwrite("\x89PNG\r\n\x1a\n", 1, 8, f);
@@ -365,8 +558,9 @@ static int png_write(const char *path)
     png_chunk(f, "IDAT", z, zn);
     png_chunk(f, "IEND", NULL, 0);
     ok = finish(&f, path);
+    let_go(st.st_dev, st.st_ino);
     if (!ok)
-        remove(path);              // do not leave half a picture behind
+        unlinkat(g_png_dir_fd, name, 0);   // do not leave half a picture behind
 done:
     free(raw);
     free(z);
@@ -433,7 +627,7 @@ static void write_cur(uint64_t until)
             return;
         }
         snprintf(path, path_size, "%s/%s", g_png_dir, name);
-        if (png_write(path)) {
+        if (png_write(name, path)) {
             fprintf(g_png_index, "%s\t%llu.%02llu0\t%llu.%02llu0\n", name,
                     (unsigned long long) (start_cs / 100), (unsigned long long) (start_cs % 100),
                     (unsigned long long) (cs / 100), (unsigned long long) (cs % 100));
@@ -471,11 +665,16 @@ int rec_gif_open(const char *path)
         fail(path, "out of memory");
         return -1;
     }
-    g_gif = fopen(path, "wb");
-    if (!g_gif) {
-        fail(path, "cannot create");
+    g_gif_fd = claim(AT_FDCWD, path, path, "--record", 1);
+    return g_gif_fd < 0 ? -1 : 0;
+}
+
+static int gif_start(void)
+{
+    g_gif = begin(g_gif_fd, g_gif_path, "wb");
+    g_gif_fd = -1;
+    if (!g_gif)
         return -1;
-    }
     fwrite("GIF89a", 1, 6, g_gif);
     put16(g_gif, (unsigned) g_w); put16(g_gif, (unsigned) g_h);
     fputc(0x70, g_gif); fputc(0, g_gif); fputc(0, g_gif);     // no global colour table
@@ -500,15 +699,27 @@ int rec_png_open(const char *dir)
         return -1;
     }
     snprintf(g_png_index_path, index_size, "%s/index.tsv", dir);
-    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+    if (mkdir(dir, 0755) == 0) {
+        g_made_dir = g_png_dir;
+    } else if (errno != EEXIST) {
         fail(dir, "cannot create the directory");
         return -1;
     }
-    g_png_index = fopen(g_png_index_path, "w");
-    if (!g_png_index) {
-        fail(g_png_index_path, "cannot create");
+    g_png_dir_fd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (g_png_dir_fd < 0) {
+        fail(dir, "cannot open the directory");
         return -1;
     }
+    g_png_index_fd = claim(g_png_dir_fd, "index.tsv", g_png_index_path, "the index.tsv of --png-dir", 1);
+    return g_png_index_fd < 0 ? -1 : 0;
+}
+
+static int png_start(void)
+{
+    g_png_index = begin(g_png_index_fd, g_png_index_path, "w");
+    g_png_index_fd = -1;
+    if (!g_png_index)
+        return -1;
     fprintf(g_png_index, "file\tstart_s\tshown_for_s\n");
     if (!wrote(g_png_index, g_png_index_path))
         return -1;
@@ -518,7 +729,8 @@ int rec_png_open(const char *dir)
 
 // ---- JSON-lines frames dump ------------------------------------------------
 static FILE *g_events;
-static char *g_events_path;
+static int g_events_fd = -1;       // claimed, not yet emptied (see rec_start)
+static char *g_events_path, *g_events_firmware, *g_events_settings;
 
 // Writes s as a JSON string. Quotes, backslashes and control characters are
 // escaped. Bytes above 0x7f are kept only if the whole string is valid UTF-8;
@@ -571,21 +783,65 @@ static void json_string(FILE *f, const char *text)
 int rec_events_open(const char *path, const char *firmware, const char *settings_json)
 {
     g_events_path = copy_string(path);
-    if (!g_events_path) {
+    g_events_firmware = copy_string(firmware);
+    g_events_settings = copy_string(settings_json);
+    if (!g_events_path || !g_events_firmware || !g_events_settings) {
         errno = ENOMEM;
         fail(path, "out of memory");
         return -1;
     }
-    g_events = fopen(path, "w");
-    if (!g_events) {
-        fail(path, "cannot create");
+    g_events_fd = claim(AT_FDCWD, path, path, "--frames", 1);
+    return g_events_fd < 0 ? -1 : 0;
+}
+
+static int events_start(void)
+{
+    g_events = begin(g_events_fd, g_events_path, "w");
+    g_events_fd = -1;
+    if (!g_events)
         return -1;
-    }
     fputs("{\"type\":\"meta\",\"firmware\":", g_events);
-    json_string(g_events, firmware);
+    json_string(g_events, g_events_firmware);
     fprintf(g_events, ",%s,\"render\":{\"scale\":%d,\"tick_cs\":%u,\"band\":%s,\"gamma\":%.17g}}\n",
-            settings_json, g_scale, g_tick_cs, g_band ? "true" : "false", view_get_gamma());
+            g_events_settings, g_scale, g_tick_cs, g_band ? "true" : "false", view_get_gamma());
     return wrote(g_events, g_events_path) ? 0 : -1;
+}
+
+// Every output asked for has been opened and is a file of its own (the opens
+// above all returned 0): empties them and writes what each begins with.
+// Nothing was emptied before this.
+int rec_start(void)
+{
+    if (rec_failed())
+        return -1;
+    if ((g_gif_fd >= 0 && gif_start()) || (g_png_index_fd >= 0 && png_start()) ||
+        (g_events_fd >= 0 && events_start()))
+        return -1;
+    return 0;
+}
+
+// One of the opens failed: the run does not start. Closes what was opened,
+// untouched, and removes what this run had created for it (files that did not
+// exist, still empty; the picture directory, if it is empty).
+void rec_abandon(void)
+{
+    int *fds[] = { &g_gif_fd, &g_png_index_fd, &g_events_fd };
+    for (size_t i = 0; i < sizeof(fds) / sizeof(fds[0]); i++) {
+        if (*fds[i] >= 0)
+            close(*fds[i]);
+        *fds[i] = -1;
+    }
+    for (size_t i = 0; i < g_held_n; i++)
+        if (g_held[i].made && g_held[i].path)
+            unmake(g_held[i].path, g_held[i].dev, g_held[i].ino);
+    if (g_made_dir) {
+        // only the directory this run made, and only if it is empty
+        struct stat named, opened;
+        if (g_png_dir_fd >= 0 && fstat(g_png_dir_fd, &opened) == 0 && lstat(g_made_dir, &named) == 0 &&
+            named.st_dev == opened.st_dev && named.st_ino == opened.st_ino)
+            rmdir(g_made_dir);
+    }
+    g_made_dir = NULL;
 }
 
 void rec_event(const char *type, uint64_t cycle, const char *extra_json)
@@ -613,11 +869,13 @@ void rec_frame(const image_t *img, uint64_t latch_cycle, const ws_frame_info_t *
         static const char hex[] = "0123456789abcdef";
         fprintf(g_events, "{\"type\":\"frame\",\"t\":%.7f,\"cycle\":%llu,\"bits\":%llu,"
                           "\"partial_bits\":%u,\"marginal\":%llu,\"gap_us\":%.3f,"
+                          "\"send_us\":%.3f,"
                           "\"t0h_cycles\":[%u,%u],\"t1h_cycles\":[%u,%u],\"rows\":[",
                 cycles_to_s(latch_cycle), (unsigned long long) latch_cycle,
                 (unsigned long long) info->bits, info->partial_bits,
                 (unsigned long long) info->marginal,
                 info->gap_max / (F_CPU_HZ / 1e6),
+                (double) info->send_cycles / (F_CPU_HZ / 1e6),
                 info->t0h_min, info->t0h_max, info->t1h_min, info->t1h_max);
         char row_text[COLS * 6 + 4];
         for (int row = 0; row < ROWS; row++) {

@@ -31,7 +31,16 @@ def load_font_std(path):
     body = body[body.index("{") + 1:body.index("};")]
     body = re.sub(r"//[^\n]*", "", body)
     values = [int(v, 0) for v in re.findall(r"0[xX][0-9a-fA-F]+|0[bB][01]+", body)]
-    return {chr(0x20 + i): values[i * 5:i * 5 + 5] for i in range(95)}
+    font = {chr(0x20 + i): values[i * 5:i * 5 + 5] for i in range(95)}
+    # Two characters are not 5 columns wide (the firmware's sendChar and its
+    # chooser agree): the heart, 0x7F, is the table's last entry and has 7; the
+    # vertical tab has none and is only the blank column behind it.
+    heart = values[95 * 5:95 * 5 + 7]
+    if len(heart) != 7:
+        raise ValueError("%s: FontStd5x7 has no 7-column heart after its 95 characters" % path)
+    font["\x7f"] = heart
+    font["\x0b"] = []
+    return font
 
 
 def text_columns(font, text):
@@ -40,7 +49,7 @@ def text_columns(font, text):
     for i, ch in enumerate(text):
         if i:
             cols.append(0)
-        cols += font[ch]
+        cols += font.get(ch, [0] * 5)      # a byte outside the font: the chooser draws a space
     return cols
 
 
@@ -162,9 +171,16 @@ def main():
         n = len(expected)
         inside = [f for f in frames if start < f.t <= end + 0.001]
         exact = [f for f in inside if f.mask[:n] == expected]
-        check(bool(exact), 'a frame shows "%s", one blank column, then "%s" from column 0 '
-                           '(%d of %d frames; the rest are the fade to black)'
-              % (m["flashy"], m["str"], len(exact), len(inside)))
+        how = "%d of %d frames; the rest are the fade to black" % (len(exact), len(inside))
+        if not exact and n > PANEL:
+            # Firmware with the scrolling chooser keeps it on side A: a text too
+            # wide for the space beside the count is cut at column 59 and scrolls.
+            exact = [f for f in inside if f.mask[:PANEL] == expected[:PANEL]
+                     and not any(f.mask[PANEL:])]
+            how = ("cut at the edge of side A, where this firmware scrolls it: %d of %d frames"
+                   % (len(exact), len(inside)))
+        check(bool(exact), 'a frame shows "%s", one blank column, then "%s" from its first '
+                           'column (%s)' % (m["flashy"], m["str"], how))
         if exact:
             red = exact[0].colours(0, len(count_cols))
             check(all(c[2:] == "0000" and c[:2] != "00" for c in red),

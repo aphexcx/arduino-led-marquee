@@ -37,6 +37,8 @@ static uint8_t g_last;              // last pin levels (masked)
 static image_t g_image;
 static ws_frame_info_t g_info;
 static uint64_t g_any_fall;         // last falling edge on any strip
+static uint64_t g_first_rise;       // first rising edge since the last frame was reported
+static int g_sending;               // there has been one
 static uint32_t g_latch_gap_min = UINT32_MAX;
 
 static void info_reset(void)
@@ -80,6 +82,10 @@ static void emit(uint64_t latch_cycle)
         g_info.t0h_min = 0;
     if (g_info.t1h_min == UINT32_MAX)
         g_info.t1h_min = 0;
+    // The latch moment is one latch time after the last falling edge.
+    uint64_t last_fall = latch_cycle - g_reset_cycles;
+    g_info.send_cycles = g_sending && last_fall > g_first_rise ? last_fall - g_first_rise : 0;
+    g_sending = 0;
     if (g_cb)
         g_cb(&g_image, latch_cycle, &g_info);
     info_reset();
@@ -139,6 +145,10 @@ static void port_notify(struct avr_irq_t *irq, uint32_t value, void *param)
             uint64_t latched_at = latch_quiet_strips(now);
             if (latched_at)
                 emit(latched_at);
+        }
+        if (!g_sending) {
+            g_sending = 1;
+            g_first_rise = now;
         }
     }
     if (falling) {

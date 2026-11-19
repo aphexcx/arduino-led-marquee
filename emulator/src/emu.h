@@ -31,6 +31,8 @@ static inline double cycles_to_s(uint64_t c) { return (double) c / F_CPU_HZ; }
 // highest byte loaded, or -1 if the file cannot be read, is malformed, or
 // places data outside mem.
 long load_ihex(const char *path, uint8_t *mem, size_t cap);
+// The same from a file that is already open (it is left open).
+long load_ihex_file(FILE *f, uint8_t *mem, size_t cap);
 
 // ---- ws2812.c -------------------------------------------------------------
 typedef struct {
@@ -39,6 +41,7 @@ typedef struct {
     uint32_t t0h_min, t0h_max, t1h_min, t1h_max;   // high times seen, in CPU cycles
     uint64_t marginal;      // pulses whose width is between a clean 0 and a clean 1
     uint32_t gap_max;       // longest low gap between two bits of this frame, in cycles
+    uint64_t send_cycles;   // from the first rising edge of the frame to its last falling edge
 } ws_frame_info_t;
 
 typedef void (*ws_frame_cb_t)(const image_t *img, uint64_t latch_cycle,
@@ -61,31 +64,51 @@ typedef void (*uart_rx_cb_t)(uint8_t byte, int framing_ok, uint64_t start_cycle,
 
 // 0, or -1 if the simulated chip has no port B pins to attach to.
 int uart_init(avr_t *avr, unsigned baud, uart_tx_cb_t on_tx, uart_rx_cb_t on_rx);
+// The app held the line to the sign LOW (a break): the cycle the line was seen
+// to fall, the cycle it was due to fall, and the cycle it is due to rise again.
+typedef void (*uart_break_cb_t)(uint64_t start_cycle, uint64_t due_cycle, uint64_t end_cycle);
+void uart_on_break(uart_break_cb_t cb);
 // Queue one reply for the firmware's RX pin. Replies go out in the order they
 // were queued, as from one UART: each one's bytes back to back, 8N1, its first
-// start bit no earlier than not_before_cycle and not before the reply ahead of
-// it has finished.
-void uart_rx_enqueue(const uint8_t *buf, size_t n, uint64_t not_before_cycle);
+// start bit no earlier than not_before_cycle, not before the item ahead of it
+// has finished, and no sooner than after_cycles after that item finished.
+void uart_rx_enqueue(const uint8_t *buf, size_t n, uint64_t not_before_cycle,
+                     uint64_t after_cycles);
+// Queue a break: the line is held LOW for low_cycles. It takes its turn in
+// the same queue, under the same two rules for when it may start.
+void uart_rx_enqueue_break(uint64_t low_cycles, uint64_t not_before_cycle, uint64_t after_cycles);
 size_t uart_rx_pending(void);
 size_t uart_rx_dropped(void);                 // bytes lost because the queue was full
 
 // ---- reply.c --------------------------------------------------------------
-// Cuts the app's byte stream into replies (one JSON object each).
+// Cuts the app's byte stream into replies (one JSON object each) and breaks.
 #define REPLY_MAX 8192
-// data[0..n) is one reply, or a piece of one when complete is 0. has_delay:
-// a directive gave this reply its own delay. n can be 0 (directive "none").
-typedef void (*reply_cb_t)(const uint8_t *data, size_t n, int has_delay, double delay_ms,
-                           int complete, void *param);
+typedef struct {
+    const uint8_t *data;    // data[0..n) is one reply, or a piece of one when complete is 0
+    size_t n;               // can be 0: directive "none", or a break
+    int complete;
+    int has_delay;          // directive "@<ms>": this item has its own delay
+    double delay_ms;
+    int has_after;          // directive "@after<ms>": and a gap after the item before it
+    double after_ms;
+    double break_ms;        // more than 0: not a reply but a break of this length ("@break<ms>")
+    int batch, end;         // not a reply but a mark: "@batch" before, "@end" after a batch
+} reply_t;
+typedef void (*reply_cb_t)(const reply_t *reply, void *param);
 void reply_init(int directives);
 // Forgets everything unfinished: a directive in progress or waiting for its
 // reply, a partly received reply, whitespace. For when the client changes.
 void reply_reset(void);
 // A new request, or the wait for the last one's answer ran out: the next
 // reply starts from outside any JSON object. drop_delay also forgets a
-// directive's delay that was waiting for a reply.
+// directive's delay that was waiting for a reply (not a gap, "@after").
 void reply_new_exchange(int drop_delay);
 void reply_feed(const uint8_t *buf, size_t len, reply_cb_t cb, void *param);
 void reply_flush(reply_cb_t cb, void *param);
+// The wait for a request's answer ran out. What has arrived goes to the wire
+// as the bytes it is, a directive that never got its newline included, and
+// nothing of it is left to act on a later reply.
+void reply_give_up(reply_cb_t cb, void *param);
 
 // ---- link.c ---------------------------------------------------------------
 int link_listen(int port);                    // 127.0.0.1:port; 0 on success
@@ -131,10 +154,25 @@ void view_close(void);
 // Before any output is opened: layout (1 = one 120 x 7 band, 0 = two stacked
 // sides), screen pixels per LED, and the GIF/PNG tick in 1/100 s.
 void rec_configure(int band, int scale, int tick_cs);
-// The three opens return 0, or -1 with the reason in rec_error().
+// Which file is which is decided by the opened file, never by its path.
+// A file the emulator holds open that is not one of these outputs (the
+// firmware it reads, where its report goes), open on fd: no output may be it.
+// 0, or -1 if it cannot be identified.
+int rec_hold_input(int fd, const char *what);
+// The three opens only open: each output is opened without being emptied and
+// refused if it is a file already held (an input, or another output, under
+// whatever name). They return 0, or -1 with the reason in rec_error();
+// rec_same_file() says whether the reason is "the same file twice".
 int rec_gif_open(const char *path);
 int rec_png_open(const char *dir);
 int rec_events_open(const char *path, const char *firmware, const char *settings_json);
+int rec_same_file(void);
+// After the opens: rec_start() if all of them returned 0 (only now is
+// anything emptied and written; 0, or -1 with the reason in rec_error()),
+// rec_abandon() if one did not (closes them untouched and removes what this
+// run created for them).
+int rec_start(void);
+void rec_abandon(void);
 void rec_frame(const image_t *img, uint64_t latch_cycle, const ws_frame_info_t *info);
 void rec_event(const char *type, uint64_t cycle, const char *extra_json);
 int rec_close(uint64_t end_cycle);            // 0, or -1 if any output failed
