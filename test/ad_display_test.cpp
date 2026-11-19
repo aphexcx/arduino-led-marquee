@@ -452,6 +452,78 @@ static void checkWaveFrame(const Frame& f, const std::vector<uint8_t>& text, siz
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// When every frame of a chonky text is due, worked out here from the four settings and from what
+// AdDisplay.h's description promises. None of the header's own macros is used: a header that
+// counts or rounds differently must fail this test, whatever the settings are.
+//
+//   - While the text stands at its start: a frame at 0, W, 2 W, ... for as long as that is before
+//     the hold H is over (W = AD_WAVE_FRAME_MS, H = AD_SCROLL_HOLD_MS). When W does not divide H,
+//     the last of them comes less than W before H.
+//   - The text moves one column at H, and one more every S (AD_SCROLL_STEP_MS). Each column is
+//     drawn n times at even distances, n being S / W rounded to the nearest whole number (35 ms
+//     and 10 ms: 4 frames, 8.75 ms apart). The distances are whole counts of the clock (4 us).
+//   - The last column is drawn when it is due, and from then on every W for as long as the text
+//     stays: dly from when that first frame was out. A frame is not begun when fewer than 6 ms of
+//     that are left.
+//   - A frame cannot begin before the one before it is out and latched. (That happens in one
+//     place: W = 16 puts a frame at 592 ms and the first move at 600 ms.)
+// ---------------------------------------------------------------------------------------------
+struct Due {
+    uint64_t sentUs; // when its last column is out, counted from when the first frame was begun
+    size_t offset;   // the text column at the left edge
+};
+
+static const uint64_t SHOW_US = 501; // show(): the pause that latches a frame
+
+static std::vector<Due> modelWave(size_t last, unsigned int dly, size_t* firstAtEnd) {
+    const uint64_t W = (uint64_t) AD_WAVE_FRAME_MS * 1000, H = (uint64_t) AD_SCROLL_HOLD_MS * 1000;
+    const uint64_t S = (uint64_t) AD_SCROLL_STEP_MS * 1000;
+    const uint64_t n = (2 * AD_SCROLL_STEP_MS + AD_WAVE_FRAME_MS) / (2 * AD_WAVE_FRAME_MS); // S / W to the nearest
+    assert(n >= 1);
+    const uint64_t apart = (uint64_t) AD_SCROLL_STEP_MS * 250 / n * 4; // whole counts of the clock
+    std::vector<uint64_t> due;
+    std::vector<size_t> offsets;
+    if (last > 0) {
+        for (uint64_t t = 0; t < H; t += W) {
+            due.push_back(t);
+            offsets.push_back(0);
+        }
+        for (size_t column = 1; column < last; column++) {
+            for (uint64_t i = 0; i < n; i++) {
+                due.push_back(H + (column - 1) * S + i * apart);
+                offsets.push_back(column);
+            }
+        }
+    }
+    // the frame that first shows the text where it stays
+    due.push_back(last > 0 ? H + (last - 1) * S : 0);
+    offsets.push_back(last);
+
+    std::vector<Due> out;
+    uint64_t free = 0; // when the frame before is out and latched
+    for (size_t k = 0; k < due.size(); k++) {
+        uint64_t begun = due[k] > free ? due[k] : free;
+        out.push_back(Due{begun + FRAME_US, offsets[k]});
+        free = begun + FRAME_US + SHOW_US;
+    }
+    *firstAtEnd = out.size() - 1;
+    if (dly == 0) return out;
+    const uint64_t until = out.back().sentUs + (uint64_t) dly * 1000;
+    for (uint64_t t = due.back() + W;; t += W) {
+        uint64_t begun = t > free ? t : free;
+        if (begun + 6000 > until) break;
+        out.push_back(Due{begun + FRAME_US, last});
+        free = begun + FRAME_US + SHOW_US;
+    }
+    return out;
+}
+
+#if AD_SCROLL_STEP_MS == 35 && AD_WAVE_FRAME_MS == 10
+// the settings the sign has: four frames for a column, 8.75 ms apart
+static_assert((2 * AD_SCROLL_STEP_MS + AD_WAVE_FRAME_MS) / (2 * AD_WAVE_FRAME_MS) == 4, "35 ms and 10 ms are 4 frames");
+#endif
+
 static void checkChonky(const std::string& text, unsigned int dly) {
     Run r = runWith(showC, text.c_str(), dly);
     std::vector<uint8_t> cols = modelColumns(MODEL_CHONK, text);
@@ -460,36 +532,25 @@ static void checkChonky(const std::string& text, unsigned int dly) {
 
     assert(r.clears == 0);
     assert(!r.frames.empty());
-    size_t offset = 0;
     size_t firstAtEnd = 0;
-    uint64_t movedUs = 0;
+    std::vector<Due> wanted = modelWave(last, dly, &firstAtEnd);
+    // as many frames as the settings give, each the text at its place with the wave's colours, each
+    // at its moment (the fake clock is read every 2 us: a few of those per frame)
+    if (r.frames.size() != wanted.size()) {
+        printf("'C' \"%s\" dly %u: %zu frames, the settings give %zu\n", text.c_str(), dly, r.frames.size(),
+               wanted.size());
+    }
+    assert(r.frames.size() == wanted.size());
     for (size_t k = 0; k < r.frames.size(); k++) {
         const Frame& f = r.frames[k];
-        // where is the text in this frame? It may have moved one column, never more, never back
-        if (offset < last && rowsOfSide(f, 0) == modelSide(cols, offset + 1, 0) &&
-            !(rowsOfSide(f, 0) == modelSide(cols, offset, 0))) {
-            offset++;
-            if (offset == 1) {
-                // the start stood still for AD_SCROLL_HOLD_MS
-                assert(near(f.sentUs - r.frames[0].sentUs, AD_SCROLL_HOLD_MS * 1000, 60));
-            } else {
-                // a column every AD_SCROLL_STEP_MS
-                assert(near(f.sentUs - movedUs, AD_SCROLL_STEP_MS * 1000, 60));
-            }
-            movedUs = f.sentUs;
-            if (offset == last) firstAtEnd = k;
+        checkWaveFrame(f, cols, wanted[k].offset, dly, k);
+        uint64_t at = f.sentUs - r.frames[0].sentUs, want = wanted[k].sentUs - wanted[0].sentUs;
+        if (!near(at, want, 60)) {
+            printf("'C' \"%s\" dly %u: frame %zu out %.3f ms after the first, the settings give %.3f\n", text.c_str(),
+                   dly, k, ms(at), ms(want));
         }
-        checkWaveFrame(f, cols, offset, dly, k);
-        // the wave never stops: a frame every AD_WAVE_FRAME_MS (10 ms), or, while the text moves, the
-        // frames of a column at even distances (four in 35 ms: every 8.75 ms)
-        if (k > 0) {
-            uint64_t gap = f.sentUs - r.frames[k - 1].sentUs;
-            const uint64_t moving = AD_SCROLL_STEP_MS * 1000 / AD_SCROLL_SUBFRAMES;
-            assert(gap <= (moving > AD_WAVE_FRAME_MS * 1000 ? moving : AD_WAVE_FRAME_MS * 1000) + 60);
-            assert(gap >= (moving < AD_WAVE_FRAME_MS * 1000 ? moving : AD_WAVE_FRAME_MS * 1000) - 50);
-        }
+        assert(near(at, want, 60));
     }
-    assert(offset == last); // it got to its end
     // the hold: from the first frame that shows the end of the text to the return, dly of real time
     // (with dly 0 that frame is the last and it returns as soon as it is latched: show()'s 0.5 ms)
     uint64_t hold = dly ? (uint64_t) dly * 1000 : 501;
@@ -498,14 +559,10 @@ static void checkChonky(const std::string& text, unsigned int dly) {
     }
     assert(near(r.endUs - r.frames[firstAtEnd].sentUs, hold, 40));
     if (dly == 0) assert(firstAtEnd == r.frames.size() - 1);
-    if (last == 0) {
-        // a text that fits: a frame every AD_WAVE_FRAME_MS for as long as it stays (at 10 ms, 1000 ms
-        // are 100 frames, as before)
-        size_t expected = dly < 6 ? 1 : (dly - 6) / AD_WAVE_FRAME_MS + 1;
-        assert(r.frames.size() == expected || r.frames.size() == expected + 1);
-        // (begun at 0, W, 2 W, ... while 6 ms of the hold are left; the hold starts when the first frame is out)
-        if (dly == 1000) assert(r.frames.size() == (1000 - 2) / AD_WAVE_FRAME_MS + 1);
-    }
+#if AD_WAVE_FRAME_MS == 10
+    // a text that fits, at the sign's own setting: 1000 ms are 100 frames, as they always were
+    if (last == 0 && dly == 1000) assert(r.frames.size() == 100);
+#endif
 }
 
 static void testChonkyFits() {
@@ -556,19 +613,25 @@ static void testChonkyLong() {
     checkChonky(forty, 0);
     checkChonky("DREAMSTATE", 30000);
 
-    // by hand: "ENERGY!" is 61 lit columns. AD_SCROLL_HOLD_MS (600 ms) at the start, a frame every
-    // AD_WAVE_FRAME_MS (60 frames at 10 ms), one column, then dly.
-    static_assert(AD_SCROLL_HOLD_MS % AD_WAVE_FRAME_MS == 0, "this check counts the frames of the hold at the start");
-    const size_t held = AD_SCROLL_HOLD_MS / AD_WAVE_FRAME_MS;
+    // by hand: "ENERGY!" is 61 lit columns. AD_SCROLL_HOLD_MS (600 ms) at the start with a frame every
+    // AD_WAVE_FRAME_MS (60 frames at 10 ms; 38 at 16 ms: 0 to 592), one column, then dly.
+    // The move comes at the end of the hold, or as soon as the frame before it is out and latched,
+    // when that is later (a wave of 7 ms has a frame at 595 ms, which is out at 599.9).
+    const size_t held = (AD_SCROLL_HOLD_MS + AD_WAVE_FRAME_MS - 1) / AD_WAVE_FRAME_MS;
+    const uint64_t lastHeld = (uint64_t) (held - 1) * AD_WAVE_FRAME_MS * 1000 + FRAME_US + SHOW_US;
+    const uint64_t moveUs = lastHeld > AD_SCROLL_HOLD_MS * 1000 ? lastHeld : AD_SCROLL_HOLD_MS * 1000;
     Run r = runWith(showC, "ENERGY!", 2000);
     std::vector<uint8_t> cols = modelColumns(MODEL_CHONK, "ENERGY!");
     assert(rowsOfSide(r.frames[0], 0) == modelSide(cols, 0, 0));
     assert(rowsOfSide(r.frames[held - 1], 0) == modelSide(cols, 0, 0));
     assert(rowsOfSide(r.frames[held], 0) == modelSide(cols, 1, 0));
     assert(rowsOfSide(r.frames[held], 0)[59] == 0xc0); // the last column of the "!"
-    assert(near(r.frames[held].sentUs - r.frames[0].sentUs, AD_SCROLL_HOLD_MS * 1000, 60));
+    assert(near(r.frames[held].sentUs - r.frames[0].sentUs, moveUs, 60));
     assert(near(r.endUs - r.frames[held].sentUs, 2000000, 40));
-    assert(near(r.endUs - r.startUs, AD_SCROLL_HOLD_MS * 1000 + 2000000 + FRAME_US, 100));
+    assert(near(r.endUs - r.startUs, moveUs + 2000000 + FRAME_US, 100));
+#if AD_WAVE_FRAME_MS == 10
+    assert(held == 60); // the sign's own setting, counted by hand
+#endif
 
     // 40 characters: 358 columns to the last lit one (the S is 7 wide), so the text moves 298 columns:
     // the first after AD_SCROLL_HOLD_MS, the other 297 every AD_SCROLL_STEP_MS

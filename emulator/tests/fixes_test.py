@@ -159,6 +159,18 @@ def lit(frame):
     return sum(bin(m).count("1") for m in frame.mask)
 
 
+def is_clear(frame):
+    """clear(): the whole strip, dark."""
+    return frame.bits == COLS * 24 and not lit(frame)
+
+
+def starfield(frames, stars):
+    """`stars` frames of at most one LED, most of them with their star (about one in eight falls
+    in the row the sign does not have)."""
+    return len(frames) == stars and all(lit(f) <= 1 for f in frames) and \
+        sum(1 for f in frames if lit(f) == 1) >= stars * 2 // 3
+
+
 def probe_checks(env, log, message, result, checker):
     """A message after the one under test: it is drawn as it always was."""
     start, end, frames = result
@@ -194,14 +206,19 @@ def check_brightness(env, cases, results):
             logs.append(log)
             if not asked_again(log, start, end):
                 continue
+            # the answer is a flashy text: the clear, then 200 frames of its fade and 100 of its last blink
+            whole = len(frames) == 301 and is_clear(frames[0])
             if shift < 8:
                 cols = font.columns(("BRIGHT=%d" % shift).encode("ascii"))[:-1]
                 expected = A.side(cols, 0, (PANEL - len(cols)) // 2)
                 hits = [f for f in frames if f.mask[:PANEL] == expected and f.mask[PANEL:] == expected]
-                check(log, bool(hits), 'the sign says "BRIGHT=%d" (%d frames)' % (shift, len(hits)))
+                others = [f for f in frames if lit(f) and f not in hits]
+                check(log, whole and bool(hits) and not others,
+                      'the sign is cleared, then says "BRIGHT=%d" and nothing else (%d frames, %d with the text, %d '
+                      'with something else)' % (shift, len(frames), len(hits), len(others)))
             else:
                 # (frames there must be: with none, the strip would keep the picture before, lit)
-                check(log, len(frames) >= 100 and not any(lit(f) for f in frames),
+                check(log, whole and not any(lit(f) for f in frames),
                       "the sign draws its answer, and every frame of it is dark (shift 8; %d frames)" % len(frames))
             continue
         log = logs[-1]
@@ -215,9 +232,13 @@ def check_brightness(env, cases, results):
                   % len(frames))
             continue
         cols = font.columns(b"HI")[:-1]
-        expected = A.side(cols, 0, (PANEL - len(cols)) // 2)
-        check(log, last is not None and last.mask[:PANEL] == expected and last.mask[PANEL:] == expected,
-              'a white text after it is drawn ("HI")')
+        pad = (PANEL - len(cols)) // 2
+        expected = A.side(cols, 0, pad)
+        first = A.side(font.columns(b"HI", 1), 0, pad)
+        check(log, len(frames) == 3 and is_clear(frames[0]) and
+              frames[1].mask[:PANEL] == first and frames[1].mask[PANEL:] == first and
+              last.mask[:PANEL] == expected and last.mask[PANEL:] == expected,
+              'a white text after it is drawn: the clear, "H", then "HI" (%d frames)' % len(frames))
         if last is None:
             continue
         x = top >> shift
@@ -255,10 +276,11 @@ def check_keyboard(env, message, result):
     cols = env["std"].columns(text[-10:]) + [0]     # the characters, each with its blank column, and one more
     expected = strip(cols)
     shown = [f for f in frames if lit(f)]
-    check(log, len(shown) == 2 and all(tuple(f.mask) == expected for f in shown),
-          "its last ten characters from column 0 as Fonts.h has them, and nothing else lit on the sign "
-          "(%d frames with light, %d of them exactly that)"
-          % (len(shown), sum(1 for f in shown if tuple(f.mask) == expected)))
+    check(log, len(frames) == 3 and is_clear(frames[0]) and shown == frames[1:] and
+          all(tuple(f.mask) == expected for f in shown),
+          "the clear, then twice its last ten characters from column 0 as Fonts.h has them, and nothing else lit "
+          "on the sign (%d frames, %d with light, %d of them exactly that)"
+          % (len(frames), len(shown), sum(1 for f in shown if tuple(f.mask) == expected)))
     # White, and the blinking colour of the two frames the style draws: red full, green and blue
     # 2 and then 0 of 255. (Green goes out as it is or carried, by what the code before it left.)
     last = len(env["std"].columns(text[-10:][:-1]))          # where the last character begins
@@ -281,8 +303,10 @@ def check_keyboard(env, message, result):
 
 
 # ---- 'F' and 'W' -----------------------------------------------------------------------------------
-def check_count_style(env, message, result, text, counts, what):
-    """Every frame with more than a star's light in it is: the text, the count, the text, the count."""
+def check_count_style(env, message, result, text, counts, what, stars_after=0):
+    """Every frame with more than a star's light in it is: the text, the count, the text, the count.
+    And the parts come in their order: the clear, the count running down to 0.00, the last frames
+    of its last blink (dark), then `stars_after` frames of starfield."""
     start, end, frames = result
     log = [A.label(message)]
     if not asked_again(log, start, end):
@@ -299,6 +323,22 @@ def check_count_style(env, message, result, text, counts, what):
     wanted = set(pictures.values())
     check(log, seen == wanted, "the count runs to its end: %d of its %d different pictures are seen"
           % (len(seen & wanted), len(wanted)))
+    # In their order. (The last blink fades the count too: its last frames are dark.)
+    order = [pictures.get(tuple(f.mask)) for f in shown]
+    down = None not in order and all(a >= b for a, b in zip(order, order[1:]))
+    at = [i for i, f in enumerate(frames) if lit(f) >= 2]
+    body = frames[1:at[-1] + 1] if at else []
+    tail = frames[at[-1] + 1:] if at else frames
+    faded = tail[:len(tail) - stars_after] if stars_after else tail
+    # (every frame of the count is one of its pictures: where the text leaves no room for the count,
+    # that is a dark frame at the bottom of each fade)
+    check(log, bool(frames) and is_clear(frames[0]) and down and all(tuple(f.mask) in pictures for f in body) and
+          len(faded) <= 20 and not any(lit(f) for f in faded) and
+          (not stars_after or starfield(tail[len(faded):], stars_after)),
+          "in this order: the clear, the count running down and never up (%d frames), the dark end of its last "
+          "blink (%d frames), %s" % (len(body), len(faded), "then %d frames of starfield (%d with a star)"
+                                     % (stars_after, sum(1 for f in tail[len(faded):] if lit(f) == 1))
+                                     if stars_after else "and nothing after it"))
     return log
 
 
@@ -310,12 +350,13 @@ def check_empty_flashy(env, message, result):
     most = max([lit(f) for f in frames] or [0])
     check(log, bool(frames) and most <= 1, "an empty text lights nothing: no frame has more than the one LED of a "
           "star of the starfield after it (most: %d)" % most)
-    # The message ran: the text before it is cleared (the first frame is dark, and whole), the
-    # fade's 300 frames are drawn, and the 300 stars after them are there.
-    stars = sum(1 for f in frames if lit(f) == 1)
-    check(log, len(frames) >= 600 and frames[0].bits == COLS * 24 and not lit(frames[0]) and stars >= 200,
-          "and it ran: the sign is cleared, then its frames and the starfield (%d frames, %d with a star)"
-          % (len(frames), stars))
+    # The message ran, its parts in their order: the text before it is cleared, the fade's 300
+    # frames are drawn and every one of them is dark, and then come the 300 frames of the starfield.
+    fade, field = frames[1:301], frames[301:]
+    check(log, len(frames) == 601 and is_clear(frames[0]) and not any(lit(f) for f in fade) and starfield(field, 300),
+          "and it ran, in this order: the clear, 300 dark frames of its fade (%d of them lit), then the starfield "
+          "(%d frames, %d with a star)" % (sum(1 for f in fade if lit(f)), len(field),
+                                           sum(1 for f in field if lit(f) == 1)))
     return log
 
 
@@ -424,8 +465,10 @@ def main():
         # message, and a sender that runs past the end of the text draws it)
         probe(probe_o(), A.check_one_by_one),       # the sign is lit before the empty text
         ({"str": "", "type": "F"}, check_empty_flashy),
-        ({"str": "", "type": "W"}, lambda e, m, r: check_count_style(e, m, r, b"", range(600), "an empty text")),
-        ({"type": "W", "str": "NEW"}, lambda e, m, r: check_count_style(e, m, r, b"NEW", range(600), '"NEW"')),
+        ({"str": "", "type": "W"},
+         lambda e, m, r: check_count_style(e, m, r, b"", range(600), "an empty text", stars_after=300)),
+        ({"type": "W", "str": "NEW"},
+         lambda e, m, r: check_count_style(e, m, r, b"NEW", range(600), '"NEW"', stars_after=300)),
     ] + pair()
     stars = [({"type": "S", "str": "", "stars": n}, check_stars) for n in (5, 0, -1, -32768, 3, 40)] + pair()
     # (the sign has the icons 1 2 X A B D E and looks at the first character only)
