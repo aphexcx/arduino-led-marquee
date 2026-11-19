@@ -730,14 +730,17 @@ def idle(emu, hexfile, font_path, work, port, cross=False):
             place = "not at all (it saw the line LOW and listened)"
         where[place] = where.get(place, 0) + 1
         how = None
-        if cross and second:
+        if second:
+            # Where the message's first byte fell against the sign's request byte. In the plain
+            # sweep too: its moments are 6 ms apart and the request's is the firmware's, so one
+            # of them can fall on it (0.7 ms wide) with one firmware and miss it with the next.
             first_bit = [e for e in d.rx if e["byte"] == ord("{")][0]["due"]
             ask, byte_cycles = second[0]["cycle"], 11112
             how = ("before it" if first_bit + byte_cycles <= ask else
                    "after it" if first_bit >= ask + byte_cycles else "overlapping it")
             crossed[how] += 1
             asks_after = len([e for e in d.all_tx if e["cycle"] > ask])
-            if how == "after it" and asks_after:
+            if cross and how == "after it" and asks_after:
                 again_after.append("%s ms" % x)
         # (a message whose first byte overlapped the sign's request has lost its start: see above)
         limit = 6000 if how == "overlapping it" else 400
