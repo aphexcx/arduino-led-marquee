@@ -137,8 +137,14 @@ PROGMEM = "                    ";
 //may send instead of one (nine bit times LOW, 625 us at 14400 baud). No other byte holds the line LOW that long:
 //the longest is 0x80 with eight bit times, 556 us, and no character of ASCII text has more than seven
 #define CHOOSER_BREAK_MIN_US 590UL
-//After a message has been read, wait at most this long for whatever the app writes behind it (a newline) to end
+//After a message has been read, wait at most this long for whatever the app writes straight behind it (a newline)
+//to end
 #define CHOOSER_TRAILER_WAIT_MS 100
+//What the app writes behind a message may also come late (it may pause before it as before any byte). Bytes that
+//come late and are over within this many ms are that, and not the app raising its hand: room for fourteen bytes
+//back to back. Bytes that go on for longer are a message going by (the shortest message is 25 bytes, 17 ms, of
+//which the sign may miss the first 5 while it sends a frame)
+#define CHOOSER_TRAILER_LATE_MS 10
 //When the line from the app changed while a request went out, the sign listens again only once the line has been
 //HIGH for this long, in ms: longer than it is between two bytes sent back to back (nine bit times, 0.63 ms)
 #define REQUEST_GAP_MS 1
@@ -214,7 +220,10 @@ static_assert(CHOOSER_REFRESH_MS >= 1000 && CHOOSER_REFRESH_MS <= 30000, "CHOOSE
 static_assert(CHOOSER_HOLD_MS >= 1 && CHOOSER_HOLD_MS <= 60000 && CHOOSER_SCROLL_DELAY_MS >= 1 &&
               CHOOSER_SCROLL_DELAY_MS <= 1000 && CHOOSER_BLINK_PAUSE_MS >= 0 && CHOOSER_BLINK_PAUSE_MS <= 60000,
               "the chooser's waits are counted in microseconds in 32 bits");
-static_assert(CHOOSER_ATTN_BYTE_MS + 10 <= 255 && REQUEST_QUIET_MS <= 255, "the quiet times are kept in 8 bits");
+static_assert(ANSWER_FIRST_BYTE_MS + REQUEST_BUSY_WAIT_MS <= 60000 && CHOOSER_ATTN_BYTE_MS <= ANSWER_FIRST_BYTE_MS,
+              "the time a byte is given is counted in ms in 16 bits");
+static_assert(CHOOSER_TRAILER_LATE_MS >= 1 && CHOOSER_TRAILER_LATE_MS <= 12,
+              "what comes late behind a message must stay shorter than the shortest message less a frame (17 - 5 ms)");
 static_assert(REQUEST_GAP_MS >= 1 && REQUEST_GAP_MS <= REQUEST_QUIET_MS,
               "the gap must be longer than the line is HIGH inside a run of bytes (0.63 ms at most)");
 static_assert(CHOOSER_LINE_QUIET_MS >= 1 && CHOOSER_LINE_QUIET_MS < CHOOSER_ATTN_HIGH_WAIT_MS &&
@@ -922,17 +931,18 @@ static inline bool chooserLineLow() {
 }
 
 // Sends one byte to the app and says whether the line FROM the app changed while it went out. SoftwareSerial
-// sends with interrupts off, so its receiver cannot take a byte that begins in that time. That something began is
-// known, not guessed: the receive pin's change flag, which the pin sets with interrupts off too (PB2 is the only
-// pin of its group that is watched, and only while the sign listens). Nothing is decided here; what the sign does
-// about it is in chooserRequest(). What begins after this byte has gone out is not reported.
+// sends the start bit and the eight data bits with interrupts off, so its receiver cannot take a byte that begins
+// in that time. That something began is known, not guessed: the receive pin's change flag, which the pin sets with
+// interrupts off too (PB2 is the only pin of its group that is watched, and only while the sign listens).
+// THE SIGN LISTENS FROM THE MOMENT ITS OWN BYTE CAN BE ANSWERED. With the last data bit the byte is in the app's
+// hands: a quick UART looks at the stop bit half way and may begin its answer in the 35 us that are left of it.
+// So the flag is looked at where the stop bit begins, and interrupts are back on from there: the bundled
+// SoftwareSerial's write() does both (see rxChangedDuringWrite() there). What begins in the stop bit or later is
+// received like any byte and is not reported. Nothing is decided here; what the sign does about a change is in
+// chooserRequest().
 static bool chooserSendByte(char c) {
-    uint oldSREG = SREG;
-    cli();
-    softSerial.write(c);                    // (puts SREG back as it found it: interrupts stay off)
-    bool changed = PCIFR & bit(PCIF0);
-    SREG = oldSREG;
-    return changed;
+    softSerial.write(c);
+    return softSerial.rxChangedDuringWrite();
 }
 
 // The chooser display (MSGTYPE_CHOOSER): showAsChooser() with its scrolling and its watch on the receive line,

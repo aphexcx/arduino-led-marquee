@@ -64,6 +64,7 @@
 #define CHOOSER_LINE_QUIET_MS 3
 #define CHOOSER_BREAK_MIN_US 590UL
 #define CHOOSER_TRAILER_WAIT_MS 100
+#define CHOOSER_TRAILER_LATE_MS 10
 #define REQUEST_QUIET_MS 10
 #define REQUEST_GAP_MS 1
 #define REQUEST_QUIET_WAIT_MS 500
@@ -298,6 +299,8 @@ struct FakeApp {
     bool leaveWithFrame;        // contract 3.0: leaving chooser mode pushes the other message as a frame too
     bool oneFramePerRequest;    // contract 3.1 rule 3 (off: 3.0, a request overtaken by a push gets a second frame)
     std::string trailer;        // bytes it writes behind every message (a newline, say)
+    uint64_t trailerGapUs;      // ... each of them after a pause this long (0: back to back)
+    uint64_t trailerInnerGapUs; // ... or only the first of them, and the others after this long (UINT64_MAX: all alike)
     uint64_t leftAtUs;          // when it left chooser mode by a push (UINT64_MAX: it has not)
     uint64_t guardUntilUs;      // nothing of the app's begins before this: its last break (or run of zeros) + the guard
     int pushBehindAnswer;       // straight behind its answer to this request (0: none) it pushes pushBehindMessage,
@@ -332,6 +335,8 @@ struct FakeApp {
         leaveWithFrame = false;
         oneFramePerRequest = true;
         trailer.clear();
+        trailerGapUs = 0;
+        trailerInnerGapUs = UINT64_MAX;
         leftAtUs = UINT64_MAX;
         guardUntilUs = 0;
         pushBehindAnswer = 0;
@@ -379,6 +384,19 @@ struct FakeApp {
         pending.push_back(PendingRequest{nowUs + latencyUs, (int) requests.size()});
     }
 
+    // Puts a message on the line, its first byte arriving at startUs or right behind what is
+    // already on it, and behind it what the app writes behind every message. Returns when the
+    // last byte has arrived.
+    uint64_t sendMessage(const std::string& bytes, uint64_t startUs) {
+        uint64_t end = sendOnWire(bytes, startUs);
+        if (!trailerGapUs) return trailer.empty() ? end : sendOnWire(trailer, end + BYTE_US);
+        for (size_t i = 0; i < trailer.size(); i++) {
+            uint64_t gapUs = i && trailerInnerGapUs != UINT64_MAX ? trailerInnerGapUs : trailerGapUs;
+            end = sendOnWire(trailer.substr(i, 1), end + gapUs + BYTE_US);
+        }
+        return end;
+    }
+
     // When the app next does something by itself, UINT64_MAX if never.
     uint64_t nextEventUs() const {
         uint64_t next = UINT64_MAX;
@@ -421,7 +439,7 @@ struct FakeApp {
         // follows is taken from its list by the sign's own request, not thrown at a sign that
         // may not be listening.
         if (!breakOnly.count(number) && (chooserMode || leaveWithFrame)) {
-            p.messageEndUs = sendOnWire(bytes + trailer, p.breakEndUs + guardUs + BYTE_US);
+            p.messageEndUs = sendMessage(bytes, p.breakEndUs + guardUs + BYTE_US);
             p.frame = true;
         }
         pushes.push_back(p);
@@ -463,14 +481,14 @@ struct FakeApp {
             }
             // (rule 4: nothing leaves behind a break before the guard, an answer neither: glued to
             // the break its first byte would have no start edge)
-            sendOnWire(reply + trailer, std::max(r.dueUs, guardUntilUs) + BYTE_US);
+            sendMessage(reply, std::max(r.dueUs, guardUntilUs) + BYTE_US);
             if (r.number == pushBehindAnswer) {
                 message = pushBehindMessage;
                 Push p{wireBusyUntilUs + pushBehindGapUs, 0, 0, message, true};
                 p.breakEndUs = breakAsZeros ? sendOnWire(std::string((size_t) (breakUs / BYTE_US), '\0'),
                                                          p.breakStartUs + BYTE_US)
                                             : breakOnWire(p.breakStartUs, breakUs);
-                p.messageEndUs = sendOnWire(message + trailer, p.breakEndUs + guardUs + BYTE_US);
+                p.messageEndUs = sendMessage(message, p.breakEndUs + guardUs + BYTE_US);
                 guardUntilUs = p.breakEndUs + guardUs;
                 pushes.push_back(p);
             }
@@ -591,8 +609,11 @@ static void stopSerial() {
 // What the sign's receiver makes of it, if it is left listening: a byte that began while the
 // sign was sending is taken from its middle, and so is every byte that follows it back to back
 // (the receiver finds no start bit until the line pauses). Those arrive as damaged bytes. A
-// break is still LOW when the receiver gets to it and is the 0x00 it always is. A byte that
-// begins when the sign's byte has gone out, or any time after, is good.
+// break is still LOW when the receiver gets to it and is the 0x00 it always is.
+// "While it went out" is its start bit and its eight data bits. With the stop bit the request is
+// in the app's hands, and the sign receives again from the first moment of it: a byte that begins
+// in the stop bit, or any time after, is good, and is not reported.
+static const uint64_t SEND_DEAF_US = BYTE_US * 9 / 10;
 static const char DAMAGED = '\x15';
 
 static bool chooserSendByte(char c) {
@@ -604,7 +625,7 @@ static bool chooserSendByte(char c) {
     uint64_t damagedUntilUs = 0; // the arrival time of the last byte known damaged
     for (size_t i = 0; i < wire.size(); i++) {
         uint64_t startUs = wire[i].atUs - BYTE_US;
-        bool began = startUs >= fromUs && startUs < nowUs;
+        bool began = startUs >= fromUs && startUs < fromUs + SEND_DEAF_US;
         changed = changed || began;
         if (wire[i].held) continue;
         if (wire[i].dip) {
@@ -619,7 +640,7 @@ static bool chooserSendByte(char c) {
     }
     for (size_t i = 0; i < lineBreaks.size(); i++) {
         // any LOW that began (a break, or one too short to be the app holding the line)
-        changed = changed || (lineBreaks[i].fromUs >= fromUs && lineBreaks[i].fromUs < nowUs);
+        changed = changed || (lineBreaks[i].fromUs >= fromUs && lineBreaks[i].fromUs < fromUs + SEND_DEAF_US);
     }
     if (c == '~') {
         app.onRequest(c);
@@ -680,6 +701,7 @@ static void arrive(FakeApp::Kind kind, const std::string& text, const std::strin
     longestLineBlindUs = 0;
     lostToTransmit = 0;
     lineWasLow = false; // as after a reset of the sign: no LOW has been seen yet
+    frameByteMs = 0;    // ... and no frame read
 #if CHOOSER_DEBUG_PANEL_B
     chooserDebug = ChooserDebug(); // as after a reset of the sign
 #endif
@@ -1758,7 +1780,7 @@ static void breakInANormalReadIsSteppedOver() {
         assert(chooserReadMessage() == DeserializationError::Ok);
         stopSerial();
         assert(strcmp(json["type"], "H") == 0 && FIRST == (const char*) json["str"]);
-        assert(nowUs == messageEnd);
+        assert(nowUs - messageEnd < 50); // (the read ends with the last byte: it only notes the time)
     }
     // a break and then nothing: "no answer", after the usual wait and not a moment longer
     freshApp();
@@ -2062,7 +2084,9 @@ static void glitchWhileTheRequestGoesOutCostsNoMessage() {
             assert(exchange() == DeserializationError::Ok);
             assert(strcmp(json["str"], "bye") == 0);
             assert(app.requests.size() == 1 && answered() == 1);
-            assert(lostToTransmit == 1); // (the dip did fall into the request)
+            // (the dip did fall into the request; in its stop bit the sign receives again, and
+            // the dip is the 0xFF a dip always is, stepped over in front of the answer)
+            assert(lostToTransmit == (into < SEND_DEAF_US ? 1 : 0));
         }
     }
 }
@@ -2398,6 +2422,534 @@ static void answerThatCannotBeReadIsAskedForAgain() {
     assert(app.requests.size() == 1);
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// Gate round 3
+// ---------------------------------------------------------------------------------------------
+
+static void lateNewlineBehindAMessageIsNotTheAppRaisingItsHand() {
+    // An app that writes a newline behind every message, and not at once: its sending thread
+    // is held up first, as it may be between any two bytes. The byte that comes late is still
+    // what the app wrote behind the message. It is not attention: the sign does not stop, and
+    // does not ask. (The gate's run: 40 ms before each newline, 28 requests in 11 s where three
+    // were due.)
+    const uint64_t gapsUs[] = {40000, 5000, 90000};
+    const char* const trailers[] = {"\n", "\r\n"};
+    for (size_t g = 0; g < 3; g++) {
+        for (size_t t = 0; t < 2; t++) {
+            freshApp();
+            app.trailer = trailers[t];
+            app.trailerGapUs = gapsUs[g];
+            app.latencyUs = 9000;
+            app.at(11000, BYE, false);
+            assert(runChooser(FakeApp::V2_APP, FIRST, "3/9"));
+            assert(assertSteadyScroll(FIRST, "3/9", 5) >= 2);
+            assert(app.requests.size() == 3); // one read at each stand-still; the third brings the other message
+        }
+    }
+
+    // The first chooser message too, the one loop()'s own read brings: its newline arrives when
+    // the chooser is already on the LEDs.
+    for (size_t g = 0; g < 3; g++) {
+        freshApp();
+        app.trailer = "\n";
+        app.trailerGapUs = gapsUs[g];
+        arrive(FakeApp::V2_APP, "HELLO", "1/1");
+        app.message = chooserJson(FIRST, "3/9");
+        nowUs = 5000 * 1000;
+        assert(exchange() == DeserializationError::Ok);
+        const uint64_t shownUs = nowUs;
+        app.at(ms(shownUs) + 6000, BYE, false);
+        frames.clear();
+        assert(showAsChooser(json["str"], json["flashy"]));
+        // loop()'s request, the read at the first stand-still, and the one that brings the other message
+        assert(app.requests.size() == 3);
+        assert(ms(app.requests[1].tUs - shownUs) > FIRST_PASS_MS - 50);
+    }
+
+    // And behind a pushed message: on the LEDs within 150 ms of the end of the break, as ever,
+    // and the late newline stops nothing.
+    for (size_t g = 0; g < 3; g++) {
+        freshApp();
+        app.trailer = "\r\n";
+        app.trailerGapUs = gapsUs[g];
+        app.at(2000, chooserJson(SECOND, "4/9"), true);
+        app.at(6000, BYE, false);
+        assert(runChooser(FakeApp::V3_APP, FIRST, "3/9"));
+        size_t change = firstStartOf(SECOND, "4/9");
+        assert(change < frames.size());
+        assert(ms(frames[change].tUs - app.pushes[0].breakEndUs) < 150);
+        for (size_t i = change; i < frames.size(); i++) assert(positionOf(frames[i], SECOND, "4/9") == (int) (i - change));
+        assert(requestsWhileChoosing() == 0);
+    }
+}
+
+static void attentionBehindALateNewlineIsStillAttention() {
+    // Letting a late newline go by must not let the app's raised hand go by: the newline 40 ms
+    // behind the answer to the read at the stand-still, and then, at any moment of the 100 ms
+    // in which another byte may still follow, a push (a break, or the run of zeros).
+    for (int zeros = 0; zeros < 2; zeros++) {
+        for (double afterMs = 0.2; afterMs < 130; afterMs += 3.3) {
+            freshApp();
+            app.trailer = "\n";
+            app.trailerGapUs = 40000;
+            app.breakAsZeros = zeros;
+            app.pushBehindGapUs = (uint64_t) (afterMs * 1000);
+            app.pushBehindAnswer = 1;
+            app.pushBehindMessage = chooserJson(SECOND, "4/9");
+            app.at(FIRST_PASS_MS + 3000, BYE, false);
+            assert(runChooser(FakeApp::V3_APP, FIRST, "3/9"));
+            size_t change = firstStartOf(SECOND, "4/9");
+            assert(change < frames.size());
+            assert(ms(frames[change].tUs - app.pushes[0].breakEndUs) < 150);
+            assert(requestsWhileChoosing() == 1); // the read at the stand-still, and nothing had to be asked after it
+            assertOnlyWholePictures(FIRST, "3/9", SECOND, "4/9");
+        }
+    }
+}
+
+// One LOW pulse of the line, received by a listening SoftwareSerial from its falling edge: the
+// eight bytes it can be (measured in the emulator, see the PR), with a width that gives each.
+static const struct { unsigned widthUs; unsigned char byte; } PULSES[] = {
+    {40, 0xFF}, {150, 0xFE}, {210, 0xFC}, {280, 0xF8}, {350, 0xF0}, {420, 0xE0}, {490, 0xC0}, {560, 0x80},
+};
+
+static void pulseOnTheLineIsNoByteOfAMessageWhereverItStands() {
+    // Noise: the line dips for less than a break. The receiver makes a byte of it, 0xFF when
+    // the dip is shorter than a bit and a half, 0xFE for 150 us (the gate's), and so on down to
+    // 0x80. None of them is the app's. In front of an answer it costs no message: the answer
+    // behind it is read, and the app is asked ONCE.
+    for (size_t p = 0; p < 8; p++) {
+        for (uint64_t before = 800; before <= 2800; before += 400) {
+            freshApp();
+            arrive(FakeApp::V2_APP, "HELLO", "1/1");
+            app.message = BYE;
+            nowUs = 5000 * 1000;
+            // (the request goes out about 10.7 ms from now; the app answers 3 ms after it)
+            breakOnWire(nowUs + 10700 + 3000 - before, PULSES[p].widthUs);
+            assert(!wire.empty() && (unsigned char) wire.back().c == PULSES[p].byte); // (this fake's receiver agrees)
+            assert(exchange() == DeserializationError::Ok && strcmp(json["str"], "bye") == 0);
+            assert(app.requests.size() == 1 && answered() == 1);
+        }
+        // ... and the same as a byte, in front of the answer, behind its brace, and behind it
+        const std::string noise(1, (char) PULSES[p].byte);
+        const std::string answers[] = {noise + noise + BYE, std::string("{") + noise + (BYE + 1), BYE + noise};
+        for (size_t a = 0; a < 3; a++) {
+            freshApp();
+            arrive(FakeApp::V2_APP, "HELLO", "1/1");
+            app.message = BYE;
+            app.damaged[1] = answers[a];
+            nowUs = 5000 * 1000;
+            assert(exchange() == DeserializationError::Ok && strcmp(json["str"], "bye") == 0);
+            assert(app.requests.size() == 1);
+        }
+    }
+
+    // In the guard between the app's raised hand and the message it pushes: the message is read
+    // and shown, and nothing is asked.
+    for (size_t p = 0; p < 8; p++) {
+        for (int zeros = 0; zeros < 2; zeros++) {
+            freshApp();
+            app.at(6000, BYE, false);
+            arrive(FakeApp::V2_APP, FIRST, "3/9"); // (the push is placed by hand: this app answers, it does not push)
+            uint64_t handDown = raiseHand(2000 * 1000, zeros);
+            breakOnWire(handDown + 9000, PULSES[p].widthUs);
+            uint64_t frameEnd = sendOnWire(chooserJson(SECOND, "4/9"), handDown + 20000 + BYTE_US);
+            app.message = chooserJson(SECOND, "4/9");
+            assert(showAsChooser(json["str"], json["flashy"]));
+            size_t change = firstStartOf(SECOND, "4/9");
+            assert(change < frames.size());
+            assert(ms(frames[change].tUs - frameEnd) < 20);
+            assert(app.requests.empty() || app.requests[0].tUs > frames[change].tUs + 1000 * 1000);
+        }
+    }
+
+    // Inside a message, in a pause of the app's: none of the eight is a byte of a text in ASCII
+    // (nor, alone, of a character in UTF-8), so it is not part of the message either, between
+    // two of its tokens or in the middle of its text.
+    const std::string frame = chooserJson(SECOND, "4/9");
+    const size_t cuts[] = {1, 8, 12, 30, frame.size() - 1};
+    for (size_t p = 0; p < 8; p++) {
+        for (size_t c = 0; c < 5; c++) {
+            freshApp();
+            app.at(6000, BYE, false);
+            arrive(FakeApp::V2_APP, FIRST, "3/9");
+            uint64_t handDown = raiseHand(2000 * 1000, false);
+            uint64_t firstEnd = sendOnWire(frame.substr(0, cuts[c]), handDown + 20000 + BYTE_US);
+            breakOnWire(firstEnd + 15000, PULSES[p].widthUs);
+            uint64_t frameEnd = sendOnWire(frame.substr(cuts[c]), firstEnd + 40000 + BYTE_US);
+            app.message = frame;
+            assert(showAsChooser(json["str"], json["flashy"]));
+            size_t change = firstStartOf(SECOND, "4/9");
+            assert(change < frames.size());
+            assert(ms(frames[change].tUs - frameEnd) < 20);
+            assert(app.requests.empty() || app.requests[0].tUs > frames[change].tUs + 1000 * 1000);
+        }
+    }
+}
+
+static void replyThatBeginsInTheStopBitOfTheRequestIsRead() {
+    // The request is in the app's hands when its last data bit has gone out: a quick UART
+    // looks at the stop bit half way and may begin its answer in what is left of it. That
+    // answer began while nothing of the request's was still to come: it is the answer. It is
+    // read, and the app is asked ONCE.
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.message = BYE;
+    nowUs = 5000 * 1000;
+    assert(exchange() == DeserializationError::Ok);
+    const uint64_t sentUs = app.requests[0].tUs; // when the request byte had gone out, stop bit and all
+    for (uint64_t early = 0; early <= BYTE_US / 10; early += 3) {
+        freshApp();
+        arrive(FakeApp::V2_APP, "HELLO", "1/1");
+        app.message = BYE;
+        app.dropped.insert(1); // (the answer is put on the line here, where this test wants it)
+        nowUs = 5000 * 1000;
+        sendOnWire(BYE, sentUs - early + BYTE_US);
+        assert(exchange() == DeserializationError::Ok);
+        assert(strcmp(json["type"], "D") == 0 && strcmp(json["str"], "bye") == 0);
+        assert(app.requests.size() == 1);
+        assert(lostToTransmit == 0);
+    }
+    // One bit earlier it began while the request's last data bit went out: no UART answers
+    // what it has not been sent. That is something crossing the request, as before.
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.message = BYE;
+    app.dropped.insert(1);
+    nowUs = 5000 * 1000;
+    sendOnWire(BYE, sentUs - BYTE_US / 10 - 20 + BYTE_US);
+    assert(exchange() == DeserializationError::EmptyInput);
+    assert(app.requests.size() == 1 && lostToTransmit == 1);
+}
+
+static void everyByteOfAMessageHasItsOwnTime() {
+    // The app may pause between any two bytes of a message, for as long as between any other
+    // two: behind the opening brace too, and again behind white space there. (The gate's: 70 ms
+    // between the brace, a space and the type, each inside the 100 ms a byte is given.)
+    const std::string frame = chooserJson(SECOND, "4/9");
+    const std::string openings[] = {"{", "{ ", "{ \r\n", "{\t \t"};
+    for (size_t o = 0; o < 4; o++) {
+        freshApp();
+        app.at(6000, BYE, false);
+        arrive(FakeApp::V2_APP, FIRST, "3/9"); // (the push is placed by hand)
+        uint64_t end = raiseHand(2000 * 1000, o & 1) + 20000;
+        for (size_t i = 0; i < openings[o].size(); i++) {
+            end = sendOnWire(openings[o].substr(i, 1), end + (i ? 70000 : 0) + BYTE_US);
+        }
+        uint64_t frameEnd = sendOnWire(frame.substr(1), end + 70000 + BYTE_US);
+        app.message = frame;
+        assert(showAsChooser(json["str"], json["flashy"]));
+        size_t change = firstStartOf(SECOND, "4/9");
+        assert(change < frames.size());
+        assert(ms(frames[change].tUs - frameEnd) < 20);
+        assert(app.requests.empty() || app.requests[0].tUs > frames[change].tUs + 1000 * 1000);
+    }
+    // The same in an answer, where a byte is given a second: 700 ms before each.
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.message = BYE;
+    nowUs = 5000 * 1000;
+    assert(exchange() == DeserializationError::Ok);
+    const uint64_t sentUs = app.requests[0].tUs;
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.message = BYE;
+    app.dropped.insert(1);
+    nowUs = 5000 * 1000;
+    uint64_t end = sendOnWire("{", sentUs + 3000 + BYTE_US);
+    end = sendOnWire(" ", end + 700000 + BYTE_US);
+    end = sendOnWire("\n", end + 700000 + BYTE_US);
+    sendOnWire(BYE + 1, end + 700000 + BYTE_US);
+    assert(exchange() == DeserializationError::Ok && strcmp(json["str"], "bye") == 0);
+    assert(app.requests.size() == 1);
+}
+
+static void restOfAnAnswerIsGivenTheTimeAnAnswersBytesHave() {
+    // An answer that cannot be read, with a pause in it of the kind an answer may have (half a
+    // second; a byte of an answer is given a second). What comes after the pause is still that
+    // answer: the sign lets it go by before it asks again, and does not ask into it. Asking
+    // early would have the rest arrive as the "answer", and the real one behind it be lost.
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.message = BYE;
+    nowUs = 5000 * 1000;
+    assert(exchange() == DeserializationError::Ok);
+    const uint64_t sentUs = app.requests[0].tUs;
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.message = BYE;
+    app.dropped.insert(1); // (the first answer is put on the line here)
+    nowUs = 5000 * 1000;
+    uint64_t end = sendOnWire("{\"type\":\"D\",,", sentUs + 3000 + BYTE_US);
+    uint64_t restEnd = sendOnWire("\"str\":\"lost\"}", end + 500000 + BYTE_US);
+    assert(exchange() == DeserializationError::Ok && strcmp(json["str"], "bye") == 0);
+    assert(app.requests.size() == 2);            // asked again once, and that answer was read
+    assert(app.requests[1].tUs > restEnd + 1000 * 1000); // ... when the rest had gone by and a byte's time more
+
+    // But a wait that has run out is not waited a second time. An answer that stops in the
+    // middle: the read gives up when no byte has come for a second. The frame is over then,
+    // and the sign asks again at once.
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.message = BYE;
+    app.damaged[1] = "";
+    nowUs = 5000 * 1000;
+    assert(exchange() == DeserializationError::Ok && strcmp(json["str"], "bye") == 0);
+    assert(app.requests.size() == 2);
+    const double again = ms(app.requests[1].tUs - app.requests[0].tUs);
+    assert(again > ANSWER_FIRST_BYTE_MS && again < ANSWER_FIRST_BYTE_MS + 60);
+    // The same for a message the app pushed and did not finish: the sign asks 100 ms after its
+    // last byte (and the quiet line every request waits for), not 100 ms after that again.
+    freshApp();
+    app.damagedPush[1] = "";
+    app.at(2000, chooserJson(SECOND, "4/9"), true);
+    app.at(6000, BYE, false);
+    assert(runChooser(FakeApp::V3_APP, FIRST, "3/9"));
+    assert(!app.requests.empty());
+    const double asked = ms(app.requests[0].tUs - app.pushes[0].messageEndUs);
+    // (the bench build's line of numbers goes out in front of the request: 27 characters, 19 ms)
+    assert(asked > CHOOSER_ATTN_BYTE_MS &&
+           asked < CHOOSER_ATTN_BYTE_MS + REQUEST_QUIET_MS + 10 + (CHOOSER_DEBUG_PANEL_B ? 20 : 0));
+}
+
+static void lateBytesBehindAMessageCloseTogether() {
+    // What the app writes behind a message, late, may be more than one byte, and the bytes may
+    // be close together: "\r\n" with any pause between the two, three bytes a millisecond
+    // apart, fourteen back to back. None of it is the app raising its hand.
+    for (uint64_t firstUs = 7000; firstUs <= 95000; firstUs += 44000) {
+        for (uint64_t innerUs = 0; innerUs <= 5000; innerUs += 250) {
+            freshApp();
+            app.trailer = "\r\n";
+            app.trailerGapUs = firstUs;
+            app.trailerInnerGapUs = innerUs;
+            app.latencyUs = 9000;
+            app.at(11000, BYE, false);
+            assert(runChooser(FakeApp::V2_APP, FIRST, "3/9"));
+            assert(assertSteadyScroll(FIRST, "3/9", 5 + CHOOSER_TRAILER_LATE_MS + CHOOSER_LINE_QUIET_MS) >= 2);
+            assert(app.requests.size() == 3); // one read at each stand-still; the third brings the other message
+        }
+    }
+    const std::string runs[] = {"\r\n ", std::string(5, '\n'), std::string(14, ' ')};
+    const uint64_t innersUs[] = {1000, 0, 0};
+    for (size_t r = 0; r < 3; r++) {
+        freshApp();
+        app.trailer = runs[r];
+        app.trailerGapUs = 40000;
+        app.trailerInnerGapUs = innersUs[r];
+        app.latencyUs = 9000;
+        app.at(11000, BYE, false);
+        assert(runChooser(FakeApp::V2_APP, FIRST, "3/9"));
+        assert(app.requests.size() == 3);
+    }
+    // ... and behind a pushed message
+    for (uint64_t innerUs = 0; innerUs <= 5000; innerUs += 500) {
+        freshApp();
+        app.trailer = "\r\n";
+        app.trailerGapUs = 40000;
+        app.trailerInnerGapUs = innerUs;
+        app.at(2000, chooserJson(SECOND, "4/9"), true);
+        app.at(6000, BYE, false);
+        assert(runChooser(FakeApp::V3_APP, FIRST, "3/9"));
+        size_t change = firstStartOf(SECOND, "4/9");
+        assert(change < frames.size());
+        assert(requestsWhileChoosing() == 0);
+    }
+}
+
+static void byteThatIsNobodysCostsNoMessage() {
+    // Two dips of the line inside one byte time: the receiver can make any byte of them that
+    // has its high bits set, 0x7F, or a control character. In front of an answer none of them
+    // is the beginning of a message or a character of text: the answer behind it is read, and
+    // the app is asked ONCE.
+    const unsigned char strays[] = {0xE6, 0xFD, 0xFB, 0x7F, 0xE1, 0x01, 0x1B, 0x9D, 0xC3};
+    for (size_t s = 0; s < sizeof(strays); s++) {
+        const std::string stray(1, (char) strays[s]);
+        const std::string answers[] = {stray + BYE, stray + stray + " " + BYE, std::string("{") + stray + (BYE + 1)};
+        for (size_t a = 0; a < 3; a++) {
+            freshApp();
+            arrive(FakeApp::V2_APP, "HELLO", "1/1");
+            app.message = BYE;
+            app.damaged[1] = answers[a];
+            nowUs = 5000 * 1000;
+            assert(exchange() == DeserializationError::Ok && strcmp(json["str"], "bye") == 0);
+            assert(app.requests.size() == 1);
+        }
+    }
+    // Inside the answer: a byte above 0x7F that is no part of a whole UTF-8 character is not
+    // part of the text. Between two tokens, and in the middle of the text.
+    const unsigned char high[] = {0x80, 0xE0, 0xF0, 0xE6, 0xFD, 0x9D, 0xC3, 0xFF};
+    const std::string good = BYE;
+    for (size_t h = 0; h < sizeof(high); h++) {
+        const std::string stray(1, (char) high[h]);
+        for (size_t at = 1; at < good.size(); at++) {
+            freshApp();
+            arrive(FakeApp::V2_APP, "HELLO", "1/1");
+            app.message = good;
+            app.damaged[1] = good.substr(0, at) + stray + good.substr(at);
+            nowUs = 5000 * 1000;
+            assert(exchange() == DeserializationError::Ok && strcmp(json["str"], "bye") == 0);
+            assert(app.requests.size() == 1);
+        }
+    }
+    // A text in UTF-8 arrives as it was written: two, three and four bytes to a character.
+    const char* const text = "caf\xC3\xA9 \xE2\x82\xAC \xF0\x9F\x98\x80!";
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.message = std::string("{\"type\":\"D\",\"str\":\"") + text + "\"}";
+    nowUs = 5000 * 1000;
+    assert(exchange() == DeserializationError::Ok && strcmp(json["str"], text) == 0);
+    // A line that makes such bytes without end does not keep a read going without end: after
+    // CHOOSER_MAX_NOISE of them the answer is read as it comes, is not JSON, and the sign asks again.
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.message = good;
+    app.damaged[1] = good.substr(0, 12) + std::string(CHOOSER_MAX_NOISE + 1, '\xFF') + good.substr(12);
+    nowUs = 5000 * 1000;
+    assert(exchange() == DeserializationError::Ok && strcmp(json["str"], "bye") == 0);
+    assert(app.requests.size() == 2);
+}
+
+static void whiteSpaceInFrontOfAMessageHasItsOwnTimeToo() {
+    // White space the app writes in front of the brace is a byte of what it writes for that
+    // message, like the white space behind the brace: the byte behind it has a byte's time.
+    // In an answer (700 ms before each; a byte of an answer is given a second):
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.message = BYE;
+    nowUs = 5000 * 1000;
+    assert(exchange() == DeserializationError::Ok);
+    const uint64_t sentUs = app.requests[0].tUs;
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.message = BYE;
+    app.dropped.insert(1); // (the answer is put on the line here)
+    nowUs = 5000 * 1000;
+    uint64_t end = sendOnWire(" ", sentUs + 3000 + BYTE_US);
+    end = sendOnWire("\n", end + 700000 + BYTE_US);
+    sendOnWire(BYE, end + 700000 + BYTE_US);
+    assert(exchange() == DeserializationError::Ok && strcmp(json["str"], "bye") == 0);
+    assert(app.requests.size() == 1);
+    // In a pushed message (70 ms before each; a byte of it is given 100):
+    for (int zeros = 0; zeros < 2; zeros++) {
+        freshApp();
+        app.at(6000, BYE, false);
+        arrive(FakeApp::V2_APP, FIRST, "3/9"); // (the push is placed by hand)
+        uint64_t handDown = raiseHand(2000 * 1000, zeros);
+        uint64_t at = sendOnWire("\n", handDown + 20000 + BYTE_US);
+        at = sendOnWire(" ", at + 70000 + BYTE_US);
+        uint64_t frameEnd = sendOnWire(chooserJson(SECOND, "4/9"), at + 70000 + BYTE_US);
+        app.message = chooserJson(SECOND, "4/9");
+        assert(showAsChooser(json["str"], json["flashy"]));
+        size_t change = firstStartOf(SECOND, "4/9");
+        assert(change < frames.size());
+        assert(ms(frames[change].tUs - frameEnd) < 20);
+        assert(app.requests.empty() || app.requests[0].tUs > frames[change].tUs + 1000 * 1000);
+    }
+}
+
+static void byteThatIsNoTextBetweenTwoTextsCostsNoMessage() {
+    // Between the texts of a message there is nothing but characters of text and white space.
+    // A byte that is neither (0x7F from two dips of the line, a control character) is nobody's
+    // there: the answer is read, and the app is asked ONCE.
+    const std::string good = BYE; // {"type":"D","str":"bye"}
+    const unsigned char strays[] = {0x7F, 0x01, 0x1B, 0x0B, 0x9D, 0xE6};
+    const size_t places[] = {1, 7, 8, 11, 12, 17, 18, good.size() - 1, good.size()}; // none of them inside a text
+    for (size_t s = 0; s < sizeof(strays); s++) {
+        for (size_t p = 0; p < sizeof(places) / sizeof(places[0]); p++) {
+            freshApp();
+            arrive(FakeApp::V2_APP, "HELLO", "1/1");
+            app.message = good;
+            app.damaged[1] = good.substr(0, places[p]) + std::string(1, (char) strays[s]) + good.substr(places[p]);
+            nowUs = 5000 * 1000;
+            assert(exchange() == DeserializationError::Ok && strcmp(json["str"], "bye") == 0);
+            assert(app.requests.size() == 1);
+        }
+    }
+    // Inside a text the sign's own characters stay: the heart (0x7F) and the narrow space (0x0B).
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.message = "{\"type\":\"D\",\"str\":\"a\x7F" "b\x0B" "c \\\" d\"}";
+    nowUs = 5000 * 1000;
+    assert(exchange() == DeserializationError::Ok && strcmp(json["str"], "a\x7F" "b\x0B" "c \" d") == 0);
+    // Two pulses in two byte times running: 0xE0 0x80 and 0xF0 0x80 look like the beginning of
+    // a UTF-8 character and are none. In a text and between two, alone and three in a row.
+    const char* const pairs[] = {"\xE0\x80", "\xF0\x80", "\xF0\x80\x80\x80", "\xE0\x80\xFF\x80", "\xC0\x80"};
+    for (size_t k = 0; k < 5; k++) {
+        for (size_t at = 1; at < good.size(); at++) {
+            freshApp();
+            arrive(FakeApp::V2_APP, "HELLO", "1/1");
+            app.message = good;
+            app.damaged[1] = good.substr(0, at) + pairs[k] + good.substr(at);
+            nowUs = 5000 * 1000;
+            assert(exchange() == DeserializationError::Ok && strcmp(json["str"], "bye") == 0);
+            assert(app.requests.size() == 1);
+        }
+    }
+}
+
+static void whiteSpaceWithoutEndDoesNotHoldTheSign() {
+    // White space gives the byte behind it a new wait, but not without end: an app that writes
+    // a space every 900 ms where its answer is due is given up on like any app that does not
+    // answer, after CHOOSER_MAX_WHITE_WAITS of them.
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.message = BYE;
+    nowUs = 5000 * 1000;
+    assert(exchange() == DeserializationError::Ok);
+    const uint64_t sentUs = app.requests[0].tUs;
+    freshApp();
+    arrive(FakeApp::V2_APP, "HELLO", "1/1");
+    app.silentFromUs = 0; // (it never answers: only the spaces below are on the line)
+    nowUs = 5000 * 1000;
+    uint64_t at = sentUs + 3000;
+    for (int i = 0; i < 60; i++) at = sendOnWire(" ", at + 900000 + BYTE_US);
+    assert(exchange() == DeserializationError::EmptyInput);
+    const double waitedMs = ms(nowUs - sentUs);
+    assert(waitedMs > 8 * 900 && waitedMs < (CHOOSER_MAX_WHITE_WAITS + 1) * 1000 + 50);
+    // The same in front of a pushed message (a space every 90 ms): the sign stops waiting and
+    // asks, as after any attention with no message behind it.
+    freshApp();
+    app.silentFromUs = 0;
+    app.at(6000, BYE, false);
+    arrive(FakeApp::V2_APP, FIRST, "3/9");
+    uint64_t handDown = raiseHand(2000 * 1000, false);
+    at = handDown + 20000;
+    for (int i = 0; i < 100; i++) at = sendOnWire(" ", at + 90000 + BYTE_US);
+    showAsChooser(json["str"], json["flashy"]);
+    assert(!app.requests.empty());
+    assert(ms(app.requests[0].tUs - handDown) < 150 + CHOOSER_MAX_WHITE_WAITS * 100 + 200);
+}
+
+static void lateTrailerInAScrollStepMakesItMillisecondsLate() {
+    // What the app writes behind an answer, 0.7 s late: by then the text is moving again. The
+    // look at the line that tells a late newline from the app's raised hand takes a few ms. If
+    // the newline falls into the end of a step, that step is that much late: no request, no
+    // restart, and never more than 13 ms. (The newline is moved through a whole step, so that
+    // it does fall into the end of one.)
+    const char* const trailers[] = {"\n", "\r\n\r\n\r\n\r\n\r\n\r\n\r\n"};
+    for (size_t t = 0; t < 2; t++) {
+        double worstMs = 0;
+        for (uint64_t gapUs = 700000; gapUs < 700000 + 37000; gapUs += 500) {
+            freshApp();
+            app.trailer = trailers[t];
+            app.trailerGapUs = gapUs;
+            app.trailerInnerGapUs = 0;
+            app.latencyUs = 9000;
+            app.at(11000, BYE, false);
+            assert(runChooser(FakeApp::V2_APP, FIRST, "3/9"));
+            assert(app.requests.size() == 3); // one read at each stand-still; the third brings the other message
+            for (size_t i = 0; i + 1 < frames.size(); i++) {
+                int pos = positionOf(frames[i], FIRST, "3/9"), next = positionOf(frames[i + 1], FIRST, "3/9");
+                assert(pos >= 0 && next == (pos + 1) % cycleOf(FIRST)); // the text never jumps or starts again
+                if (pos != 0) worstMs = std::max(worstMs, ms(frames[i + 1].tUs - frames[i].tUs));
+            }
+        }
+        assert(worstMs > CHOOSER_SCROLL_DELAY_MS + 1.5); // (a step was held up: the newline did fall into its end)
+        assert(worstMs < CHOOSER_SCROLL_DELAY_MS + CHOOSER_TRAILER_LATE_MS + CHOOSER_LINE_QUIET_MS + 3);
+    }
+}
+
 #if CHOOSER_DEBUG_PANEL_B
 static void attentionThatCrossesTheBenchLineCostsNoMessage() {
     // The bench build sends 27 characters in front of a request and is deaf for all of them.
@@ -2628,6 +3180,18 @@ static const Test tests[] = {
     TEST(leavingAndComingBackIsNotAskedIntoTheGuard),
     TEST(stallInsideTheRunOfZerosIsNotAskedIntoEither),
     TEST(answerThatCannotBeReadIsAskedForAgain),
+    TEST(lateNewlineBehindAMessageIsNotTheAppRaisingItsHand),
+    TEST(attentionBehindALateNewlineIsStillAttention),
+    TEST(pulseOnTheLineIsNoByteOfAMessageWhereverItStands),
+    TEST(replyThatBeginsInTheStopBitOfTheRequestIsRead),
+    TEST(everyByteOfAMessageHasItsOwnTime),
+    TEST(restOfAnAnswerIsGivenTheTimeAnAnswersBytesHave),
+    TEST(lateBytesBehindAMessageCloseTogether),
+    TEST(byteThatIsNobodysCostsNoMessage),
+    TEST(whiteSpaceInFrontOfAMessageHasItsOwnTimeToo),
+    TEST(byteThatIsNoTextBetweenTwoTextsCostsNoMessage),
+    TEST(whiteSpaceWithoutEndDoesNotHoldTheSign),
+    TEST(lateTrailerInAScrollStepMakesItMillisecondsLate),
 #if CHOOSER_DEBUG_PANEL_B
     TEST(attentionThatCrossesTheBenchLineCostsNoMessage),
 #endif

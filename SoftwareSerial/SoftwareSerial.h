@@ -57,6 +57,10 @@ private:
     volatile uint8_t *_transmitPortRegister;
     volatile uint8_t *_pcint_maskreg;
     uint8_t _pcint_maskvalue;
+    // (LED_Marquee) the receive pin's group in PCIFR (0 until begin() has found it), and what
+    // write() saw there when its last data bit had gone out
+    uint8_t _pcint_flagvalue;
+    bool _rx_changed_during_write;
 
     // Expressed as 4-cycle delays (must never be 0!)
     uint16_t _rx_delay_centering;
@@ -111,6 +115,12 @@ public:
         if (ret) _buffer_overflow = false;
         return ret;
     }
+
+    // (LED_Marquee) True if the receive pin changed while the last write() sent its start bit
+    // and its data bits, when interrupts were off and nothing could be received: something of
+    // the other side's began then, and its start was missed. A change in the stop bit or later
+    // is not reported: reception is on again from the beginning of the stop bit.
+    bool rxChangedDuringWrite() { return _rx_changed_during_write; }
 
     int peek();
 

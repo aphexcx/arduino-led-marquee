@@ -238,6 +238,8 @@ ISR(PCINT3_vect, ISR_ALIASOF(PCINT0_vect));
 // Constructor
 //
 SoftwareSerial::SoftwareSerial(uint8_t receivePin, uint8_t transmitPin, bool inverse_logic /* = false */) :
+        _pcint_flagvalue(0),
+        _rx_changed_during_write(false),
         _rx_delay_centering(0),
         _rx_delay_intrabit(0),
         _rx_delay_stopbit(0),
@@ -348,6 +350,8 @@ void SoftwareSerial::begin(long speed) {
         // can be used inside the ISR without costing too much time.
         _pcint_maskreg = digitalPinToPCMSK(_receivePin);
         _pcint_maskvalue = _BV(digitalPinToPCMSKbit(_receivePin));
+        // (LED_Marquee) the same pin's group in the pin change flag register, for write()
+        _pcint_flagvalue = _BV(digitalPinToPCICRbit(_receivePin));
 
         tunedDelay(_tx_delay); // if we were low this establishes the end
     }
@@ -440,6 +444,14 @@ size_t SoftwareSerial::write(uint8_t b) {
         *reg &= inv_mask;
     else
         *reg |= reg_mask;
+
+    // (LED_Marquee) The stop bit has begun. Did the receive pin change while the start bit and
+    // the data bits went out, with interrupts off? Its pin change flag says so. It is looked at
+    // here and not after the stop bit: the other side has the whole byte now and may begin its
+    // answer before the stop bit is over, and that is a byte to receive, not a change to report.
+    // (Only while this object listens: the flag is set by the pins of the group that are in the
+    // pin change mask.)
+    _rx_changed_during_write = (PCIFR & _pcint_flagvalue) != 0;
 
     SREG = oldSREG; // turn interrupts back on
     tunedDelay(_tx_delay);
