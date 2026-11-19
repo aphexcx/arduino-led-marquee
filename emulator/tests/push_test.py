@@ -197,6 +197,18 @@ class Dump:
         return found
 
 
+def panel_numbers(font, f):
+    """The four numbers the bench build draws on panel B, None if that is not what is there."""
+    digits = {tuple(font[str(d)]): str(d) for d in range(10)}
+    out = []
+    for col, n in ((60, 3), (78, 3), (96, 2), (108, 2)):
+        text = "".join(digits.get(tuple(f.mask[col + 6 * k:col + 6 * k + 5]), "?") for k in range(n))
+        if "?" in text:
+            return None
+        out.append(int(text))
+    return out
+
+
 def analyse(dump, font, expect=None, bench=False):
     """expect: for the scripted run, what must be found (counts of pushes and so on).
     bench: the caller says this is the bench image (CHOOSER_DEBUG_PANEL_B). It is not read
@@ -221,17 +233,8 @@ def analyse(dump, font, expect=None, bench=False):
     else:
         check(not dump.said, "this is the plain image: it sent no line of numbers to the app "
                              "(%d)" % len(dump.said))
-    digits = {tuple(font[str(d)]): str(d) for d in range(10)}
-
     def panel_b_numbers(f):
-        """The four numbers the bench build draws on panel B, None if that is not what is there."""
-        out = []
-        for col, n in ((60, 3), (78, 3), (96, 2), (108, 2)):
-            text = "".join(digits.get(tuple(f.mask[col + 6 * k:col + 6 * k + 5]), "?") for k in range(n))
-            if "?" in text:
-                return None
-            out.append(int(text))
-        return out
+        return panel_numbers(font, f)
 
     seen = []                      # (frame index, Message, position) for chooser frames
     for i, f in enumerate(dump.frames):
@@ -866,9 +869,21 @@ def stuck_panel(font_path, bench_dump, work):
           "the same in every frame but the last before the line: fails, on exactly that (%s)"
           % [t[:60] for t in found])
     n, found = copy_of("stuck-counter", False, True)
-    check(n > 10 and len(found) == 1 and "on the wire: attention number" in found[0],
+    # In that copy panel B shows what it showed before the break: the numbers of the attention
+    # before. Its count is the line's (one fewer). Its two times are that attention's own; when
+    # they are also this one's, panel and line agree and only the wire tells; when a counted
+    # millisecond differs, the panel check speaks as well, behind the wire's.
+    before = [f for f in dump.frames if began(f) <= b["t"] + 0.001]
+    old = panel_numbers(font, before[-1]) if before else None
+    stale = [numbers[1], numbers[2], numbers[3] - 1, numbers[4]]
+    also = [] if old == stale else ["panel B tells of the same break"]
+    check(n > 10 and len(found) == 1 + len(also) and "on the wire: attention number" in found[0]
+          and all(text in found[1] for text in also),
           "panel B and the line both one attention behind the wire: fails, on the line's "
-          "count (%s)" % [t[:40] for t in found])
+          "count%s (%s)"
+          % ("" if not also else " (and, behind it, on panel B: the attention before measured "
+             "%s where this one measured %s, so that panel does not show this line's times)"
+             % (old, stale), [t[:40] for t in found]))
 
 
 def main():
