@@ -11,7 +11,8 @@
 #                   of its checks on frames in memory (tests/fixes_selftest.py)
 #   make test-leftover only the test that a track id and the icons leave nothing of the picture before
 #   make test-game  only the jump game's test: its pictures, answers that are no frame, its pace
-#                   (GAME_PORT=n moves its five TCP ports)
+#                   and game_app.py without its emulator and ended in every way (GAME_PORT=n
+#                   moves their six TCP ports)
 #   make clean      delete build/ (third_party/ is kept)
 #
 # Everything is written under build/ and third_party/, both gitignored.
@@ -145,6 +146,7 @@ test-leftover: all
 
 test-game: all
 	python3 tests/game_test.py $(EMU) $(FW_HEX) .. $(BUILD)/tests/game $(GAME_PORT)
+	python3 tests/game_app_test.py $(EMU) $(FW_HEX) .. $(if $(GAME_PORT),$(shell expr $(GAME_PORT) + 5))
 
 clean:
 	cmake -E remove_directory $(BUILD)

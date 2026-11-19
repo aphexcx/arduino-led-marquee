@@ -8,8 +8,9 @@
   misses    ONE table of answers that are not a good frame (absent, torn, no JSON, an object that
             is no message, a frame the sign cannot read, late). For every row: nothing is drawn and
             the picture before stays, the sign says nothing to the app but its request, it asks
-            again when the row says, and the frames after it are drawn. Then no answers at all:
-            the sign leaves the game after GAME_LEAVE_MS and asks the ordinary way.
+            again when the row says, and the frames after it are drawn. Then no answers at all,
+            and an answer that never ends: the sign leaves the game after GAME_LEAVE_MS and asks
+            the ordinary way.
   pace      a scripted game at three reaction times of the app: frames a second, and the time
             from the app having a button press to the runner moving on the LEDs.
 
@@ -41,8 +42,11 @@ LATENCY_MS = 5                          # sign-emu's reply latency unless a run 
 SHAPES = {"a": [1, 2, 1], "b": [3, 3], "c": [1, 2, 3, 2, 1]}
 
 
-def frame_bytes(text):
-    return json.dumps({"str": text, "type": "G"}, separators=(",", ":")).encode("ascii")
+def frame_bytes(text, keys=2):
+    """The frame as the app sends it. With `keys` above 2: with more keys, which the sign has no use for."""
+    message = {"str": text, "type": "G"}
+    message.update(("k%d" % n, n) for n in range(keys - 2))
+    return json.dumps(message, separators=(",", ":")).encode("ascii")
 
 
 # ---- what a frame's text draws -----------------------------------------------------------------
@@ -57,7 +61,7 @@ def picture(env, text):
     if any(kinds.count(k) > 1 for k in "rpe") or sum(k in "abc" for k in kinds) > 4:
         return None
     rise, pose = int(m.group(1)), int(m.group(2))
-    runner_col, colours, effect = 2, "12", 0
+    runner_col, colours, effect = 2, "62", 0
     for i in items:
         if i[0] == "r":
             runner_col = int(i[1:])
@@ -82,7 +86,8 @@ def picture(env, text):
                     colour[c] = int(colours[1])
     shift = 0
     if effect == 2:
-        lit = [set(range(1, 8)) - rows for rows in lit]
+        # the colours first, then the negative: what colour 0 leaves dark is lit like all that is dark
+        lit = [set(range(1, 8)) - (rows if colour[c] else set()) for c, rows in enumerate(lit)]
         colour = [int(colours[1])] * PANEL
         shift = env["flash_shift"]
     return [(sum(1 << r for r in rows), colour[c], shift) for c, rows in enumerate(lit)], effect
@@ -224,6 +229,7 @@ PICTURES = (
     + ["00a4", "20c10", "70b2", "00b14a1"]                                           # an obstacle under the runner
     + ["00p34a20", "00p56c20", "00p71b20", "00p11a8", "00p07a20", "00p70a8", "00p00a8", "10p22"]    # colours
     + ["00e0a20", "30e2", "00e2a20b40", "20e2p35c12", "00e2p10", "71e2r-99"]        # the flash
+    + ["00p02e2", "20p02e2a20", "00p02e2b8"]         # ... of a runner in colour 0 (the app's hit show): no hole
     + ["00e1", "00e1", "30e1a20b40", "30e1a20b40", "00e1p34r20", "00e1"]            # the sparkle
     + ["00e0p21r5a30", "10b7p45e0r30", "71a-99b-99c-99a-99r-99p77e2"]               # any order; the longest
 )
@@ -269,6 +275,8 @@ def miss_table(env):
         ("an empty object", b'{}'),
         ("a frame without a text", b'{"type":"G"}'),
         ("a type that is no text", b'{"str":"30a17","type":7}'),
+        ("an empty type", b'{"str":"30a17","type":""}'),
+        ("a frame with nine keys", frame_bytes("30a17", 9)),
         ("a frame with no rise", frame_bytes("")),
         ("a rise of 8", frame_bytes("80a17")),
         ("a shape the sign does not have", frame_bytes("30d17")),
@@ -292,7 +300,7 @@ def misses(env, name, port):
     answers, at = [frame_bytes(good[0])], []
     for n, (_, data, _, _) in enumerate(rows):
         at.append(len(answers))
-        answers += [data, frame_bytes(good[n + 1])]
+        answers += [data, frame_bytes(good[n + 1], 8)]      # (eight keys are the most a frame may have)
     late_at = len(answers)
     after_late = good[len(rows) + 1:len(rows) + 7]
     answers += [b"@%d\n" % late_ms + frame_bytes(after_late[0])] + [frame_bytes(t) for t in after_late[1:]]
@@ -356,6 +364,20 @@ def misses(env, name, port):
           "then it asks the ordinary way: it waits a second for an answer and shows stars (%s ms, %d frames)"
           % ("%.0f" % gap if gap is not None else "?", len(stars)))
     probe_checks(env, log, run, ordinary + 1, probe_message)
+
+    # An answer that never ends: bytes that keep coming and never make an object. The sign stops
+    # reading GAME_LEAVE_MS after the last good frame, whatever arrives, and asks the ordinary way.
+    # (A run of its own: what the ordinary request then reads is the rest of these bytes.)
+    endless = b'{"str":"30a17",' + b" " * int((env["leave"] + 500) / 1000 / BYTE_S)
+    run = Run(env, name + "_endless", [frame_bytes(good[0]), endless], port, 30)
+    drawn_at = run.between(0)[-1].t if drawn(0, good[0]) else None
+    left_after = (run.requests[2] - drawn_at) * 1000 if drawn_at is not None and run.asked(2) else None
+    check(log, left_after is not None and env["leave"] - 2.5 <= left_after <= env["leave"] + 6
+          and not run.between(1) and run.said == "",
+          "an answer that never ends (blanks for %.2f s): the last picture stays, nothing is said, and %s ms after "
+          "the last good frame (%.0f to %d) the sign reads no more of it and asks the ordinary way"
+          % (len(endless) * BYTE_S, "%.1f" % left_after if left_after is not None else "?",
+             env["leave"] - 2.5, env["leave"] + 6))
     return log
 
 
@@ -380,6 +402,7 @@ def pace(env, name, port, latency):
     wrong = [t for i, t in enumerate(script) if len(run.between(i)) != 1
              or frame_is(env, run.between(i)[0], picture(env, t)[0]) is not None]
     check(log, not wrong and run.said == "", "every frame is drawn once, as its text reads (%d are not)" % len(wrong))
+    check(log, run.asked(len(script)), "after the last frame the sign asks for the next one")
     if wrong or not run.asked(len(script)):
         return log
     shown = [run.between(i)[0].t for i in range(len(script))]

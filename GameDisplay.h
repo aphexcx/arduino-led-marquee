@@ -7,8 +7,9 @@
 // A frame is the whole picture: all 120 columns are sent, so nothing is cleared before it and
 // nothing of the picture before it stays.
 //
-// WHEN AN ANSWER IS NOT A GOOD FRAME (it does not come, it stops half way, it is no JSON, it is an
-// object without a type, it is a game frame the sign cannot read) there is one rule for all of it:
+// WHEN AN ANSWER IS NOT A GOOD FRAME (it does not come, it stops half way, it never ends, it is no
+// JSON, it is an object without a type or with an empty one, it has more than GAME_MAX_KEYS keys,
+// it is a game frame the sign cannot read) there is one rule for all of it:
 //   - nothing is drawn and nothing is said: the last good picture stays on the LEDs, no error text
 //     goes to the LEDs or to the app
 //   - the sign waits until the line has been silent for GAME_QUIET_MS and asks again. (Asking in
@@ -17,11 +18,14 @@
 //     answer that was on its way goes by in it: after an answer that came too late, the app and
 //     the sign are in step again from the next bad answer on.)
 //   - when no good frame has come for GAME_LEAVE_MS the game is over for the sign: loop() asks the
-//     ordinary way again, with the ordinary wait, the stars and the error text.
+//     ordinary way again, with the ordinary wait, the stars and the error text. That is the one
+//     bound on everything the sign waits for in a game: no byte is read from the line after it
+//     (AppSerial::read() in the sketch), whatever is still arriving. So an answer that never
+//     ends (bytes that keep coming and never make an object) ends there, like one that stops.
 //
 // This file is part of the sketch: LED_Marquee.ino includes it after everything it uses (the GAME_*
 // settings at the top of the sketch, MSGTYPE_GAME, the Dreamstate icon, sendColumnRGB, show,
-// startSerial, stopSerial, softSerial, json).
+// startSerial, stopSerial, softSerial and its AppSerial, json).
 //
 
 #ifndef LED_MARQUEE_GAMEDISPLAY_H
@@ -49,6 +53,10 @@ static const uint8_t gamePalette[GAME_COLOURS * 3] PROGMEM = {
         0x00, 0x00, 0xFF,
         0xFF, 0x00, 0x7F,
 };
+
+// A frame has two keys. An answer with more than this many is not a good frame (the document has
+// room for eight; a ninth with a short name would fit beside them in its room for the text).
+#define GAME_MAX_KEYS 8
 
 // The flash's picture lights nearly every LED of the sign: its colour is shifted right by this
 #define GAME_FLASH_SHIFT 3
@@ -88,27 +96,34 @@ static void gameDraw(const GamePicture& pic) {
 // for loop() to show, false when no good frame came for GAME_LEAVE_MS (loop() then asks the
 // ordinary way).
 bool showAsGame() {
-    unsigned long goodMs = millis(); // when the last good frame was drawn (or the game was entered)
-    bool whole = true;               // `json` holds a whole answer: loop()'s read brought the first
+    bool whole = true; // `json` holds a whole answer: loop()'s read brought the first
+    // When the last good frame was drawn (or the game was entered). Nothing is read from the line
+    // once GAME_LEAVE_MS have gone by since then.
+    softSerial.readSinceMs = millis();
+    softSerial.readForMs = GAME_LEAVE_MS;
 
     for (;;) {
         const char* type = 0;
         if (whole) {
             type = json["type"];
         }
+        if (type && !type[0]) {
+            type = 0; // an empty type is no type
+        }
         if (type && type[0] != MSGTYPE_GAME) {
             stopSerial();
+            softSerial.readForMs = 0;
             return true;
         }
 
         GamePicture pic;
-        const bool good = type && gameRender(json["str"], DREAMSTATE.data, pic);
+        const bool good = type && json.size() <= GAME_MAX_KEYS && gameRender(json["str"], DREAMSTATE.data, pic);
         if (!good) {
             // Whatever is still arriving goes by, until the line is silent. (Not for longer than
             // the game may go without a frame: a line that never falls silent ends the game.)
             char gone;
             softSerial.setTimeout(GAME_QUIET_MS);
-            while (softSerial.readBytes(&gone, 1) && millis() - goodMs < GAME_LEAVE_MS) {
+            while (softSerial.readBytes(&gone, 1)) {
             }
         }
         stopSerial(); // nothing is heard while a frame goes out (interrupts are off for it)
@@ -118,9 +133,10 @@ bool showAsGame() {
                 gameSparkle(pic);
             }
             gameDraw(pic);
-            goodMs = millis();
-        } else if (millis() - goodMs >= GAME_LEAVE_MS) {
+            softSerial.readSinceMs = millis();
+        } else if (millis() - softSerial.readSinceMs >= GAME_LEAVE_MS) {
             softSerial.setTimeout(1000); // the Stream default, for the normal '~' read
+            softSerial.readForMs = 0;
             return false;
         }
 

@@ -10,7 +10,7 @@
 //   items, in any order:
 //     a<col> b<col> c<col>   an obstacle of that shape with its left column there; at most 4
 //     r<col>                 the runner's left column (2 without it); at most once
-//     p<runner><obstacles>   two colour digits, 0 to 7 (p12 without it: white, red); at most once
+//     p<runner><obstacles>   two colour digits, 0 to 7 (p62 without it: blue, red); at most once
 //     e<digit>               0 nothing, 1 sparkle, 2 flash; at most once
 //   <col> is -99 to 99: an optional '-' and one or two digits. Column 0 is a face's left edge; what
 //   is left of it or right of column 59 is cut off.
@@ -32,6 +32,8 @@
 #define GAME_COLS 60          // the columns of a face
 #define GAME_RUNNER_COLS 13   // the runner's width: the Dreamstate icon of Icons.h
 #define GAME_RUNNER_COL 2     // its left column when the frame does not say
+#define GAME_RUNNER_COLOUR 6      // the colours when the frame does not say: blue,
+#define GAME_OBSTACLE_COLOUR 2    // red
 #define GAME_MAX_OBSTACLES 4
 #define GAME_COLOURS 8        // colour digits 0 to 7 (the values are in GameDisplay.h)
 
@@ -98,8 +100,8 @@ static bool gameRender(const char* s, const uint8_t* runner, GamePicture& pic) {
     s += 2;
 
     int8_t runnerCol = GAME_RUNNER_COL;
-    uint8_t runnerColour = 1;
-    uint8_t obstacleColour = 2;
+    uint8_t runnerColour = GAME_RUNNER_COLOUR;
+    uint8_t obstacleColour = GAME_OBSTACLE_COLOUR;
     uint8_t seen = 0;         // which of r, p, e have come: each at most once
     uint8_t obstacles = 0;
     uint8_t shape[GAME_MAX_OBSTACLES];
@@ -152,7 +154,10 @@ static bool gameRender(const char* s, const uint8_t* runner, GamePicture& pic) {
     }
     if (pic.effect == GAME_EFFECT_FLASH) {
         for (uint8_t c = 0; c < GAME_COLS; c++) {
-            pic.rows[c] = (uint8_t) ~pic.rows[c] & 0xFE; // (bit 0 is no row)
+            // The colours first, then the negative: what colour 0 leaves dark is not in the
+            // picture, and is lit in its negative like every other dark LED.
+            const uint8_t lit = pic.colour[c] ? pic.rows[c] : 0;
+            pic.rows[c] = (uint8_t) ~lit & 0xFE; // (bit 0 is no row)
             pic.colour[c] = obstacleColour;
         }
     }

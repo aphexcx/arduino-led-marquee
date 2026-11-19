@@ -69,6 +69,7 @@ static void expected(const Case& k, uint8_t rows[GAME_COLS], uint8_t colour[GAME
             }
         }
         if (k.effect == GAME_EFFECT_FLASH) {
+            if (!colour[c]) rows[c] = 0; // colour 0 draws nothing: the negative has no hole there
             rows[c] = ~rows[c] & 0xFE;
             colour[c] = k.obstacleColour;
         }
@@ -76,14 +77,14 @@ static void expected(const Case& k, uint8_t rows[GAME_COLS], uint8_t colour[GAME
 }
 
 // The case as a frame's text. `order` shuffles the items; without `spelled`, what is as the sign
-// assumes it (runner's column 2, colours 12, effect 0) is left out.
+// assumes it (runner's column 2, colours 62, effect 0) is left out.
 static std::string text(const Case& k, unsigned order, bool spelled) {
     std::vector<std::string> items;
     for (const Thing& t : k.obstacles) {
         items.push_back(std::string(1, t.kind) + std::to_string(t.col));
     }
     if (spelled || k.runnerCol != GAME_RUNNER_COL) items.push_back("r" + std::to_string(k.runnerCol));
-    if (spelled || k.runnerColour != 1 || k.obstacleColour != 2) {
+    if (spelled || k.runnerColour != GAME_RUNNER_COLOUR || k.obstacleColour != GAME_OBSTACLE_COLOUR) {
         items.push_back("p" + std::to_string(k.runnerColour) + std::to_string(k.obstacleColour));
     }
     if (spelled || k.effect) items.push_back("e" + std::to_string(k.effect));
@@ -140,7 +141,7 @@ int main() {
     for (int rise = 0; rise <= 7; rise++) {
         for (int pose = 0; pose <= 1; pose++) {
             for (int col = -99; col <= 99; col++) {
-                drawnAsWorkedOut(Case{rise, pose, col, 1, 2, 0, {{'b', 30}}});
+                drawnAsWorkedOut(Case{rise, pose, col, 6, 2, 0, {{'b', 30}}}); // (no 'p': blue, red)
             }
         }
     }

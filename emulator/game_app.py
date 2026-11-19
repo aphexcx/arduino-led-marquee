@@ -280,6 +280,14 @@ def now_ms():
     return int(time.monotonic() * 1000)
 
 
+class Ended(Exception):
+    """The window was closed (SIGHUP) or this program was told to end (SIGTERM)."""
+
+
+def on_signal(number, frame):
+    raise Ended("ended by signal %d" % number)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--emu", default=os.path.join(HERE, "build", "sign-emu"))
@@ -307,25 +315,38 @@ def main():
 
     master, slave = pty.openpty()
     termios.tcsetwinsize(slave, (size.lines, size.columns)) if hasattr(termios, "tcsetwinsize") else None
-    emu = subprocess.Popen([args.emu, "--speed", "1", "--port", str(port), "--wait-client", "20"]
-                           + args.emu_options + [args.hex], stdin=subprocess.DEVNULL, stdout=slave, stderr=slave,
-                           start_new_session=True)
-    os.close(slave)
     keys = sys.stdin.fileno()
     saved = termios.tcgetattr(keys)
     out = sys.stdout.buffer
     sign = GameOnTheSign()
-    sock, pending, report = None, b"", b""
+    emu, sock, pending, report, status = None, None, b"", b"", 0
+    # The emulator is ended on every way out of here: q, the window closed, a signal, an error (the
+    # `finally` below). And should this program be killed outright, the emulator ends by itself
+    # when its app hangs up (--until-disconnect).
+    for number in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(number, on_signal)
     try:
+        emu = subprocess.Popen([args.emu, "--speed", "1", "--port", str(port), "--wait-client", "20",
+                                "--until-disconnect"] + args.emu_options + [args.hex],
+                               stdin=subprocess.DEVNULL, stdout=slave, stderr=slave, start_new_session=True)
+        os.close(slave)
         tty.setcbreak(keys)
+        # First the emulator's own word that it listens on the port, then the connection: whoever
+        # else listens there (another sign-emu) would take the connection, and lose its own app.
+        listens = b"sign-emu: waiting for an app on tcp 127.0.0.1:%d " % port
         deadline = time.monotonic() + 20
-        while sock is None:
+        while listens not in pending:
             try:
-                sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+                data = os.read(master, 65536) if select.select([master], [], [], 0.05)[0] else None
             except OSError:
-                if time.monotonic() > deadline or emu.poll() is not None:
-                    raise RuntimeError("cannot connect to sign-emu on port %d" % port)
-                time.sleep(0.05)
+                data = b""
+            if data == b"" or (data is None and emu.poll() is not None) or time.monotonic() > deadline:
+                raise RuntimeError("sign-emu did not come to listen on port %d" % port)
+            pending += data or b""
+        try:
+            sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+        except OSError as e:
+            raise RuntimeError("cannot connect to sign-emu on port %d: %s" % (port, e))
         sock.settimeout(None)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         if args.start:
@@ -337,7 +358,7 @@ def main():
             now = now_ms()
             if keys in ready:
                 data = os.read(keys, 64)
-                if b"q" in data or b"Q" in data or b"\x03" in data:
+                if not data or b"q" in data or b"Q" in data or b"\x03" in data:     # (no data: the window is gone)
                     break
                 if b" " in data or b"\x1b[A" in data or b"\x1bOA" in data:
                     sign.jump(now)
@@ -381,32 +402,52 @@ def main():
                     screen = screen.replace(HOME, HOME + lines, 1).replace(b"  Ctrl-C to quit", b"  q to quit")
                     out.write(screen + END)
                     out.flush()
-    except RuntimeError as e:
-        report = ("game_app: %s\n" % e).encode()
+    except (RuntimeError, Ended, OSError) as e:      # (OSError: the window is gone, or the emulator's file)
+        report, status = ("game_app: %s\n" % e).encode(), 1
     finally:
-        termios.tcsetattr(keys, termios.TCSADRAIN, saved)
-        if emu.poll() is None:
-            emu.send_signal(signal.SIGINT)        # it leaves its screen and says what it ran
-        end = time.monotonic() + 3
-        while time.monotonic() < end:
-            if not select.select([master], [], [], 0.2)[0]:
-                if emu.poll() is not None:
-                    break
-                continue
+        for number in (signal.SIGHUP, signal.SIGTERM):
+            signal.signal(number, signal.SIG_IGN)       # nothing ends the ending
+        try:
             try:
-                data = os.read(master, 65536)
-            except OSError:
-                break
-            if not data:
-                break
-            pending += data
-        if emu.poll() is None:
-            emu.kill()
+                termios.tcsetattr(keys, termios.TCSADRAIN, saved)
+            except (OSError, termios.error):
+                pass                                    # the window is gone
+            if emu is not None:
+                try:
+                    emu.wait(0.3)                       # (it has just closed its screen: is it ending by itself?)
+                except subprocess.TimeoutExpired:
+                    pass
+                if emu.poll() is None:
+                    emu.send_signal(signal.SIGINT)      # it leaves its screen and says what it ran
+                elif emu.returncode != 0:
+                    report += b"game_app: sign-emu ended with status %d\n" % emu.returncode
+                    status = 1
+                end = time.monotonic() + 3
+                while time.monotonic() < end:
+                    if not select.select([master], [], [], 0.2)[0]:
+                        if emu.poll() is not None:
+                            break
+                        continue
+                    try:
+                        data = os.read(master, 65536)
+                    except OSError:
+                        break
+                    if not data:
+                        break
+                    pending += data
+        finally:
+            if emu is not None and emu.poll() is None:
+                emu.kill()
+                emu.wait()
+            if sock is not None:
+                sock.close()
+    try:
         out.write(pending.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n") + report)
         out.flush()
-        if sock is not None:
-            sock.close()
-    print("game_app: best score of this sitting: %d" % sign.best)
+        print("game_app: best score of this sitting: %d" % sign.best)
+    except OSError:
+        pass                                            # the window is gone
+    sys.exit(status)         # (not 0 when the emulator could not be reached or ended with an error, or on a signal)
 
 
 if __name__ == "__main__":

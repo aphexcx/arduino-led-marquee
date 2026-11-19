@@ -52,6 +52,10 @@ emulator/game_app.py               # g or Enter starts, SPACE or the up arrow ju
 itself: a stand-in with the app's rules and shows, by this computer's clock,
 so the emulator runs at real-time speed. `--auto 4` presses for the first four
 obstacles by itself; options after `--` go to the emulator (`--record game.gif`).
+It connects only when its own emulator has said that it listens, and ends with
+a status that is not 0 when that never comes or the emulator ends with an error.
+However it ends (`q`, the window closed, a signal, an error, killed outright),
+its emulator ends too.
 
 ## What you see
 

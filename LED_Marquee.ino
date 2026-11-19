@@ -23,6 +23,8 @@
 
 // Used to receive data on a virtual RX pin instead of the usual pin 0
 #include "SoftwareSerial/SoftwareSerial.h"
+// The line to the app (softSerial below): SoftwareSerial with an end to reading, for the jump game
+#include "AppSerial.h"
 
 // Pin 13 has an LED connected on most Arduino boards.
 // give it a name:
@@ -65,7 +67,7 @@ ISR (PCINT1_vect) {
 
 #define rxPin 10
 #define txPin 11
-SoftwareSerial softSerial(rxPin, txPin); // RX, TX
+AppSerial softSerial(rxPin, txPin); // RX, TX
 
 const char ASOT[]
 PROGMEM = "                    ";
