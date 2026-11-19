@@ -5,6 +5,8 @@
 #ifndef LED_MARQUEE_FONTS_H
 #define LED_MARQUEE_FONTS_H
 
+#include "TextWindow.h"
+
 // This nice 5x7 font from here...
 // http://sunge.awardspace.com/glcd-sd/node4.html
 
@@ -27,9 +29,18 @@
 
 
 struct Font {
-    int width;
-    const uint* data;
+    int width;        // lit columns of an ordinary character
+    const uint* data; // `width` bytes per character, from ' ' (0x20) to the heart (0x7F)
+    uint heartWidth;  // lit columns of the heart: the last entry of the table may be wider than the rest
 };
+
+// The font's widths, for the column arithmetic in TextWindow.h
+static inline TextMetrics fontMetrics(const Font& font) {
+    TextMetrics m;
+    m.glyphCols = (uint8_t) font.width;
+    m.heartCols = font.heartWidth;
+    return m;
+}
 
 const uint FontStd5x7[]
 PROGMEM = {
@@ -138,7 +149,7 @@ PROGMEM = {
         0b01110000
 };
 
-const Font fontStd = {FONTSTD_WIDTH, FontStd5x7};
+const Font fontStd = {FONTSTD_WIDTH, FontStd5x7, HEART_WIDTH};
 
 //0b01110000,
 //0b11111100,
@@ -269,8 +280,25 @@ PROGMEM = {
         0b00000000,// |
         0x00, 0xfe, 0xfe, 0x38, 0x00, 0x00, 0x00, 0x00,// }
         0x00, 0xfe, 0x02, 0xfe, 0x00, 0x00, 0x00, 0x00,// ~
+        // HEART (0x7F): 7 lit columns and the blank one, like the other characters
+        //   .##.##.
+        //   #######
+        //   #######
+        //   #######
+        //   .#####.
+        //   ..###..
+        //   ...#...
+        0b01110000,
+        0b11111000,
+        0b11111100,
+        0b01111110,
+        0b11111100,
+        0b11111000,
+        0b01110000,
+        0b00000000,
 };
 
-const Font fontChonk = {FONTCHONK_WIDTH, FontChonk};
+// The chonky heart is as wide as every other chonky character
+const Font fontChonk = {FONTCHONK_WIDTH, FontChonk, FONTCHONK_WIDTH};
 
 #endif //LED_MARQUEE_FONTS_H
