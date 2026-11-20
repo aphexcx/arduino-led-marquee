@@ -28,6 +28,13 @@
 #      negative number of stars, icons it does not have (tests/fixes_test.py)
 #   8. nothing of the picture before a track id or the icons stays lit beside
 #      them (tests/leftover_test.py)
+#   9. the jump game: every frame of a list is drawn as its text reads, answers
+#      that are not a good frame leave the picture and are asked for again, and
+#      a scripted game's frames a second (tests/game_test.py); and game_app.py
+#      and that test's run leave another emulator on their port alone, and
+#      game_app.py ends with an error when its emulator is not there for it or
+#      fails as it ends, and leaves no emulator running however it is ended
+#      (tests/game_app_test.py)
 #   Before 7: the checks of 7 and 8 themselves, on frames in memory: right
 #   frames pass, and a message with one part missing, cut short, dark, moved,
 #   out of order, a bit too long or in another colour does not
@@ -36,7 +43,8 @@
 # The TCP ports can be moved with SIGN_EMU_TEST_PORT (default 14417; the link
 # tests use the eleven after it, the push tests the four after those, the ads
 # test three from the sixteenth, the test of 7 seven from the twenty-fourth, the
-# test of 8 two from the thirty-first) so two lanes can run the tests at once.
+# test of 8 two from the thirty-first, the tests of 9 six from the fortieth) so
+# two lanes can run the tests at once.
 set -eu
 cd "$(dirname "$0")"
 
@@ -71,19 +79,17 @@ echo "== smoke run: boot, startup animation, then $messages messages from $PLAYL
 # (Not after a number of requests: firmware that polls spends requests on its
 # polls, and the last message would never be served.) --duration is only a
 # safety net.
-build/sign-emu --headless --port "$PORT" --wait-client 30 \
+# (sign_emu.py: the app is started when THIS emulator listens on the port, and only this emulator
+# is ended. Its status is the emulator's, or 90 when the app could not run.)
+status=0
+python3 sign_emu.py "$PORT" "$OUT/sign-emu.log" build/sign-emu --headless --port "$PORT" --wait-client 30 \
     --until-disconnect --duration 300 \
-    --record "$OUT/all_types.gif" --frames "$OUT/all_types.jsonl" \
-    "$HEX" 2> "$OUT/sign-emu.log" &
-emu=$!
-if ! ./fake_app.py --quiet --once --port "$PORT" --connect-timeout 30 "$PLAYLIST"; then
-    kill "$emu" 2>/dev/null || true
-    cat "$OUT/sign-emu.log"
+    --record "$OUT/all_types.gif" --frames "$OUT/all_types.jsonl" "$HEX" \
+    -- ./fake_app.py --quiet --once --port "$PORT" --connect-timeout 30 "$PLAYLIST" || status=$?
+if [ "$status" -eq 90 ]; then
     echo "FAILED: the fake app could not run"
     exit 1
 fi
-status=0
-wait "$emu" || status=$?
 cat "$OUT/sign-emu.log"
 if [ "$status" -ne 0 ]; then
     echo "FAILED: sign-emu exited with status $status"
@@ -141,18 +147,16 @@ if [ -n "$contract3" ]; then
     # The fake app counts this computer's seconds, so the run is paced. Request 1
     # brings the first chooser message, request 2 is the sign asking after the
     # app left chooser mode, request 3 ends the run.
-    build/sign-emu --headless --speed 1 --link-directives --port $((PORT + 13)) --wait-client 30 \
-        --until-requests 3 --duration 120 --frames "$OUT/chooser_push.jsonl" \
-        "$HEX" 2> "$OUT/chooser_push.log" &
-    emu=$!
-    if ! ./fake_app.py --quiet --contract 3 --port $((PORT + 13)) --connect-timeout 30 \
-            playlists/chooser_push.jsonl; then
-        kill "$emu" 2>/dev/null || true
+    status=0
+    python3 sign_emu.py $((PORT + 13)) "$OUT/chooser_push.log" build/sign-emu --headless --speed 1 \
+        --link-directives --port $((PORT + 13)) --wait-client 30 \
+        --until-requests 3 --duration 120 --frames "$OUT/chooser_push.jsonl" "$HEX" \
+        -- ./fake_app.py --quiet --contract 3 --port $((PORT + 13)) --connect-timeout 30 \
+            playlists/chooser_push.jsonl || status=$?
+    if [ "$status" -eq 90 ]; then
         echo "FAILED: the fake app could not run"
         exit 1
     fi
-    status=0
-    wait "$emu" || status=$?
     cat "$OUT/chooser_push.log"
     if [ "$status" -ne 0 ]; then
         echo "FAILED: sign-emu exited with status $status"
@@ -181,5 +185,11 @@ python3 tests/fixes_test.py build/sign-emu "$HEX" .. build/tests/fixes $((PORT +
 
 echo "== a track id and the icons after a text: nothing of the text stays lit beside them"
 python3 tests/leftover_test.py build/sign-emu "$HEX" .. build/tests/leftover $((PORT + 31))
+
+echo "== the jump game: its pictures, answers that are no frame, its pace"
+python3 tests/game_test.py build/sign-emu "$HEX" .. build/tests/game $((PORT + 40))
+
+echo "== game_app.py: without its emulator it ends with an error; however it ends, its emulator ends too"
+python3 tests/game_app_test.py build/sign-emu "$HEX" .. $((PORT + 45))
 
 echo "ALL TESTS PASSED"

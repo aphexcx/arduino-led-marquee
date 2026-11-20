@@ -11,10 +11,11 @@ Python 3 standard library only.
 """
 import json
 import os
-import socket
-import subprocess
 import sys
 import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
+import sign_emu  # noqa: E402
 
 from fractions import Fraction
 
@@ -75,24 +76,14 @@ def run_case(env, name, plan, requests, flags=(), tolerate_wire=False):
     """plan: for each request, a list of (bytes, pause before sending, in real seconds)."""
     dump = os.path.join(env["work"], name + ".jsonl")
     log = os.path.join(env["work"], name + ".log")
-    with open(log, "w") as err:
-        emu = subprocess.Popen(
-            [env["emu"], "--headless", "--port", str(env["port"]), "--wait-client", "30",
-             "--until-requests", str(requests), "--duration", "120", "--frames", dump,
-             *LONG_WAIT, *flags, env["hex"]], stderr=err)
+    emu = sign_emu.Emu(
+        [env["emu"], "--headless", "--port", str(env["port"]), "--wait-client", "30",
+         "--until-requests", str(requests), "--duration", "120", "--frames", dump,
+         *LONG_WAIT, *flags, env["hex"]], env["port"], log=log)
     try:
-        deadline = time.monotonic() + 30
-        while True:
-            try:
-                sock = socket.create_connection(("127.0.0.1", env["port"]), timeout=2)
-                break
-            except OSError:
-                if time.monotonic() > deadline or emu.poll() is not None:
-                    raise
-                time.sleep(0.05)
+        sock = emu.connect()
         start = time.monotonic()
         sock.settimeout(60)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         seen = 0
         try:
             while True:
@@ -117,8 +108,7 @@ def run_case(env, name, plan, requests, flags=(), tolerate_wire=False):
         emu.wait(timeout=120)
         wall = time.monotonic() - start
     finally:
-        if emu.poll() is None:
-            emu.kill()
+        emu.end()
     lines = open(dump, encoding="utf-8").read().splitlines()
     return Run(lines[1:], wall, open(log).read(), emu.returncode, tolerate_wire)
 
@@ -130,25 +120,15 @@ class Session:
         self.port = port or env["port"]
         self.dump = os.path.join(env["work"], name + ".jsonl")
         self.log = os.path.join(env["work"], name + ".log")
-        with open(self.log, "w") as err:
-            self.emu = subprocess.Popen(
-                [env["emu"], "--headless", "--port", str(self.port), "--wait-client", "30",
-                 "--until-requests", str(requests), "--duration", "120", "--frames", self.dump,
-                 *LONG_WAIT, *flags, env["hex"]], stderr=err)
+        self.emu = sign_emu.Emu(
+            [env["emu"], "--headless", "--port", str(self.port), "--wait-client", "30",
+             "--until-requests", str(requests), "--duration", "120", "--frames", self.dump,
+             *LONG_WAIT, *flags, env["hex"]], self.port, log=self.log)
         self.start = time.monotonic()
 
     def connect(self):
-        deadline = time.monotonic() + 30
-        while True:
-            try:
-                sock = socket.create_connection(("127.0.0.1", self.port), timeout=2)
-                break
-            except OSError:
-                if time.monotonic() > deadline or self.emu.poll() is not None:
-                    raise
-                time.sleep(0.05)
+        sock = self.emu.connect()
         sock.settimeout(60)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         return sock
 
     def request(self, sock):
@@ -171,8 +151,7 @@ class Session:
         try:
             self.emu.wait(timeout=120)
         finally:
-            if self.emu.poll() is None:
-                self.emu.kill()
+            self.emu.end()
         lines = open(self.dump, encoding="utf-8").read().splitlines()
         return Run(lines[1:], time.monotonic() - self.start, open(self.log).read(),
                    self.emu.returncode)

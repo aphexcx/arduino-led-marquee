@@ -10,6 +10,9 @@
 #   make test-fixes only the test of messages the sign must survive (a minute), after the test
 #                   of its checks on frames in memory (tests/fixes_selftest.py)
 #   make test-leftover only the test that a track id and the icons leave nothing of the picture before
+#   make test-game  only the jump game's test: its pictures, answers that are no frame, its pace
+#                   and game_app.py without its emulator and ended in every way (GAME_PORT=n
+#                   moves their six TCP ports)
 #   make clean      delete build/ (third_party/ is kept)
 #
 # Everything is written under build/ and third_party/, both gitignored.
@@ -47,7 +50,7 @@ SIM_WARN  := -w
 EMU_NAMES := main ihex reply ws2812 softuart link view record
 EMU_OBJS  := $(EMU_NAMES:%=$(OBJ)/%.o)
 
-.PHONY: all firmware firmware-debug emu run test test-ads test-fixes test-leftover clean
+.PHONY: all firmware firmware-debug emu run test test-ads test-fixes test-leftover test-game clean
 all: firmware emu
 
 # ---- firmware ---------------------------------------------------------------
@@ -140,6 +143,10 @@ test-fixes: all
 
 test-leftover: all
 	python3 tests/leftover_test.py $(EMU) $(FW_HEX) .. $(BUILD)/tests/leftover
+
+test-game: all
+	python3 tests/game_test.py $(EMU) $(FW_HEX) .. $(BUILD)/tests/game $(GAME_PORT)
+	python3 tests/game_app_test.py $(EMU) $(FW_HEX) .. $(if $(GAME_PORT),$(shell expr $(GAME_PORT) + 5))
 
 clean:
 	cmake -E remove_directory $(BUILD)
