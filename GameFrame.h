@@ -181,10 +181,9 @@ static bool gameRender(const char* s, const uint8_t* runner, GamePicture& pic) {
         } else if (item == 'n') {
             once = 16;
             score = s;
-            while (s - score < GAME_SCORE_DIGITS && *s >= '0' && *s <= '9') {
+            for (digits = 0; digits < GAME_SCORE_DIGITS && *s >= '0' && *s <= '9'; digits++) {
                 s++;
             }
-            digits = (uint8_t) (s - score);
             if (!digits) {
                 return false;
             }
