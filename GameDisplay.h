@@ -43,7 +43,8 @@ static_assert(GAME_LEAVE_MS >= 2 * (GAME_MISS_MS + GAME_QUIET_MS) && GAME_LEAVE_
 // blue, pink. Every value is a run of one-bits from bit 0 up, and stays one when it is shifted
 // right, so it reaches the LEDs as it is written here whatever the carry flag holds when
 // sendBitx8 begins (see AdDisplay.h), at every brightness shift.
-static const uint8_t gamePalette[GAME_COLOURS * 3] PROGMEM = {
+// After them the moving stars' colour (GAME_STAR_COLOUR): white at an eighth of colour 1.
+static const uint8_t gamePalette[(GAME_COLOURS + 1) * 3] PROGMEM = {
         0x00, 0x00, 0x00,
         0x7F, 0x7F, 0x7F,
         0xFF, 0x00, 0x00,
@@ -52,6 +53,7 @@ static const uint8_t gamePalette[GAME_COLOURS * 3] PROGMEM = {
         0x00, 0xFF, 0x00,
         0x00, 0x00, 0xFF,
         0xFF, 0x00, 0x7F,
+        0x0F, 0x0F, 0x0F,
 };
 
 // A frame has two keys. An answer with more than this many is not a good frame (the document has
@@ -63,6 +65,7 @@ static const uint8_t gamePalette[GAME_COLOURS * 3] PROGMEM = {
 
 // The sparkle: this many stars, each one LED in a column the picture leaves dark, in a colour of
 // its own (1 to 7). One random number places a star: a byte each for column, row and colour.
+// (A column with a moving star is not dark: the sparkle leaves the moving stars as they are.)
 #define GAME_SPARKLE_STARS 4
 
 static void gameSparkle(GamePicture& pic) {

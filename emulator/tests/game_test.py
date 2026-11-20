@@ -3,18 +3,20 @@
 
   pictures  every frame of a list is drawn as its text reads: the runner (the Dreamstate icon of
             Icons.h) at its column and its rise, cut off at the top edge and at the sides; the
-            obstacles at their columns; the colours; the two effects. One frame of 120 columns for
-            each, both faces equal. Then a message of another kind ends the game and is shown.
+            obstacles at their columns; the colours; the two effects; the moving stars, moved by
+            the frame's number, in no column of the play. One frame of 120 columns for each, both
+            faces equal. Then a message of another kind ends the game and is shown.
   misses    ONE table of answers that are not a good frame (absent, torn, no JSON, an object that
             is no message, a frame the sign cannot read, late). For every row: nothing is drawn and
             the picture before stays, the sign says nothing to the app but its request, it asks
             again when the row says, and the frames after it are drawn. Then no answers at all,
             and an answer that never ends: the sign leaves the game after GAME_LEAVE_MS and asks
             the ordinary way.
-  pace      a scripted game at three reaction times of the app: frames a second, and the frame
-            delivery latency: the time from the app having something new (a button press) to the
-            frame that carries it being on the LEDs. (When the runner is seen to move is the app's
-            matter: its jump has no row yet in the frames of its first milliseconds.)
+  pace      a scripted game at three reaction times of the app, without and with the moving
+            stars: frames a second, and the frame delivery latency: the time from the app having
+            something new (a button press) to the frame that carries it being on the LEDs. (When
+            the runner is seen to move is the app's matter: its jump has no row yet in the frames
+            of its first milliseconds.)
 
 A scripted peer answers each of the sign's requests with the next item of a list; sign-emu runs the
 firmware headless and writes a frames dump; everything is checked from that dump. What a picture
@@ -43,6 +45,10 @@ BYTE_S = 10 / 14400.0                   # a byte on the wire
 LATENCY_MS = 5                          # sign-emu's reply latency unless a run says otherwise
 # The obstacles (the contract note): how many rows each column is high, from the ground
 SHAPES = {"a": [1, 2, 1], "b": [3, 3], "c": [1, 2, 3, 2, 1]}
+# The moving stars at 0 (the contract note): the column and the row of each; and their colour's place
+STARS = [(2, 7), (9, 5), (19, 6), (25, 4), (33, 7), (40, 5), (47, 4), (55, 6)]
+STAR_COLOUR = 8
+ITEM = r"[abcr]-?[0-9]{1,2}|p[0-7]{2}|e[0-2]|s[0-9]{1,2}"
 
 
 def frame_bytes(text, keys=2):
@@ -56,15 +62,15 @@ def frame_bytes(text, keys=2):
 def picture(env, text):
     """One face of the frame: for each of the 60 columns (row byte, bit 1 the bottom row; the
     colour digit; the right shift of its colour). None for a text that is no frame."""
-    m = re.fullmatch(r"([0-7])([01])((?:[abcr]-?[0-9]{1,2}|p[0-7]{2}|e[0-2])*)", text)
+    m = re.fullmatch(r"([0-7])([01])((?:%s)*)" % ITEM, text)
     if not m:
         return None
-    items = re.findall(r"[abcr]-?[0-9]{1,2}|p[0-7]{2}|e[0-2]", m.group(3))
+    items = re.findall(ITEM, m.group(3))
     kinds = [i[0] for i in items]
-    if any(kinds.count(k) > 1 for k in "rpe") or sum(k in "abc" for k in kinds) > 4:
+    if any(kinds.count(k) > 1 for k in "rpes") or sum(k in "abc" for k in kinds) > 4:
         return None
     rise, pose = int(m.group(1)), int(m.group(2))
-    runner_col, colours, effect = 2, "62", 0
+    runner_col, colours, effect, stars = 2, "62", 0, None
     for i in items:
         if i[0] == "r":
             runner_col = int(i[1:])
@@ -72,6 +78,10 @@ def picture(env, text):
             colours = i[1:]
         elif i[0] == "e":
             effect = int(i[1:])
+        elif i[0] == "s":
+            stars = int(i[1:])
+            if stars >= PANEL:
+                return None
     lit = [set() for _ in range(PANEL)]          # the lit rows of each column, 1 = the bottom row
     colour = [0] * PANEL
     icon = env["runner"][pose * env["runner_cols"]:(pose + 1) * env["runner_cols"]]
@@ -93,6 +103,12 @@ def picture(env, text):
         lit = [set(range(1, 8)) - (rows if colour[c] else set()) for c, rows in enumerate(lit)]
         colour = [int(colours[1])] * PANEL
         shift = env["flash_shift"]
+    elif stars is not None:
+        # a star only in a column where the play has no row (whatever its colour)
+        for column, row in STARS:
+            c = (column - stars) % PANEL
+            if not lit[c]:
+                lit[c], colour[c] = {row}, STAR_COLOUR
     return [(sum(1 << r for r in rows), colour[c], shift) for c, rows in enumerate(lit)], effect
 
 
@@ -222,6 +238,8 @@ PICTURES = (
     + ["00e0a20", "30e2", "00e2a20b40", "20e2p35c12", "00e2p10", "71e2r-99"]        # the flash
     + ["00p02e2", "20p02e2a20", "00p02e2b8"]         # ... of a runner in colour 0 (the app's hit show): no hole
     + ["00e1", "00e1", "30e1a20b40", "30e1a20b40", "00e1p34r20", "00e1"]            # the sparkle
+    + ["70s0", "70s23", "00s0", "00s1", "30a17b45s12", "50s59c30a55", "00c5s7b24", "20r40s33"]     # the moving stars
+    + ["00s5e1", "00s6e1", "71e1s30", "00s40e2a20", "00p02s12", "00s12p20b9", "00p00s48a45"]       # ... with the rest
     + ["00e0p21r5a30", "10b7p45e0r30", "71a-99b-99c-99a-99r-99p77e2"]               # any order; the longest
 )
 
@@ -245,6 +263,11 @@ def pictures(env, name, port):
                                     if not rows and frames[0].mask[c]))
     check(log, not wrong, "every frame is its picture and nothing else (%d are not%s)"
           % (len(wrong), ": " + "; ".join(wrong[:4]) if wrong else ""))
+    at0, moved = [run.between(PICTURES.index(t))[0].mask[:PANEL] for t in ("70s0", "70s23")]
+    check(log, sum(bin(m).count("1") for m in at0) == len(STARS) and not any(m & 0x0E for m in at0)
+          and all(moved[c] == at0[(c + 23) % PANEL] for c in range(PANEL)),
+          "the moving stars: %d LEDs a face, none in rows 1 to 3, and at 23 the picture at 0 moved 23 columns "
+          "to the left and around" % sum(bin(m).count("1") for m in at0))
     check(log, len(starry) > 1 and len(set(starry)) == len(starry) and sum(map(len, starry)) >= 2 * len(starry),
           "the sparkle has stars, and other ones in every frame (%d stars in its %d frames, %d different sets of them)"
           % (sum(map(len, starry)), len(starry), len(set(starry))))
@@ -271,6 +294,7 @@ def miss_table(env):
         ("a frame with no rise", frame_bytes("")),
         ("a rise of 8", frame_bytes("80a17")),
         ("a shape the sign does not have", frame_bytes("30d17")),
+        ("stars moved by 60", frame_bytes("30a17s60")),
         ("five obstacles", frame_bytes("30a1a9b20b30c40")),
         ("a column of three digits", frame_bytes("30a100")),
     ]
@@ -375,23 +399,28 @@ def misses(env, name, port):
 
 
 # ---- pace --------------------------------------------------------------------------------------------
-def game_script(n):
+def game_script(n, stars=False):
     """A game as the app would send it: two obstacles coming in from the right, a jump over each,
-    the runner's two pictures in turn."""
+    the runner's two pictures in turn. With `stars`: and the moving stars, a column every 4 frames."""
     jump = [1, 3, 5, 6, 7, 7, 7, 7, 6, 5, 3, 1]
     out = []
     for k in range(n):
         first, second = 59 - k % 65, 59 - (k + 33) % 65
         text = "%d%d" % (max([jump[j] for j in range(len(jump)) if 20 - j in (first, second)] or [0]), k // 4 % 2)
         text += "abc"[k // 65 % 3] + str(first) + "bca"[(k + 33) // 65 % 3] + str(second)
-        out.append(text)
+        out.append(text + ("s%d" % (k // 4 % PANEL) if stars else ""))
     return out
 
 
 def pace(env, name, port, latency):
-    script = game_script(240)
+    return pace_of(env, name, port, latency, False) + pace_of(env, name + "_stars", port, latency, True)
+
+
+def pace_of(env, name, port, latency, stars):
+    script = game_script(240, stars)
     run = Run(env, name, [frame_bytes(t) for t in script], port, 60, ("--link-latency-ms", str(latency)))
-    log = ["a game of %d frames, the app answering %d ms after each request" % (len(script), latency)]
+    log = ["a game of %d frames%s, the app answering %d ms after each request"
+           % (len(script), " with the moving stars" if stars else "", latency)]
     wrong = [t for i, t in enumerate(script) if len(run.between(i)) != 1
              or frame_is(env, run.between(i)[0], picture(env, t)[0]) is not None]
     check(log, not wrong and run.said == "", "every frame is drawn once, as its text reads (%d are not)" % len(wrong))
@@ -413,7 +442,7 @@ def pace(env, name, port, latency):
                "delivery latency (the app has a press -> the frame with it is on the LEDs) %.0f to %.0f ms, "
                "%.0f ms on average"
                % (min(sizes), max(sizes), rate, min(exchange), max(exchange), soonest, latest, mean))
-    env["measured"][latency] = (rate, soonest, mean, latest)
+    env["measured"][latency, stars] = (rate, soonest, mean, latest)
     check(log, rate >= env["least_rate"] and latest <= 2000 / env["least_rate"],
           "at least %d frames a second, and no frame is delivered later than two frames at that rate (%d ms)"
           % (env["least_rate"], 2000 / env["least_rate"]))
@@ -435,7 +464,7 @@ def main():
     palette = A.table(display, "gamePalette[")
     flash = re.search(r"^#define\s+GAME_FLASH_SHIFT\s+(\d+)\s*$", display, re.M)
     stars = re.search(r"^#define\s+GAME_SPARKLE_STARS\s+(\d+)\s*$", display, re.M)
-    if len(icon) != 1 + 2 * icon[0] or len(palette) != 24 or not flash or not stars or len(std) != 95 * 5 + 7:
+    if len(icon) != 1 + 2 * icon[0] or len(palette) != 27 or not flash or not stars or len(std) != 95 * 5 + 7:
         sys.exit("Icons.h, GameDisplay.h or Fonts.h is not what this test expects")
     env = {
         "emu": sys.argv[1], "hex": sys.argv[2], "work": sys.argv[4],
