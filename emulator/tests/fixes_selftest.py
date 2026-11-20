@@ -120,7 +120,7 @@ def right_frames(env, made, message, checker):
         frames = [made.frame(clear.wants[0].cols, COLS, start + 0.005)]
         for i, w in enumerate(letters.wants):
             frames.append(made.frame(w.cols, COLS, start + 0.010 + i * env["letter"] / 1000.0))
-        return start, frames[-1].t + (message["dly"] + env["quiet"]) / 1000.0, frames, [
+        return start, frames[-1].t + (message["dly"] + env["request_quiet"]) / 1000.0, frames, [
             ("the clear", 0, 1), ("the letters, one more in every frame", 1, len(letters.wants))]
     if message["type"] == "C":
         # showChonkySlideStyleOnBothPanels() for a text that fits, as ads_test.py describes it: the
@@ -133,7 +133,7 @@ def right_frames(env, made, message, checker):
                         (dly - 10 * k + 10 * c) & 0xFF, message["g"], message["b"]))) if rows else (0, None)
                     for c, rows in enumerate(text)]
             frames.append(made.frame(cols + cols, COLS, start + 0.005 + k * env["wave"] / 1000.0))
-        return start, frames[0].t + (dly + env["quiet"]) / 1000.0, frames, [("the text with its wave", 0, len(frames))]
+        return start, frames[0].t + (dly + env["request_quiet"]) / 1000.0, frames, [("the text with its wave", 0, len(frames))]
     raise ValueError("no right frames for %r" % message)
 
 

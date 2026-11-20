@@ -108,11 +108,18 @@ def setting(sketch, name, default=None):
     return int(m.group(1))
 
 
+def request_quiet(sketch):
+    """The firmware's wait for a quiet line before every request, in ms (REQUEST_QUIET_MS; 0 for a
+    firmware that asks at once: master's before chooser contract 3). Every test that uses the checks
+    here keeps it as env["request_quiet"]."""
+    return setting(sketch, "REQUEST_QUIET_MS", 0)
+
+
 def quiet_note(env):
     """For the text of a hold's check: what the firmware adds to every hold, if anything."""
-    if not env["quiet"]:
+    if not env["request_quiet"]:
         return ""
-    return " and the %d ms this firmware waits for a quiet line before every request" % env["quiet"]
+    return " and the %d ms this firmware waits for a quiet line before every request" % env["request_quiet"]
 
 
 def carried(v):
@@ -236,7 +243,7 @@ def hold_check(log, env, message, style, complete_t, start, end):
     dly = message.get("dly", 0)
     hold_ms = (end - complete_t) * 1000
     allowed = max(dly * 0.02, 10)
-    check(log, abs(hold_ms - dly - env["quiet"]) <= allowed,
+    check(log, abs(hold_ms - dly - env["request_quiet"]) <= allowed,
           "from the first frame with the %s to the next request: %.2f ms for dly %d%s (within %.0f ms)"
           % ("end of the text" if message.get("_long") else "complete text", hold_ms, dly,
              quiet_note(env), allowed))
@@ -449,10 +456,11 @@ def check_nudge(env, message, start, end, frames):
     # request, which is held to the same tolerance as every hold (2 percent or 10 ms)
     dly = message["dly"]
     worst = max([abs(s - dly) for s in shown[:-1]] or [0])
-    last_ok = bool(shown) and abs(shown[-1] - dly - env["quiet"]) <= max(dly * 0.02, 10)
+    last_ok = bool(shown) and abs(shown[-1] - dly - env["request_quiet"]) <= max(dly * 0.02, 10)
     check(log, len(shown) == positions and worst <= 1 and last_ok, "each column is shown for dly (%s ms for dly %d%s)"
           % (" ".join("%.2f" % s for s in shown), message["dly"],
-             "" if not env["quiet"] else "; the last one also for the %d ms" % env["quiet"] + quiet_note(env)[len(" and the %d ms" % env["quiet"]):]))
+             "" if not env["request_quiet"] else "; the last one also for the %d ms" % env["request_quiet"]
+             + quiet_note(env)[len(" and the %d ms" % env["request_quiet"]):]))
     return log
 
 
@@ -486,8 +494,7 @@ def main():
         "std": Font(std, 5, 7), "chonk": Font(chonk, 8, 8), "gamma": gamma,
         "letter": setting(sketch, "CHARS_ONEBYONE_DELAY"), "step": setting(sketch, "AD_SCROLL_STEP_MS"),
         "hold": setting(sketch, "AD_SCROLL_HOLD_MS"), "wave": setting(sketch, "AD_WAVE_FRAME_MS"),
-        # (0 for firmware that asks at once: master's, before chooser contract 3)
-        "quiet": setting(sketch, "REQUEST_QUIET_MS", 0),
+        "request_quiet": request_quiet(sketch),
     }
     port = int(sys.argv[5]) if len(sys.argv) > 5 else 14440
     os.makedirs(env["work"], exist_ok=True)
