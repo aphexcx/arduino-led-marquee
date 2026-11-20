@@ -23,6 +23,8 @@
 
 // Used to receive data on a virtual RX pin instead of the usual pin 0
 #include "SoftwareSerial/SoftwareSerial.h"
+// The line to the app (softSerial below): SoftwareSerial with an end to reading, for the jump game
+#include "AppSerial.h"
 
 // Pin 13 has an LED connected on most Arduino boards.
 // give it a name:
@@ -65,7 +67,7 @@ ISR (PCINT1_vect) {
 
 #define rxPin 10
 #define txPin 11
-SoftwareSerial softSerial(rxPin, txPin); // RX, TX
+AppSerial softSerial(rxPin, txPin); // RX, TX
 
 const char ASOT[]
 PROGMEM = "                    ";
@@ -184,6 +186,14 @@ PROGMEM = "                    ";
 //Time per frame of the chonky colour wave in ms. 10 is 100 frames a second, what a dly of 1000 always gave
 #define AD_WAVE_FRAME_MS 10
 
+// ---- The jump game (MSGTYPE_GAME): the app runs it, the sign draws a frame and asks again (see GameDisplay.h).
+//How long the sign waits for an answer to begin (and for each further byte of it), in ms
+#define GAME_MISS_MS 150
+//After an answer that is not a good frame: how long the line must be silent before the sign asks again, in ms
+#define GAME_QUIET_MS 20
+//Without a good frame for this long the game is over for the sign and it asks the ordinary way again, in ms
+#define GAME_LEAVE_MS 1000
+
 // Change this to be at least as long as your pixel string (too long will work fine, just be a little slower)
 #define NUM_PANELS 2  // Number of panels. There are 2.
 #define COLUMNS_PER_PANEL 60  // Number of columns per panel, in my case, the # of pixels in each LED string. I am using 60LED/M
@@ -215,6 +225,7 @@ const char MSGTYPE_ICON = 'I';
 const char MSGTYPE_TRACKID = 'T';
 const char MSGTYPE_CHONKYMARQUEE = 'N';
 const char MSGTYPE_DEFAULT = 'D';
+const char MSGTYPE_GAME = 'G';
 
 // Modes to show keyboard mode in
 const char KEYBOARD_MODE_WARNING = 'W';
@@ -871,6 +882,11 @@ static uint chooserSendRequest(char c) {
 // It is in its own file so that the host test can run it against a fake sign and a fake app.
 #include "ChooserDisplay.h"
 
+// The jump game (MSGTYPE_GAME): showAsGame() draws the frame it is given and asks for the next,
+// and what it does with an answer that is not a good frame. The frame itself (the text of the
+// message and the picture it makes) is GameFrame.h, which the host test runs.
+#include "GameDisplay.h"
+
 // Notifies the IMX that we're ready to retrieve custom message data
 bool readSerialData() {
     // Flushing Serial input buffer
@@ -968,9 +984,15 @@ void loop() {
         // A chooser message is shown in there, for as long as the chooser is on screen (the app
         // pushes what changes; the receive line is watched between frames); what comes back is
         // the type of the message that ended it.
+        char msgType = chooserDispatch();
+        // A game frame is shown in there too, for as long as the app answers with game frames.
+        // What ended the game is then in `json` (a chooser message is shown in turn); nothing is,
+        // when the app's frames stopped coming: ask again with a normal '~'.
+        while (msgType == MSGTYPE_GAME) {
+            msgType = showAsGame() ? chooserDispatch() : CHOOSER_DISPATCH_NOTHING;
+        }
         // Two answers mean there is no message to show: what was read is not one (it has no "type":
         // draw nothing and ask again), or the chooser ended because the app stopped answering.
-        const char msgType = chooserDispatch();
         if (msgType == CHOOSER_DISPATCH_NOTHING) {
             loopcount++;
             return;

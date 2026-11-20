@@ -29,11 +29,10 @@ Python 3 standard library only. Uses three TCP ports from `port` (default 14440)
 import json
 import os
 import re
-import socket
-import subprocess
 import sys
 import threading
-import time
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
+import sign_emu  # noqa: E402
 
 COLS, PANEL, ROWS = 120, 60, 7
 HEART, VT = 0x7F, 0x0B
@@ -162,23 +161,12 @@ def run_group(env, name, messages, port):
     """Serves `messages` once. Returns for each message (request time, next request time, frames)."""
     dump = os.path.join(env["work"], name + ".jsonl")
     log = os.path.join(env["work"], name + ".log")
-    with open(log, "w") as err:
-        emu = subprocess.Popen(
-            [env["emu"], "--headless", "--port", str(port), "--wait-client", "30",
-             "--until-requests", str(len(messages) + 1), "--duration", "900", "--frames", dump,
-             env["hex"]], stderr=err)
+    emu = sign_emu.Emu(
+        [env["emu"], "--headless", "--port", str(port), "--wait-client", "30",
+         "--until-requests", str(len(messages) + 1), "--duration", "900", "--frames", dump,
+         env["hex"]], port, log=log)
     try:
-        deadline = time.monotonic() + 30
-        while True:
-            try:
-                sock = socket.create_connection(("127.0.0.1", port), timeout=2)
-                break
-            except OSError:
-                if time.monotonic() > deadline or emu.poll() is not None:
-                    raise RuntimeError("%s: cannot connect to sign-emu on port %d" % (name, port))
-                time.sleep(0.05)
-        sock.settimeout(None)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock = emu.connect()
         sent = 0
         while sent < len(messages):
             data = sock.recv(4096)
@@ -193,8 +181,7 @@ def run_group(env, name, messages, port):
         status = emu.wait(timeout=900)
         sock.close()
     finally:
-        if emu.poll() is None:
-            emu.kill()
+        emu.end()
     if status != 0:
         raise RuntimeError("%s: sign-emu exited with status %s: %s"
                            % (name, status, open(log).read().strip()[-300:]))
