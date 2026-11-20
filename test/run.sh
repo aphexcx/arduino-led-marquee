@@ -1,7 +1,7 @@
 #!/bin/bash
 # Runs the host tests of the chooser display and of the ads (no Arduino needed, only the Mac's clang++).
 #
-#   test/run.sh          build and run all five tests
+#   test/run.sh          build and run all six tests
 #   test/ad_display_grid.py   the ads' test over every wave interval and many scroll steps (minutes)
 #   test/run.sh --show   also print a few frames of the sign as ASCII art
 #
@@ -21,6 +21,11 @@ clang++ -std=c++11 -Wall -Wextra -o "$out/text_window_test" "$here/text_window_t
 
 clang++ -std=c++11 -Wall -Wextra -o "$out/brightness_shift_test" "$here/brightness_shift_test.cpp"
 "$out/brightness_shift_test"
+
+# (with the sanitizers: a column off the face must be cut off, not written somewhere)
+clang++ -std=c++11 -Wall -Wextra -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+    -o "$out/game_frame_test" "$here/game_frame_test.cpp"
+"$out/game_frame_test"
 
 clang++ -std=c++11 -Wall -Wextra -O1 -o "$out/ad_display_test" "$here/ad_display_test.cpp"
 "$out/ad_display_test" "$@"
