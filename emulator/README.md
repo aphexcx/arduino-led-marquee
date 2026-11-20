@@ -565,6 +565,10 @@ What the image is made of besides the sketch, and where each comes from.
 cmake is run with the fetched toolchain first in `PATH`, and a build tree
 whose compilers, archiver or objcopy are not from it is refused, so an
 `avr-gcc` that happens to be installed on the computer never builds the image.
+cmake is also told where the toolchain is, and so is every small test project
+it configures for its compiler checks: the repo's toolchain file never goes
+looking for an Arduino IDE, and on a Mac that has one in `/Applications` the
+build does not read it.
 When the core's or the compiler's version in `fetch_toolchain.sh` changes, the
 toolchain's directory has a new name and the firmware's build trees are made
 afresh.

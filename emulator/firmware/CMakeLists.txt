@@ -11,6 +11,8 @@
 #      in the emulator's build tree at all.
 #   2. Current CMake (>= 3.25) cannot load the repo's toolchain file as is;
 #      toolchain.cmake next to this file wraps it with a one-function shim.
+#      It also hands the SDK on to CMake's try_compile test projects, so that
+#      no configure goes looking for an Arduino IDE.
 # Keep the three settings below in step with ../../CMakeLists.txt.
 cmake_minimum_required(VERSION 3.10)
 
