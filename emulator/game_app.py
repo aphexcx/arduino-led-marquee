@@ -4,7 +4,8 @@
 This is a STAND-IN for the Android app's side of the game: the app's rules and its three shows
 (energy-sign, JumpGame.kt: the 900 ms jump, 30 rising to 54 columns a second, the three obstacle
 kinds and their spacing, the collisions LED for LED, the stars behind the play that move at a
-quarter of the ground's speed), written again here so that the game can be played without the app. The sign's side is the real firmware image, running in sign-emu.
+quarter of the ground's speed, the score at the top right of the play and of the hit's picture,
+999 at the most), written again here so that the game can be played without the app. The sign's side is the real firmware image, running in sign-emu.
 
 It starts sign-emu with its live view, answers every request of the sign itself and reads the
 keys in the same window:
@@ -72,9 +73,10 @@ class Rules:
 
 
 class Frame:
-    def __init__(self, rise, picture, obstacles, runner_at=None, colours=None, effect=0, stars=None):
+    def __init__(self, rise, picture, obstacles, runner_at=None, colours=None, effect=0, stars=None, score=None):
         self.rise, self.picture, self.obstacles = rise, picture, obstacles
         self.runner_at, self.colours, self.effect, self.stars = runner_at, colours, effect, stars
+        self.score = score
 
     def text(self):
         """The frame as the sign reads it (the firmware's GameFrame.h)."""
@@ -89,6 +91,8 @@ class Frame:
             out += "e%d" % self.effect
         if self.stars is not None:
             out += "s%d" % (self.stars % Rules.star_columns)
+        if self.score is not None:
+            out += "n%d" % min(max(self.score, 0), 999)
         return out
 
 
@@ -124,7 +128,7 @@ class JumpGame:
         stride = 0 if self.jumped_at >= 0 else self.ticks * r.tick_ms // r.stride_ms % 2
         return Frame(min(self.rise(), r.rows), stride,
                      [(kind, math.floor(x)) for kind, x, _ in self.coming if x < r.face_columns],
-                     stars=r.stars(self.ground))
+                     stars=r.stars(self.ground), score=self.score)
 
     def speed(self):
         r = self.rules
@@ -200,7 +204,8 @@ class Shows:
     def hit(self, last):
         return (700, lambda t: Frame(last.rise if last else 0, 0, last.obstacles if last else [],
                                      colours=(2 if t // 100 % 2 == 0 else 0, 2), effect=2 if t < 100 else 0,
-                                     stars=last.stars if last else None))      # (the stars stand where they stood)
+                                     stars=last.stars if last else None,       # (the stars stand where they stood)
+                                     score=last.score if last else None))
 
     def over(self, score, best, last):
         return [
