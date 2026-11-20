@@ -30,6 +30,10 @@
 #      negative number of stars, icons it does not have (tests/fixes_test.py)
 #   8. nothing of the picture before a track id or the icons stays lit beside
 #      them (tests/leftover_test.py)
+#   Before 7: the checks of 7 and 8 themselves, on frames in memory: right
+#   frames pass, and a message with one part missing, cut short, dark, moved,
+#   out of order, a bit too long or in another colour does not
+#   (tests/fixes_selftest.py; no emulator, a minute)
 #
 # The TCP ports can be moved with SIGN_EMU_TEST_PORT (default 14417; the link
 # tests use the eleven after it, the push tests the four after those, the ads
@@ -179,6 +183,9 @@ fi
 
 echo "== the ads: one by one and chonky, short and long, on the real firmware"
 python3 tests/ads_test.py build/sign-emu "$HEX" .. build/tests/ads $((PORT + 16))
+
+echo "== the checks of the next two tests themselves: right frames pass, a changed part fails"
+python3 tests/fixes_selftest.py ..
 
 echo "== messages the sign must survive: brightness numbers, long keyboard lines, empty texts, unknown icons"
 python3 tests/fixes_test.py build/sign-emu "$HEX" .. build/tests/fixes $((PORT + 24))

@@ -284,7 +284,8 @@ def check_one_by_one(env, message, start, end, frames):
     pad = (PANEL - width) // 2 if width < PANEL else 0
     steps = one_by_one_steps(font, text)
     # the first frame after the request is clear(): all dark
-    check(log, bool(frames) and not any(frames[0].mask), "the sign is cleared first")
+    check(log, bool(frames) and frames[0].bits == COLS * 24 and frames[0].clean and not any(frames[0].mask),
+          "the sign is cleared first: the whole strip, dark")
     frames = frames[1:]
     common_checks(log, frames)
     check(log, len(frames) == len(steps), "one frame per letter and per scrolled column (%d, expected %d)"
