@@ -10,9 +10,11 @@
   misses    ONE table of answers that are not a good frame (absent, torn, no JSON, an object that
             is no message, a frame the sign cannot read, late). For every row: nothing is drawn and
             the picture before stays, the sign says nothing to the app but its request, it asks
-            again when the row says, and the frames after it are drawn. Then no answers at all,
-            and an answer that never ends: the sign leaves the game after GAME_LEAVE_MS and asks
-            the ordinary way.
+            again when the row says, and the frames after it are drawn. And ONE table of good
+            frames with bytes that are nobody's in them (noise: what one LOW pulse is received as,
+            outside a text and in it): up to CHOOSER_MAX_NOISE of them are dropped and the frame is
+            drawn, and one more makes the miss row above. Then no answers at all, and an answer
+            that never ends: the sign leaves the game after GAME_LEAVE_MS and asks the ordinary way.
   pace      a scripted game at three reaction times of the app: without the moving stars and
             the score, with the stars, and with the stars and the score: frames a second, and the frame delivery latency: the time from the app having
             something new (a button press) to the frame that carries it being on the LEDs. (When
@@ -301,6 +303,33 @@ def pictures(env, name, port):
 # request: the third column is how many bytes arrive (after the app's reaction time), the fourth
 # the silence it then waits out. An answer that ends as a whole object needs only the quiet time; one that stops, or
 # never begins, needs the wait for a byte first.
+def noisy(text, n):
+    """The frame of `text` with the first n of nine bytes that are nobody's in it, in this order:
+    0xFF in front of the brace, 0x01 behind it, 0x02 in front of the colon, 0x03 behind it, 0x80
+    inside the text (behind its first character: it begins no UTF-8 character), 0x7F behind the
+    text, 0x04 behind the comma, 0x05 and 0x06 in front of the closing brace."""
+    t = text.encode("ascii")
+    noise = [b"\xff", b"\x01", b"\x02", b"\x03", b"\x80", b"\x7f", b"\x04", b"\x05", b"\x06"]
+    pieces = [b"{", b'"str"', b":", b'"' + t[:1], t[1:] + b'"', b",", b'"type":"G"', b"", b"}"]
+    return b"".join((noise[k] if k < n else b"") + piece for k, piece in enumerate(pieces))
+
+
+# Good frames with bytes that are nobody's in them. The sign reads a frame as it reads every message
+# (ChooserReader): it drops up to CHOOSER_MAX_NOISE such bytes from a frame before the frame is read,
+# so each of these is DRAWN, and the sign asks again at once. (Master before lm-blf read the game's
+# frames with a reader of their own, and each of these was a miss.) Nine are a miss: miss_table.
+def noise_table():
+    def one_in_text(t):
+        return b'{"str":"' + t[:1].encode("ascii") + b"\x80" + t[1:].encode("ascii") + b'","type":"G"}'
+    return [
+        ("one LOW pulse in front of the brace (0xFF)", lambda t: b"\xff" + frame_bytes(t)),
+        ("a control byte between the two keys (0x01)", lambda t: frame_bytes(t).replace(b'",', b'",\x01', 1)),
+        ("a heart behind the brace, outside a text (0x7F)", lambda t: b"{\x7f" + frame_bytes(t)[1:]),
+        ("a byte in the text that begins no UTF-8 character (0x80)", one_in_text),
+        ("eight of them, outside the text and in it: the most one frame may lose", lambda t: noisy(t, 8)),
+    ]
+
+
 def miss_table(env):
     miss, quiet = env["miss"], env["quiet"]
     whole = [
@@ -318,6 +347,8 @@ def miss_table(env):
         ("five obstacles", frame_bytes("30a1a9b20b30c40")),
         ("a column of three digits", frame_bytes("30a100")),
         ("a score of four digits", frame_bytes("30a17n1234")),
+        ("nine bytes that are nobody's, outside the text and in it: one more than a frame may lose",
+         noisy("30a17", 9)),
     ]
     rows = [("absent", b"@none\n", 0, miss + quiet),
             ("torn in the text", b'{"str":"30a17b4', len(b'{"str":"30a17b4'), miss + quiet),
@@ -337,6 +368,15 @@ def misses(env, name, port):
     for n, (_, data, _, _) in enumerate(rows):
         at.append(len(answers))
         answers += [data, frame_bytes(good[n + 1], 8)]      # (eight keys are the most a frame may have)
+    # The good frames with noise in them, each followed by another good frame (other shapes than
+    # the frames above, so that every picture of the run is different).
+    noise = noise_table()
+    noisy_texts = ["%d0b%d" % (n % 7, 14 + 4 * n) for n in range(len(noise))]
+    noisy_next = ["%d1c%d" % (n % 7, 16 + 4 * n) for n in range(len(noise))]
+    noisy_at = []
+    for n, (_, make) in enumerate(noise):
+        noisy_at.append(len(answers))
+        answers += [make(noisy_texts[n]), frame_bytes(noisy_next[n], 8)]
     late_at = len(answers)
     after_late = good[len(rows) + 1:len(rows) + 7]
     answers += [b"@%d\n" % late_ms + frame_bytes(after_late[0])] + [frame_bytes(t) for t in after_late[1:]]
@@ -362,6 +402,13 @@ def misses(env, name, port):
               % (what, "%.1f" % gap if gap is not None else "never", due - 2.5, due + 4,
                  "" if ok or gap is None else " (%d frames in it; the next frame %s)"
                  % (len(run.between(i)), "drawn" if drawn(i + 1, good[n + 1]) else "NOT drawn")))
+
+    for n, (what, make) in enumerate(noise):
+        i = noisy_at[n]
+        gap = run.gap_ms(i)
+        ok = drawn(i, noisy_texts[n]) and drawn(i + 1, noisy_next[n]) and gap is not None and gap < env["miss"]
+        check(log, ok, "a good frame with %s (%d bytes): the frame is drawn, the sign asks again at once (%s ms) "
+              "and draws the next" % (what, len(make(noisy_texts[n])), "%.1f" % gap if gap is not None else "never"))
 
     # Late: the answer comes when the sign has given it up and asked again. It is a good frame
     # and may be drawn; whatever is drawn after it is a frame that was sent, in the order sent; and
