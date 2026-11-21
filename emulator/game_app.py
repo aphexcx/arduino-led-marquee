@@ -5,7 +5,8 @@ This is a STAND-IN for the Android app's side of the game: the app's rules and i
 (energy-sign, JumpGame.kt: the 900 ms jump, 30 rising to 54 columns a second, the three obstacle
 kinds and their spacing, the collisions LED for LED, the stars behind the play that move at a
 quarter of the ground's speed, the score at the top right of the play and of the hit's picture,
-999 at the most), written again here so that the game can be played without the app. The sign's side is the real firmware image, running in sign-emu.
+999 at the most; HIGH SCORE in the big font for a new best), written again here so that the game
+can be played without the app. The sign's side is the real firmware image, running in sign-emu.
 
 It starts sign-emu with its live view, answers every request of the sign itself and reads the
 keys in the same window:
@@ -201,15 +202,17 @@ class Shows:
                                   stars=Rules.stars(-(500 - t) * Rules.start_speed / 1000.0))),
         ]
 
-    def hit(self, last):
+    def hit(self, score, last):
+        """The picture of the hit (`last`, the last frame sent) for a moment, with the game's final
+        `score`: the last tick may have given a point the last frame did not carry."""
         return (700, lambda t: Frame(last.rise if last else 0, 0, last.obstacles if last else [],
                                      colours=(2 if t // 100 % 2 == 0 else 0, 2), effect=2 if t < 100 else 0,
                                      stars=last.stars if last else None,       # (the stars stand where they stood)
-                                     score=last.score if last else None))
+                                     score=score))
 
     def over(self, score, best, last):
         return [
-            self.hit(last),
+            self.hit(score, last),
             colour_message("I", "X", self.crash_colour),
             self.flash("GAME" + VT + "OVER"),
             colour_message("O", "SCORE %d" % score, self.score_colour, dly=1000),
@@ -220,9 +223,11 @@ class Shows:
     def new_best(self, score, last):
         digits = str(score)
         return [
-            self.hit(last),
+            self.hit(score, last),
             colour_message("I", "X", self.crash_colour),
-            self.flash("NEW" + VT + "BEST!"),
+            # HIGH SCORE in the big font, 88 columns: the sign holds "HIGH SC", slides to "H SCORE"
+            # by itself and holds that for this second
+            colour_message("C", "HIGH SCORE", self.score_colour, dly=1000, scroll=False),
             colour_message("C", digits.rjust((6 + len(digits)) // 2).ljust(6), self.score_colour, dly=1500, scroll=False),
             (2000, lambda t: Frame(int(abs(math.sin(t / 140.0)) * 3), 0, [], runner_at=2 + 45 * t // 2000,
                                    colours=(1 + t // 120 % 7, 2), effect=1,
