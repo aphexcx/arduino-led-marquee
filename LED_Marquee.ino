@@ -8,6 +8,9 @@
 
 #include "Gamma.h"
 
+// The marquee's colour wheel and its flash on the beat (the jump game's score and runner use them too)
+#include "MarqueeColour.h"
+
 #include "Fonts.h"
 
 #include "Icons.h"
@@ -52,7 +55,6 @@ void diagnosticBlink() {
 }
 
 volatile unsigned long timeOfLastBeat = 0;
-const unsigned int FADE_MILLIS = 250; // number of ms beat flash takes to fade out
 
 // http://www.gammon.com.au/interrupts
 ISR (PCINT1_vect) {
@@ -63,6 +65,16 @@ ISR (PCINT1_vect) {
         } else {
             diagnosticLedOff();
         }
+}
+
+// How many ms ago the last beat was (for beatFade). The beat's interrupt writes the time of the
+// beat, four bytes, so it is read with interrupts off.
+static unsigned long msSinceBeat() {
+    const uint8_t sreg = SREG;
+    cli();
+    const unsigned long beat = timeOfLastBeat;
+    SREG = sreg;
+    return millis() - beat;
 }
 
 #define rxPin 10
@@ -710,11 +722,6 @@ void showIconInvaders(const Icon* icon, Color iconColor) {
     // delay(200);
 }
 
-#define JAB_MAX_BRIGHTNESS 0xff //(255 (100%))
-//#define JAB_MAX_BRIGHTNESS 0x7f //(127)
-#define JAB_MIN_BRIGHTNESS 0x00
-#define JAB_STEPS (JAB_MAX_BRIGHTNESS-JAB_MIN_BRIGHTNESS)
-
 // Keep color step between marquee calls, but still bump the sector by 1 every call so each new message starts with a
 // noticeably different color
 uint sector = 1;
@@ -738,12 +745,10 @@ void marquee(const char* marqueePtr, const Font& font = fontStd, bool pad = true
 
     // Text foreground color cycle effect
     sector++;
-    if (sector == 3) {
+    if (sector == MARQUEE_WHEEL_SECTORS) {
         sector = 0;
     }
 
-    float beatPct = 0.0f;
-    unsigned long delta;
     uint charWidth;
 
     while (*marqueePtr) {
@@ -751,35 +756,14 @@ void marquee(const char* marqueePtr, const Font& font = fontStd, bool pad = true
         if (colorStep == JAB_STEPS) {
             colorStep = 0;
             sector++;
-            if (sector == 3) {
+            if (sector == MARQUEE_WHEEL_SECTORS) {
                 sector = 0;
             }
         } else {
             colorStep++;
         }
 
-        uint rampup = GAMMA(JAB_MIN_BRIGHTNESS + colorStep);
-        uint rampdown = GAMMA(JAB_MIN_BRIGHTNESS + (JAB_STEPS - colorStep));
-
-        uint r0, g0, b0, r, g, b;
-
-        switch (sector) {
-            case 0:
-                r0 = rampup;
-                g0 = rampdown;
-                b0 = JAB_MIN_BRIGHTNESS;
-                break;
-            case 1:
-                r0 = rampdown;
-                g0 = JAB_MIN_BRIGHTNESS;
-                b0 = rampup;
-                break;
-            case 2:
-                r0 = JAB_MIN_BRIGHTNESS;
-                g0 = rampup;
-                b0 = rampdown;
-                break;
-        };
+        const Color c0 = marqueeWheel(sector, colorStep);
 
         if (!*paddingPtr && *marqueePtr == HEART) {
             charWidth = font.heartWidth;
@@ -790,27 +774,11 @@ void marquee(const char* marqueePtr, const Font& font = fontStd, bool pad = true
         for (uint step = 0; step < charWidth + INTERCHAR_SPACE; step++) {
             // step though each column of the 1st char for smooth scrolling
 
-            delta = millis() - timeOfLastBeat;
-            // beat proportion
-            beatPct = constrain((float) delta / (float) FADE_MILLIS, 0.0f, 1.0f);
-
-            if (beatPct >= 1.0f) {
-                r = r0;
-                g = g0;
-                b = b0;
-            } else if (beatPct > 0.0f) {
-                // Fade between white and rgb depending on how long ago the beat was
-                r = (uint)((1.0f - beatPct) * (float) JAB_MAX_BRIGHTNESS + beatPct * (float) r0);
-                g = (uint)((1.0f - beatPct) * (float) JAB_MAX_BRIGHTNESS + beatPct * (float) g0);
-                b = (uint)((1.0f - beatPct) * (float) JAB_MAX_BRIGHTNESS + beatPct * (float) b0);
-            } else {
-                // beatPct == 0.0, meaning it just happened.
-                // Flash on beats
-                // Full white to save doing the computation cycles
-                r = JAB_MAX_BRIGHTNESS;
-                g = JAB_MAX_BRIGHTNESS;
-                b = JAB_MAX_BRIGHTNESS;
-            }
+            // Flash on beats: white at the beat, fading back to the wheel's colour
+            const unsigned long sinceBeat = msSinceBeat();
+            const uint r = beatFade(c0.r, sinceBeat);
+            const uint g = beatFade(c0.g, sinceBeat);
+            const uint b = beatFade(c0.b, sinceBeat);
 
             cli();
 
