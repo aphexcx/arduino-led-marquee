@@ -34,7 +34,7 @@
 // ---------------------------------------------------------------------------------------------
 // The parts of the sketch that ChooserDisplay.h uses
 // ---------------------------------------------------------------------------------------------
-#include "../ArduinoJson-v6.18.3.h"
+#include "../ArduinoJson-v6.21.6.h"
 
 #define uint uint8_t // the sketch's uint is 8 bits (the Mac's own `uint` is 32)
 

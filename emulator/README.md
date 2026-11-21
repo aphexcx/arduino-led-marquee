@@ -14,13 +14,16 @@ of the firmware's software serial port.
 
 ## Quick start
 
-Needs the Arduino IDE 1.8.x in `/Applications/Arduino.app` (its avr-gcc 7.3.0
-builds the firmware), plus `cmake`, `make`, the Xcode command-line compiler and
-`python3`. Nothing is installed: everything lands in `emulator/build/` and
-`emulator/third_party/`, both gitignored.
+Needs a Mac with `cmake`, `make`, the Xcode command-line compiler, `curl` and
+`python3` (nothing but its standard library), and on Apple Silicon Rosetta:
+the AVR compiler is an Intel program. The Arduino IDE is not needed: the first
+run fetches the AVR compiler and the Arduino AVR core, each pinned by version
+and checksum (see [The toolchain](#the-toolchain)). Nothing is installed:
+everything lands in `emulator/build/` and `emulator/third_party/`, both
+gitignored.
 
 ```sh
-make -C emulator          # firmware image + emulator (first run clones simavr v1.8)
+make -C emulator          # firmware image + emulator (first run fetches the toolchain and simavr v1.8)
 make -C emulator test     # all tests, about three minutes, no human needed
 ```
 
@@ -503,9 +506,10 @@ Seen while building this; the firmware is not changed by this directory.
 
 | | |
 | --- | --- |
-| `Makefile` | `make`, `make firmware`, `make firmware-debug` (a second image built with `FW_DEBUG_FLAGS`, default `-DCHOOSER_DEBUG_PANEL_B=1`: the chooser's measurements on panel B), `make run`, `make test`, `make test-ads`, `make test-fixes`, `make test-leftover`, `make clean` |
+| `Makefile` | `make`, `make toolchain` (only fetch the compiler and the core), `make firmware`, `make firmware-debug` (a second image built with `FW_DEBUG_FLAGS`, default `-DCHOOSER_DEBUG_PANEL_B=1`: the chooser's measurements on panel B), `make run`, `make test`, `make test-ads`, `make test-fixes`, `make test-leftover`, `make clean` |
 | `firmware/` | CMake wrapper that builds the unmodified sketch (no upload target) |
 | `fetch_simavr.sh` | clones simavr at the pinned commit into `third_party/` |
+| `fetch_toolchain.sh` | fetches the Arduino AVR core and the AVR compiler into `third_party/`, by version and SHA-256, and lays them out as the directory the repo's toolchain file expects |
 | `src/` | the emulator: `main.c`, `ihex.c` (firmware image reader), `ws2812.c` (LED decoder), `softuart.c` (serial pins, the queue of replies and breaks), `reply.c` (cuts the app's bytes into replies and directives), `link.c` (TCP), `view.c` (terminal), `record.c` (GIF, PNG, frames dump) |
 | `fake_app.py` | the app's side of the link |
 | `playlists/` | `all_types.jsonl`, `demo.jsonl`, `chooser_push.jsonl` (for `--contract 3`), `ads.jsonl` |
@@ -542,8 +546,69 @@ Build notes:
   emulator reads the Intel HEX file itself. A file that is cut short (no
   end-of-file record), has a line that is not a record, or places data
   outside the 32 KiB flash is refused, not loaded as far as it goes.
-- `make ARDUINO_SDK=/path/to/Arduino.app/Contents/Java` if the IDE lives
-  elsewhere.
+- `make ARDUINO_SDK=/path/to/Arduino.app/Contents/Java` builds with an
+  Arduino IDE's compiler and core instead (as every image was built before
+  the toolchain was fetched; with the IDE 1.8.19 the image is the same file).
+  Nothing is fetched then. It is for a computer the pinned compiler does not
+  run on.
+
+## The toolchain
+
+What the image is made of besides the sketch, and where each comes from.
+`make firmware` fetches the first two on its first run
+(`./fetch_toolchain.sh`), into `third_party/`:
+
+| | version | pinned by |
+| --- | --- | --- |
+| the Arduino AVR core (`Arduino.h`, `millis`, the pin tables) | ArduinoCore-avr 1.8.8 | the archive's SHA-256, as Arduino's package index gives it |
+| the compiler | avr-gcc 7.3.0-atmel3.6.1-arduino7, the Arduino project's newest (an Intel program: it needs Rosetta on an Apple Silicon Mac) | the archive's SHA-256, as Arduino's package index gives it |
+| ArduinoJson | 6.21.6, the last of version 6: `ArduinoJson-v6.21.6.h` in the repo | the file itself |
+| SoftwareSerial | the core's with this repo's changes, `SoftwareSerial/` in the repo | the files themselves |
+| simavr (the emulator only) | v1.8, its newest tag | the tag's commit (`./fetch_simavr.sh`) |
+
+cmake is run with the fetched toolchain first in `PATH`, and a build tree
+whose compilers, archiver or objcopy are not from it is refused, so an
+`avr-gcc` that happens to be installed on the computer never builds the image.
+cmake is also told where the toolchain is, and so is every small test project
+it configures for its compiler checks: the repo's toolchain file never goes
+looking for an Arduino IDE, and on a Mac that has one in `/Applications` the
+build does not read it.
+When the core's or the compiler's version in `fetch_toolchain.sh` changes, the
+toolchain's directory has a new name and the firmware's build trees are made
+afresh.
+
+**It will not run for ever.** Arduino publishes this compiler for the Mac as
+an Intel program only, and macOS translates Intel programs (Rosetta 2) up to
+and including macOS 27; from macOS 28 on, expected in the autumn of 2027, it
+is said not to. (The IDE 1.8.19, which built the images until now, carries the
+same Intel compiler.) By then the compiler has to be built for Apple Silicon
+from Arduino's sources, or replaced, with what the next paragraph says that
+costs.
+
+**Why the compiler is from 2018.** The sketch is not independent of its
+compiler, in two places, and both were measured with avr-gcc 16.2.0 (built
+from the released sources of GCC 16.2.0, Binutils 2.47 and AVR-LibC 2.3.2),
+on 2026-11-19:
+
+- `sendBitx8` (`PixelBitBanging.h`) walks its bit mask with `ror`, which
+  shifts the carry flag in. A colour byte that is sent with the carry set goes
+  out as `v | v >> 1`. Red and blue always start that way; green, the first
+  byte of a column, starts with whatever the compiled code before it left in
+  the flag. With 7.3.0 the stars' green (written `0x40`) is `0x60` on the
+  LEDs; with 16.2.0 it is `0x40`. Nothing else in the smoke playlist changed
+  (985 LED values, all of them that one).
+- SoftwareSerial's bit times are its delay loops plus the compiled code
+  between them. With 7.3.0 the request byte's stop bit begins 10000 cycles
+  after its start bit (exact: 10000); with 16.2.0, 9968. The receiver read a
+  sender from 13700 to 15250 baud with 7.3.0 and from 13750 to 15400 with
+  16.2.0 (nominal 14400).
+
+The image was 326 bytes smaller (text 21362 against 21688). Neither change
+is large, but the picture is no longer the same to the bit, and a compiler
+that is taken later has to come with the carry flag set by hand in front of
+every column and with the serial delays counted again. Also, simavr v1.8's
+description of the ATmega328P does not work when it is compiled against
+AVR-LibC 2.3.2's headers (the emulator stops at once).
 
 ## Speed
 
