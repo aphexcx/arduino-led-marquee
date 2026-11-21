@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
-"""A tool talks only to the emulator it started, ends only that one, and says so when it failed.
+"""A tool talks only to the emulator it started, ends only that one, and says so when it failed;
+and the stand-in's closing shows are the app's.
 
-ONE table of sittings, each run in a terminal of its own (a pseudo-terminal that is the program's
+First a table of closing shows (emulator/game_app.py's GameOnTheSign, no emulator): a game whose
+last tick gave a point its last frame did not carry, ended as a new best and as not one. What the
+sign gets, from the hit to the end, must be the app's show (energy-sign, JumpGame.kt, GameShows):
+the hit's every frame with the FINAL score; for a new best HIGH SCORE in the big font (a chonky
+slide, 1 s), never a NEW BEST flash.
+
+Then ONE table of sittings, each run in a terminal of its own (a pseudo-terminal that is the program's
 controlling terminal, as a window is). Most are emulator/game_app.py:
 
   - the emulator never comes to listen for it (it cannot be started; ANOTHER EMULATOR has the
@@ -12,6 +19,7 @@ controlling terminal, as a window is). Most are emulator/game_app.py:
     And once started as the README and a launcher start it, with no port named: it finds one
   - its emulator fails as it ends (a recording it cannot finish: status 4), or does not end when
     asked: q is typed, and the status is not 0 all the same
+  - it plays a game by itself to a new best (--auto 2 --start) and ends: the sign got HIGH SCORE
 
 After every one of them no emulator of the sitting is left running. Which process that is, the
 sitting's emulator says itself (it is started through a script that writes its process number
@@ -38,6 +46,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
 import ads_test as A  # noqa: E402
+import game_app  # noqa: E402
 import sign_emu  # noqa: E402
 
 check = A.check
@@ -124,11 +133,72 @@ def runs(pid):
         return False
 
 
+class EndsAfter:
+    """A game for GameOnTheSign: one frame that says `shown`, then the game is over at `final`, its
+    last tick having given a point that frame did not carry (as at the time limit: the stand-in once
+    showed 97 on the hit of a game that ended on 98)."""
+
+    def __init__(self, shown, final):
+        self.shown, self.final, self.score, self.sent = shown, final, shown, False
+
+    def start(self, now):
+        pass
+
+    def frame(self, now):
+        if self.sent:
+            self.score = self.final
+            return None
+        self.sent = True
+        return game_app.Frame(2, 0, [(1, 1)], stars=17, score=self.shown)
+
+
+def closing_show(shown, final, best):
+    """What the sign gets for a request every 20 ms, from the end of such a game to the end of its
+    show. A run of game frames is one entry: those with a score as the frame without its colours and
+    effect (all alike: the hit), those without as 'frames, no score' (the runner hopping)."""
+    sign = game_app.GameOnTheSign(game=EndsAfter(shown, final))
+    sign.best = best
+    sign.start()
+    got, now = [], 0
+    while now < 60000:
+        message = sign.answer(now)
+        if message is None and sign.stage == "NONE":
+            break
+        if sign.stage == "CLOSING":
+            entry = message
+            if message["type"] == "G":
+                entry = re.sub(r"p\d\d|e\d", "", message["str"]) if re.search(r"n\d+$", message["str"]) else "frames, no score"
+            if not (got and isinstance(entry, str) and got[-1] == entry):
+                got.append(entry)
+        now += 20
+    return got
+
+
 def main():
     if len(sys.argv) < 4:
         sys.exit(__doc__)
     emu, image, root = sys.argv[1:4]
     port = int(sys.argv[4]) if len(sys.argv) > 4 else 14475
+    log = []
+    # The closing shows, as the app has them (GameShows.over and .newBest): the colours are the
+    # app's (score 0xFF0080, crash 0xEF0C1D, runner 0x4F62D2). The hit is the last frame (rise 2,
+    # an obstacle b at column 1, the stars at 17) with the final score, 98, where the frame said 97.
+    pink, crash = {"r": 255, "g": 0, "b": 128}, {"str": "X", "type": "I", "r": 239, "g": 12, "b": 29}
+    hit = "20b1s17n98"
+    # what it is; the score the last frame said; the final score; the best before; the show
+    shows = [
+        ("a new best (it was 0)", 97, 98, 0,
+         [hit, crash, dict(pink, str="HIGH SCORE", type="C", dly=1000, scroll=False),
+          dict(pink, str="  98  ", type="C", dly=1500, scroll=False), "frames, no score",
+          {"str": "", "type": "S", "stars": 600}]),
+        ("not a new best (it is 120)", 97, 98, 120,
+         [hit, crash, {"str": "GAME\x0bOVER", "type": "F", "time": 200}, dict(pink, str="SCORE 98", type="O", dly=1000),
+          {"str": "BEST 120", "type": "O", "r": 79, "g": 98, "b": 210, "dly": 1000}, {"str": "", "type": "S", "stars": 300}]),
+    ]
+    for what, shown, final, best, expected in shows:
+        got = closing_show(shown, final, best)
+        check(log, got == expected, "the last tick gave a point, %s: the sign gets the app's show, the hit with the "
+              "final score%s" % (what, "" if got == expected else ": NOT SO, it gets %r" % got))
     work = tempfile.mkdtemp(prefix="game_app_test.")
     its, fails, stays, its_pid = (os.path.join(work, n) for n in ("emu", "fails", "stays", "pid"))
     for path, text in ((its, ITS_EMULATOR), (fails, BAD_EMULATOR), (stays, BAD_EMULATOR)):
@@ -153,8 +223,11 @@ def main():
         ("the emulator is there, and it is killed outright", app, emu, False, signal.SIGKILL, False, []),
         ("q is typed, and the emulator fails as it ends", app, fails, False, "q", False, ["sign-emu ended with status 4"]),
         ("q is typed, and the emulator does not end", app, stays, False, "q", False, ["sign-emu was ended by signal 9"]),
+        # (the view's line of what the sign got keeps its last 78 bytes: here all of it but the brace)
+        ("it plays a game by itself to a new best and ends (--auto 2 --start)", app + ["--auto", "2", "--start"], emu,
+         False, None, True, [score, "A NEW BEST (it was 0)", '"str":"HIGH SCORE","type":"C","r":255,"g":0,"b":128,'
+                             '"dly":1000,"scroll":false}']),
     ]
-    log = []
     for what, command, its_emu, taken, how, well, says in table:
         other = None
         if taken:        # somebody else's emulator, waiting for its own app
