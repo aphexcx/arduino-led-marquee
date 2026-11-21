@@ -154,8 +154,9 @@ class EndsAfter:
 
 def closing_show(shown, final, best):
     """What the sign gets for a request every 20 ms, from the end of such a game to the end of its
-    show. A run of game frames is one entry: those with a score as the frame without its colours and
-    effect (all alike: the hit), those without as 'frames, no score' (the runner hopping)."""
+    show. A run of game frames is one entry, [what they show, how many]: those with a score as the
+    frame without its colours and effect (all alike: the hit), those without as 'frames, no score'
+    (the runner hopping). At 20 ms a request, a beat of frames of t ms is t / 20 of them."""
     sign = game_app.GameOnTheSign(game=EndsAfter(shown, final))
     sign.best = best
     sign.start()
@@ -165,11 +166,14 @@ def closing_show(shown, final, best):
         if message is None and sign.stage == "NONE":
             break
         if sign.stage == "CLOSING":
-            entry = message
-            if message["type"] == "G":
-                entry = re.sub(r"p\d\d|e\d", "", message["str"]) if re.search(r"n\d+$", message["str"]) else "frames, no score"
-            if not (got and isinstance(entry, str) and got[-1] == entry):
-                got.append(entry)
+            if message["type"] != "G":
+                got.append(message)
+            else:
+                run = re.sub(r"p\d\d|e\d", "", message["str"]) if re.search(r"n\d+$", message["str"]) else "frames, no score"
+                if got and isinstance(got[-1], list) and got[-1][0] == run:
+                    got[-1][1] += 1
+                else:
+                    got.append([run, 1])
         now += 20
     return got
 
@@ -181,15 +185,16 @@ def main():
     port = int(sys.argv[4]) if len(sys.argv) > 4 else 14475
     log = []
     # The closing shows, as the app has them (GameShows.over and .newBest): the colours are the
-    # app's (score 0xFF0080, crash 0xEF0C1D, runner 0x4F62D2). The hit is the last frame (rise 2,
-    # an obstacle b at column 1, the stars at 17) with the final score, 98, where the frame said 97.
+    # app's (score 0xFF0080, crash 0xEF0C1D, runner 0x4F62D2). The hit is 700 ms of the last frame
+    # (rise 2, an obstacle b at column 1, the stars at 17) with the final score, 98, where the frame
+    # said 97; the runner hops for 2000 ms.
     pink, crash = {"r": 255, "g": 0, "b": 128}, {"str": "X", "type": "I", "r": 239, "g": 12, "b": 29}
-    hit = "20b1s17n98"
+    hit = ["20b1s17n98", 700 // 20]
     # what it is; the score the last frame said; the final score; the best before; the show
     shows = [
         ("a new best (it was 0)", 97, 98, 0,
          [hit, crash, dict(pink, str="HIGH SCORE", type="C", dly=1000, scroll=False),
-          dict(pink, str="  98  ", type="C", dly=1500, scroll=False), "frames, no score",
+          dict(pink, str="  98  ", type="C", dly=1500, scroll=False), ["frames, no score", 2000 // 20],
           {"str": "", "type": "S", "stars": 600}]),
         ("not a new best (it is 120)", 97, 98, 120,
          [hit, crash, {"str": "GAME\x0bOVER", "type": "F", "time": 200}, dict(pink, str="SCORE 98", type="O", dly=1000),
@@ -197,8 +202,8 @@ def main():
     ]
     for what, shown, final, best, expected in shows:
         got = closing_show(shown, final, best)
-        check(log, got == expected, "the last tick gave a point, %s: the sign gets the app's show, the hit with the "
-              "final score%s" % (what, "" if got == expected else ": NOT SO, it gets %r" % got))
+        check(log, got == expected, "the last tick gave a point, %s: the sign gets the app's show, every frame of "
+              "the hit (700 ms) with the final score%s" % (what, "" if got == expected else ": NOT SO, it gets %r" % got))
     work = tempfile.mkdtemp(prefix="game_app_test.")
     its, fails, stays, its_pid = (os.path.join(work, n) for n in ("emu", "fails", "stays", "pid"))
     for path, text in ((its, ITS_EMULATOR), (fails, BAD_EMULATOR), (stays, BAD_EMULATOR)):
