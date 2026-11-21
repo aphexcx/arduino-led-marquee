@@ -627,13 +627,17 @@ def pace_of(env, name, port, latency, stars, score, treat=False):
           % (": its runner and score as the beat before it makes them, its obstacles and treat never flashing"
              if treat else "", len(wrong), ": " + wrong[0] if wrong else ""))
     if treat and not wrong:
-        # every beat in the game: a frame drawn within 40 ms after it (a flash fades over 250 ms)
+        # every beat in the game is seen: the first frame whose colours were worked out after it (latched
+        # more than 7 ms after it) comes within the longest gap between two frames, and was held above
+        # to the flash of that moment (a flash fades over 250 ms)
         shown = [run.between(i)[0].t for i in range(len(script))]
-        beats = [b for b in run.beats if shown[0] < b < shown[-1]]
-        seen = [b for b in beats if any(b < t < b + 0.040 for t in shown)]
+        gap = max(b - a for a, b in zip(shown, shown[1:]))
+        beats = [b for b in run.beats if shown[0] < b < shown[-1] - gap]
+        seen = [b for b in beats if any(b + 0.007 < t <= b + 0.007 + gap for t in shown)]
         check(log, len(beats) >= 10 and seen == beats,
-              "the beat came %d times in the game; after %d of them a frame was drawn within 40 ms, the runner "
-              "and the score white or nearly (as worked out above)" % (len(beats), len(seen)))
+              "the beat came %d times in the game; after each of %d of them a frame was drawn within %.0f ms (7 ms "
+              "and the longest gap between two frames), its runner and score white or nearly (as worked out above)"
+              % (len(beats), len(seen), (0.007 + gap) * 1000))
     if score:
         turn, forward = turn_s(steps)
         check(log, forward and turn is not None and 10 <= turn <= 20,
