@@ -14,12 +14,14 @@
 //     e<digit>               0 nothing, 1 sparkle, 2 flash; at most once
 //     s<number>              the moving stars, 0 to 59 columns to the left of where they are at 0
 //                            (none without it); at most once
+//     n<digits>              the score: one to three digits, drawn as written at the top right
+//                            (none without it); at most once
 //   <col> is -99 to 99: an optional '-' and one or two digits. Column 0 is a face's left edge; what
 //   is left of it or right of column 59 is cut off.
 // Anything else makes the whole frame a bad one: nothing of it is drawn.
 //
-// One colour per column is the display's rule: a column an obstacle lights is in the obstacles'
-// colour, the runner's rows in it too.
+// One colour per column is the display's rule: a column an obstacle or a digit of the score lights
+// is in the obstacles' colour, the runner's rows in it too.
 //
 // Pure: no hardware and no Arduino functions, only PROGMEM and pgm_read_byte_near for the tables.
 // The same file is compiled into the sketch and into the host test (test/game_frame_test.cpp).
@@ -61,6 +63,28 @@ static const uint8_t gameShapeAt[] PROGMEM = {0, 3, 5, 10}; // where each shape 
 #define GAME_STARS 8
 #define GAME_STAR_COLOUR GAME_COLOURS // their colour: the one after the digits' (GameDisplay.h)
 static const uint8_t gameStars[GAME_STARS] PROGMEM = {0xC2, 0x49, 0x93, 0x19, 0xE1, 0x68, 0x2F, 0xB7};
+
+// The score's font: GAME_DIGIT_COLS columns a digit, one byte a column like the obstacles' (bit 1
+// is the digit's bottom row), GAME_DIGIT_ROWS rows high. It is drawn raised so that its top row is
+// the top row of the sign. The font is this table and that number, and nothing else.
+//   (the rows from the top)   0 ### #.# #.# ###   1 .#. ##. .#. ###   2 ##. ..# .#. ###
+//   3 ### .## ..# ###   4 #.# #.# ### ..#   5 ### ##. ..# ##.   6 #.. ### #.# ###
+//   7 ### ..# .#. .#.   8 ### #.# ### ###   9 ### #.# ### ..#
+#define GAME_DIGIT_ROWS 4
+#define GAME_DIGIT_COLS 3
+#define GAME_SCORE_DIGITS 3 // the most a score has
+static const uint8_t gameDigits[10 * GAME_DIGIT_COLS] PROGMEM = {
+        0x1E, 0x12, 0x1E,
+        0x0A, 0x1E, 0x02,
+        0x12, 0x16, 0x0A,
+        0x12, 0x1A, 0x1E,
+        0x1C, 0x04, 0x1E,
+        0x1A, 0x1A, 0x14,
+        0x1E, 0x0A, 0x0E,
+        0x10, 0x16, 0x18,
+        0x1E, 0x16, 0x1E,
+        0x1C, 0x14, 0x1E,
+};
 
 struct GamePicture {
     uint8_t rows[GAME_COLS];   // the lit rows of each column
@@ -114,7 +138,9 @@ static bool gameRender(const char* s, const uint8_t* runner, GamePicture& pic) {
     uint8_t runnerColour = GAME_RUNNER_COLOUR;
     uint8_t obstacleColour = GAME_OBSTACLE_COLOUR;
     int8_t stars = -1;        // how far the moving stars are moved; none below 0
-    uint8_t seen = 0;         // which of r, p, e, s have come: each at most once
+    const char* score = 0;    // the score's digits in the text, and how many (none: no score)
+    uint8_t digits = 0;
+    uint8_t seen = 0;         // which of r, p, e, s, n have come: each at most once
     uint8_t obstacles = 0;
     uint8_t shape[GAME_MAX_OBSTACLES];
     int8_t at[GAME_MAX_OBSTACLES];
@@ -152,6 +178,15 @@ static bool gameRender(const char* s, const uint8_t* runner, GamePicture& pic) {
             if (!gameReadCol(s, stars) || stars < 0 || stars >= GAME_COLS) {
                 return false;
             }
+        } else if (item == 'n') {
+            once = 16;
+            score = s;
+            for (digits = 0; digits < GAME_SCORE_DIGITS && *s >= '0' && *s <= '9'; digits++) {
+                s++;
+            }
+            if (!digits) {
+                return false;
+            }
         } else {
             return false;
         }
@@ -168,6 +203,12 @@ static bool gameRender(const char* s, const uint8_t* runner, GamePicture& pic) {
         const uint8_t from = pgm_read_byte_near(gameShapeAt + shape[obstacles]);
         const uint8_t to = pgm_read_byte_near(gameShapeAt + shape[obstacles] + 1);
         gamePut(pic, gameShapes + from, to - from, at[obstacles], 0, obstacleColour);
+    }
+    // The score as written, from its last digit, whose right column is the face's last; a dark
+    // column between two digits. Drawn as the obstacles are: its columns are theirs.
+    for (int8_t col = GAME_COLS - GAME_DIGIT_COLS; digits--; col -= GAME_DIGIT_COLS + 1) {
+        gamePut(pic, gameDigits + (uint8_t) (score[digits] - '0') * GAME_DIGIT_COLS, GAME_DIGIT_COLS, col,
+                7 - GAME_DIGIT_ROWS, obstacleColour);
     }
     if (pic.effect == GAME_EFFECT_FLASH) {
         for (uint8_t c = 0; c < GAME_COLS; c++) {

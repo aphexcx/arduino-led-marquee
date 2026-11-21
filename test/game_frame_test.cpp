@@ -1,7 +1,8 @@
 // Host test for GameFrame.h: the text of a game frame and the picture it makes. The real
 // gameRender() against a picture worked out here LED by LED, for every rise, every column a thing
-// can be given (-99 to 99), every place of the moving stars and mixes of items in any order; and a
-// table of texts that are no frame.
+// can be given (-99 to 99), every place of the moving stars and mixes of items in any order; one
+// table for the score (its font as the contract draws it, its columns, beside the rest, the frames
+// with a score that are no frame); and a table of texts that are no frame.
 //
 //   clang++ -std=c++11 -Wall -Wextra -fsanitize=address,undefined -fno-sanitize-recover=undefined \
 //       -o /tmp/game_frame_test test/game_frame_test.cpp && /tmp/game_frame_test
@@ -35,6 +36,14 @@ static const std::vector<int> NOTE_HEIGHTS[3] = {{1, 2, 1}, {3, 3}, {1, 2, 3, 2,
 // ... and the moving stars at 0: the column and the row of each
 static const int NOTE_STARS[8][2] = {{2, 7}, {9, 5}, {19, 6}, {25, 4}, {33, 7}, {40, 5}, {47, 4}, {55, 6}};
 static const int STAR_COLOUR = 8;
+// ... and the score's font, each digit's rows from the top row (row 7) down, '#' lit. A digit's
+// right column is 3 columns and a dark one left of the one after it; the last one's is column 59.
+static const char* const NOTE_DIGITS[10][4] = {
+        {"###", "#.#", "#.#", "###"}, {".#.", "##.", ".#.", "###"}, {"##.", "..#", ".#.", "###"},
+        {"###", ".##", "..#", "###"}, {"#.#", "#.#", "###", "..#"}, {"###", "##.", "..#", "##."},
+        {"#..", "###", "#.#", "###"}, {"###", "..#", ".#.", ".#."}, {"###", "#.#", "###", "###"},
+        {"###", "#.#", "###", "..#"}};
+static const int NOTE_DIGIT_ROWS = sizeof NOTE_DIGITS[0] / sizeof NOTE_DIGITS[0][0];
 
 struct Thing {
     char kind; // a b c
@@ -44,7 +53,8 @@ struct Thing {
 struct Case {
     int rise, pose, runnerCol, runnerColour, obstacleColour, effect;
     std::vector<Thing> obstacles;
-    int stars; // how far the moving stars are moved; none below 0
+    int stars;         // how far the moving stars are moved; none below 0
+    std::string score; // the score's digits as written; no score when empty
 };
 
 static int checks = 0;
@@ -71,6 +81,17 @@ static void expected(const Case& k, uint8_t rows[GAME_COLS], uint8_t colour[GAME
                     rows[c] |= 1 << row;
                 }
                 colour[c] = k.obstacleColour;
+            }
+        }
+        // The score: a column a digit lights is in the obstacles' colour, as an obstacle's is
+        const int digits = (int) k.score.size();
+        for (int d = 0; d < digits; d++) {
+            const int j = c - (GAME_COLS - 3 - 4 * (digits - 1 - d));
+            for (int row = 0; j >= 0 && j < 3 && row < NOTE_DIGIT_ROWS; row++) {
+                if (NOTE_DIGITS[k.score[d] - '0'][row][j] == '#') {
+                    rows[c] |= 1 << (7 - row);
+                    colour[c] = k.obstacleColour;
+                }
             }
         }
         if (k.effect == GAME_EFFECT_FLASH) {
@@ -102,6 +123,7 @@ static std::string text(const Case& k, unsigned order, bool spelled) {
     }
     if (spelled || k.effect) items.push_back("e" + std::to_string(k.effect));
     if (k.stars >= 0) items.push_back("s" + std::to_string(k.stars));
+    if (!k.score.empty()) items.push_back("n" + k.score);
     std::string out = std::to_string(k.rise) + std::to_string(k.pose);
     while (!items.empty()) {
         const size_t pick = order % items.size();
@@ -112,8 +134,8 @@ static std::string text(const Case& k, unsigned order, bool spelled) {
     return out;
 }
 
-static void drawnAsWorkedOut(const Case& k, unsigned order = 0, bool spelled = false) {
-    const std::string s = text(k, order, spelled);
+// The frame `s` is drawn as the picture of `k` worked out here
+static void drawnAs(const Case& k, const std::string& s) {
     uint8_t rows[GAME_COLS], colour[GAME_COLS];
     expected(k, rows, colour);
     GamePicture pic;
@@ -129,6 +151,96 @@ static void drawnAsWorkedOut(const Case& k, unsigned order = 0, bool spelled = f
             }
         }
         exit(1);
+    }
+}
+
+static void drawnAsWorkedOut(const Case& k, unsigned order = 0, bool spelled = false) {
+    drawnAs(k, text(k, order, spelled));
+}
+
+// THE SCORE (item n): one table. A row is a frame's text and the case it is, whose picture
+// expected() works out from the contract's font and columns; a row that is not good is a bad frame.
+struct ScoreRow {
+    const char* frame;
+    bool good;
+    Case k; // rise, pose, runner's column, runner's colour, obstacles' colour, effect, obstacles, stars, score
+};
+static const ScoreRow SCORE[] = {
+        // each digit's picture alone at columns 57 to 59 (a rise of 7: nothing of the runner on the face)
+        {"70n0", true, {7, 0, 2, 6, 2, 0, {}, -1, "0"}},
+        {"70n1", true, {7, 0, 2, 6, 2, 0, {}, -1, "1"}},
+        {"70n2", true, {7, 0, 2, 6, 2, 0, {}, -1, "2"}},
+        {"70n3", true, {7, 0, 2, 6, 2, 0, {}, -1, "3"}},
+        {"70n4", true, {7, 0, 2, 6, 2, 0, {}, -1, "4"}},
+        {"70n5", true, {7, 0, 2, 6, 2, 0, {}, -1, "5"}},
+        {"70n6", true, {7, 0, 2, 6, 2, 0, {}, -1, "6"}},
+        {"70n7", true, {7, 0, 2, 6, 2, 0, {}, -1, "7"}},
+        {"70n8", true, {7, 0, 2, 6, 2, 0, {}, -1, "8"}},
+        {"70n9", true, {7, 0, 2, 6, 2, 0, {}, -1, "9"}},
+        // two digits at 53 to 55 and 57 to 59, three from 49; as written (007 is three digits)
+        {"70n42", true, {7, 0, 2, 6, 2, 0, {}, -1, "42"}},
+        {"70n10", true, {7, 0, 2, 6, 2, 0, {}, -1, "10"}},
+        {"70n999", true, {7, 0, 2, 6, 2, 0, {}, -1, "999"}},
+        {"70n100", true, {7, 0, 2, 6, 2, 0, {}, -1, "100"}},
+        {"70n007", true, {7, 0, 2, 6, 2, 0, {}, -1, "007"}},
+        {"70n00", true, {7, 0, 2, 6, 2, 0, {}, -1, "00"}},
+        // anywhere after the first two characters, beside the play
+        {"00n5a20", true, {0, 0, 2, 6, 2, 0, {{'a', 20}}, -1, "5"}},
+        {"00a20n5b40", true, {0, 0, 2, 6, 2, 0, {{'a', 20}, {'b', 40}}, -1, "5"}},
+        {"11b30c45e0r5p34n678", true, {1, 1, 5, 3, 4, 0, {{'b', 30}, {'c', 45}}, -1, "678"}},
+        // an obstacle under a digit: its rows and the digit's in one column, in the obstacles' colour
+        {"00a57n7", true, {0, 0, 2, 6, 2, 0, {{'a', 57}}, -1, "7"}},
+        {"00p34b56n85", true, {0, 0, 2, 3, 4, 0, {{'b', 56}}, -1, "85"}},
+        {"00c48n123", true, {0, 0, 2, 6, 2, 0, {{'c', 48}}, -1, "123"}},
+        // the runner under the digits: its rows stay lit, in the obstacles' colour in a digit's column
+        {"30r47n123", true, {3, 0, 47, 6, 2, 0, {}, -1, "123"}},
+        {"20r46p51n88", true, {2, 0, 46, 5, 1, 0, {}, -1, "88"}},
+        // the moving stars: none in a digit's column (at s3 one would be at 59), one between two digits (52)
+        {"70n999s3", true, {7, 0, 2, 6, 2, 0, {}, 3, "999"}},
+        {"70n42s0", true, {7, 0, 2, 6, 2, 0, {}, 0, "42"}},
+        // the obstacles' colour 0: the digits are dark, and their columns have no star all the same
+        {"70p20n58s3", true, {7, 0, 2, 2, 0, 0, {}, 3, "58"}},
+        {"00p60n9a20", true, {0, 0, 2, 6, 0, 0, {{'a', 20}}, -1, "9"}},
+        // the flash: the digits are part of the play, dark in the negative
+        {"00e2n36", true, {0, 0, 2, 6, 2, 2, {}, -1, "36"}},
+        {"00e2p35n9a57", true, {0, 0, 2, 3, 5, 2, {{'a', 57}}, -1, "9"}},
+        {"30e2p02n147s12", true, {3, 0, 2, 0, 2, 2, {}, 12, "147"}},
+        {"00e2p30n5", true, {0, 0, 2, 3, 0, 2, {}, -1, "5"}},
+        // the sparkle's stars are GameDisplay.h's: here its frame is the picture without them
+        {"00e1n7", true, {0, 0, 2, 6, 2, 1, {}, -1, "7"}},
+        // the longest frame
+        {"71a-99b-99c-99a-99r-99p77e2s59n999", true,
+         {7, 1, -99, 7, 7, 2, {{'a', -99}, {'b', -99}, {'c', -99}, {'a', -99}}, 59, "999"}},
+        // frames with a score that are no frame
+        {"00n", false, {}},          {"00n-1", false, {}},     {"00n1234", false, {}},  {"00n0000", false, {}},
+        {"00n99999", false, {}},     {"00n12n3", false, {}},   {"00n1n1", false, {}},   {"00n5n5", false, {}},
+        {"00na5", false, {}},        {"00n+5", false, {}},     {"00n 5", false, {}},    {"00N5", false, {}},
+        {"00a5n", false, {}},        {"30a17b45s12n", false, {}}, {"00n1.5", false, {}}, {"00n5,", false, {}},
+        {"00n5\"", false, {}},       {"n500", false, {}},      {"0n5", false, {}},      {"00s5n1s5", false, {}},
+};
+
+static void scoreTable() {
+    for (int d = 0; d < 10; d++) { // (every column of every digit has a lit row: a digit lights all three)
+        for (int j = 0; j < 3; j++) {
+            bool lit = false;
+            for (int row = 0; row < NOTE_DIGIT_ROWS; row++) lit = lit || NOTE_DIGITS[d][row][j] == '#';
+            assert(lit);
+        }
+    }
+    for (const ScoreRow& row : SCORE) {
+        if (!row.good) {
+            GamePicture pic;
+            if (gameRender(row.frame, DREAMSTATE.data, pic)) {
+                printf("FAILED: \"%s\" is taken for a frame\n", row.frame);
+                exit(1);
+            }
+            checks++;
+            continue;
+        }
+        drawnAs(row.k, row.frame);
+        for (unsigned order = 0; order < 24; order++) { // (the same with the items in other orders)
+            drawnAsWorkedOut(row.k, order * 37, order % 2);
+        }
     }
 }
 
@@ -155,7 +267,7 @@ int main() {
     for (int rise = 0; rise <= 7; rise++) {
         for (int pose = 0; pose <= 1; pose++) {
             for (int col = -99; col <= 99; col++) {
-                drawnAsWorkedOut(Case{rise, pose, col, 6, 2, 0, {{'b', 30}}, -1}); // (no 'p': blue, red)
+                drawnAsWorkedOut(Case{rise, pose, col, 6, 2, 0, {{'b', 30}}, -1, ""}); // (no 'p': blue, red)
             }
         }
     }
@@ -163,7 +275,7 @@ int main() {
     for (char kind = 'a'; kind <= 'c'; kind++) {
         for (int col = -99; col <= 99; col++) {
             for (int effect = 0; effect <= 2; effect++) {
-                drawnAsWorkedOut(Case{3, 0, 2, 4, 6, effect, {{kind, col}}, -1});
+                drawnAsWorkedOut(Case{3, 0, 2, 4, 6, effect, {{kind, col}}, -1, ""});
             }
         }
     }
@@ -183,14 +295,20 @@ int main() {
         assert(lit == 8);
         checks++;
         for (int effect = 0; effect <= 2; effect++) {
-            drawnAsWorkedOut(Case{stars % 8, 0, 2, 6, 2, effect, {{'c', stars}, {'b', 59 - stars}}, stars});
+            drawnAsWorkedOut(Case{stars % 8, 0, 2, 6, 2, effect, {{'c', stars}, {'b', 59 - stars}}, stars, ""});
         }
     }
-    // Mixes: 0 to 4 obstacles, any colours, the items in any order, said or left out
+    // The score
+    scoreTable();
+
+    // Mixes: 0 to 4 obstacles, any colours, a score or none, the items in any order, said or left out
     for (int n = 0; n < 20000; n++) {
-        Case k{pick(0, 7), pick(0, 1), pick(0, 3) ? 2 : pick(-99, 99), pick(0, 7), pick(0, 7), pick(0, 2), {}, -1};
+        Case k{pick(0, 7), pick(0, 1), pick(0, 3) ? 2 : pick(-99, 99), pick(0, 7), pick(0, 7), pick(0, 2), {}, -1, ""};
         for (int o = pick(0, GAME_MAX_OBSTACLES); o; o--) {
             k.obstacles.push_back(Thing{(char) pick('a', 'c'), pick(0, 2) ? pick(-8, 64) : pick(-99, 99)});
+        }
+        for (int d = pick(0, 3); d; d--) {
+            k.score += (char) pick('0', '9'); // a score of none to three digits
         }
         const unsigned order = (unsigned) pick(0, 5000);
         const bool spelled = pick(0, 1);
