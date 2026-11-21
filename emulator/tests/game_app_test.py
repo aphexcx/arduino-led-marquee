@@ -30,6 +30,7 @@ usage: game_app_test.py <sign-emu> <firmware.hex> <repo root> [port]
 Python 3 standard library only. Uses one TCP port (default 14475).
 """
 import fcntl
+import math
 import os
 import pty
 import re
@@ -178,6 +179,92 @@ def closing_show(shown, final, best):
     return got
 
 
+def eats_at(column, press=True):
+    """A game at its start (30 columns a second) with a treat at `column`, no obstacle near; the
+    button is pressed at once (or never). Is the treat eaten, what does the game then give, and in
+    how many ms from the press?"""
+    game = game_app.JumpGame(rng=game_app.random.Random(7))
+    game.start(0)
+    game.next_after = 1e9                      # (no obstacle comes)
+    game.treat = [float(column), False]
+    if press:
+        game.jump(0)
+    score, now = game.score, 0
+    while game.treat is not None and now < 3000:
+        now += game.rules.tick_ms
+        game.work_out_to(now)
+    eaten = game.score == score + game.rules.treat_score
+    frames = [game.frame(now + ms) for ms in range(0, 500, 10)]
+    sparkle = sum(f.effect == 1 for f in frames) * game.rules.tick_ms
+    return eaten, sparkle, all(f.treat is None for f in frames), now
+
+
+def played(seed, seconds=180):
+    """A game played by a perfect jumper (every obstacle cleared, never a treat taken on purpose):
+    for each treat, the obstacle it came with, its kind (free or dilemma), the columns it is first
+    and last sent at, and where it was in front of the next obstacle when that obstacle started."""
+    game = game_app.JumpGame(rng=game_app.random.Random(seed))
+    game.start(0)
+    treats, sent, now = [], {}, 0
+    while game.running and now < seconds * 1000:
+        now += 10
+        had, dilemmas = game.treat, game.dilemmas
+        nearest = [x for kind, x, passed in game.coming if not passed]
+        if game.jumped_at < 0 and nearest and min(nearest) <= 8 + game.speed() * game.rules.jump_ms / 2000.0:
+            game.jump(now)
+        game.work_out_to(now)
+        if game.treat is not None and had is None:                    # placed in this tick
+            treats.append({"with": game.placed, "dilemma": game.dilemmas > dilemmas, "first": None, "last": None})
+        if game.treat is not None and game.placed == treats[-1]["with"] + 1 and "ahead" not in treats[-1]:
+            treats[-1]["ahead"] = game.coming[-1][1] - game.treat[0]  # (the next obstacle has just started)
+        frame = game.frame(now)
+        if frame and frame.treat is not None and treats:
+            treats[-1]["first"] = frame.treat if treats[-1]["first"] is None else treats[-1]["first"]
+            treats[-1]["last"] = frame.treat
+            sent[now] = frame.text()
+    return game, treats, sent
+
+
+def treat_table(log):
+    """THE TREAT, as the app has it (es-osx/treat-rules.md): one table. A row is what the rules say
+    and whether the stand-in does it."""
+    rules = game_app.Rules
+    eat = {x: eats_at(x) for x in (8 + n / 10.0 for n in range(181))}     # (every tenth of a column, 8 to 26)
+    eaten_at = [x for x, (eaten, _, _, _) in eat.items() if eaten]
+    eating = sorted({int(math.floor(x)) for x in eaten_at})
+    games = [played(seed) for seed in range(12)]
+    treats = [t for _, ts, _ in games for t in ts]
+    rows = [
+        ("a dilemma's D is round(0.77 x speed - 6.5): 17 at 30, 21 at 36, 26 at 42, 30 at 48, 35 at 54",
+         [rules.dilemma_before(s) for s in (30, 36, 42, 48, 54)] == [17, 21, 26, 30, 35],
+         [rules.dilemma_before(s) for s in (30, 36, 42, 48, 54)]),
+        ("at 30 a second the presses that eat it are those with its left column at 14 to 18, a window of "
+         "120 ms (3.6 columns)", eating == list(range(14, 19)) and round(max(eaten_at) - min(eaten_at), 1) == 3.6,
+         (eating, min(eaten_at), max(eaten_at))),
+        ("a runner that stands never eats it (at any column from 8 to 26)",
+         not any(eats_at(x, press=False)[0] for x in eat), ""),
+        ("eaten: +3, the sparkle (e1) in the frames of 400 ms from that tick, and no t from then on",
+         all(eat[x][1] == rules.sparkle_ms and eat[x][2] for x in eaten_at), sorted({eat[x][1:3] for x in eaten_at})),
+        ("one treat in the gap after every 10 to 15 obstacles (the first after obstacle 10 to 15)",
+         all(ts and 10 <= ts[0]["with"] <= 15 and all(10 <= b["with"] - a["with"] <= 15 for a, b in zip(ts, ts[1:]))
+             for _, ts, _ in games), [[t["with"] for t in ts] for _, ts, _ in games[:3]]),
+        ("about a third of them a dilemma (0.2 to 0.47 of %d)" % len(treats),
+         0.2 <= sum(t["dilemma"] for t in treats) / float(len(treats)) <= 0.47,
+         "%d of %d" % (sum(t["dilemma"] for t in treats), len(treats))),
+        ("a free one is 4 (or 5) columns in front of the next obstacle as that obstacle starts, a dilemma one D or D + 1",
+         all(t.get("ahead") is not None and (17 <= t["ahead"] <= 36 if t["dilemma"] else 4 <= t["ahead"] <= 5)
+             for t in treats), sorted({round(t["ahead"], 1) for t in treats if t.get("ahead") is not None})[:8]),
+        ("t is sent from column 44 (its right column at 46) and until it is off the face (t-3 at the last)",
+         all(t["first"] == rules.treat_up_to and t["last"] in (-3, -2, -1) for t in treats if t["last"] is not None
+             and t["last"] < 0), sorted({(t["first"], t["last"]) for t in treats})[:6]),
+        ("t is written after the obstacles, as the app writes it",
+         all(re.fullmatch(r"[0-7][01](?:[abc]-?\d+)*t-?\d+(?:e1)?s\d+n\d+", s) for _, _, sent in games
+             for s in sent.values()), next(iter(games[0][2].values()), "")),
+    ]
+    for what, ok, detail in rows:
+        check(log, ok, "the treat: %s%s" % (what, "" if ok else ": NOT SO (%s)" % (detail,)))
+
+
 def main():
     if len(sys.argv) < 4:
         sys.exit(__doc__)
@@ -200,6 +287,7 @@ def main():
          [hit, crash, {"str": "GAME\x0bOVER", "type": "F", "time": 200}, dict(pink, str="SCORE 98", type="O", dly=1000),
           {"str": "BEST 120", "type": "O", "r": 79, "g": 98, "b": 210, "dly": 1000}, {"str": "", "type": "S", "stars": 300}]),
     ]
+    treat_table(log)
     for what, shown, final, best, expected in shows:
         got = closing_show(shown, final, best)
         check(log, got == expected, "the last tick gave a point, %s: the sign gets the app's show, every frame of "

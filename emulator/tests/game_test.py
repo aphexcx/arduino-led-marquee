@@ -5,8 +5,9 @@
             Icons.h) at its column and its rise, cut off at the top edge and at the sides; the
             obstacles at their columns; the colours; the two effects; the moving stars, moved by
             the frame's number, in no column of the play; the score's digits at the top right, in
-            the obstacles' colour. One frame of 120 columns for each, both faces equal. Then a
-            message of another kind ends the game and is shown.
+            a colour of the marquee's wheel; the treat, in one of its looks (GameFrame.h's table),
+            cut at the edges. One frame of 120 columns for each, both faces equal. Then a message
+            of another kind ends the game and is shown.
   misses    ONE table of answers that are not a good frame (absent, torn, no JSON, an object that
             is no message, a frame the sign cannot read, late). For every row: nothing is drawn and
             the picture before stays, the sign says nothing to the app but its request, it asks
@@ -16,15 +17,21 @@
             drawn, and one more makes the miss row above. Then no answers at all, and an answer
             that never ends: the sign leaves the game after GAME_LEAVE_MS and asks the ordinary way.
   pace      a scripted game at three reaction times of the app: without the moving stars and
-            the score, with the stars, and with the stars and the score: frames a second, and the frame delivery latency: the time from the app having
+            the score, with the stars, with the stars and the score, and with those, a treat in
+            every frame and the beat input pulsed 138 times a minute: frames a second, and the
+            frame delivery latency: the time from the app having
             something new (a button press) to the frame that carries it being on the LEDs. (When
             the runner is seen to move is the app's matter: its jump has no row yet in the frames
-            of its first milliseconds.)
+            of its first milliseconds.) With the beats every frame's runner and score are as the
+            beat before it makes them (white, back to their colour over 250 ms), its obstacles
+            never flash, and the score's place on the wheel goes round in 10 to 20 s.
 
 A scripted peer answers each of the sign's requests with the next item of a list; sign-emu runs the
 firmware headless and writes a frames dump; everything is checked from that dump. What a picture
-must be is worked out here from Icons.h, the shapes, stars and digits below (the contract note's)
-and the palette in GameDisplay.h.
+must be is worked out here from Icons.h, the shapes, stars and digits below (the contract note's),
+the palette and the treat's looks in GameFrame.h and the gamma table of Gamma.h. The sign's clock is
+not the emulator's (it loses time while a frame goes out): where a colour depends on it, the
+score's place on the wheel and the time since a beat, any value it can have then is taken.
 
 usage: game_test.py <sign-emu> <firmware.hex> <repo root> <work dir> [port]
 Python 3 standard library only. Uses five TCP ports from `port` (default 14470).
@@ -49,14 +56,18 @@ BYTE_S = 10 / 14400.0                   # a byte on the wire
 LATENCY_MS = 5                          # sign-emu's reply latency unless a run says otherwise
 # The obstacles (the contract note): how many rows each column is high, from the ground
 SHAPES = {"a": [1, 2, 1], "b": [3, 3], "c": [1, 2, 3, 2, 1]}
-# The moving stars at 0 (the contract note): the column and the row of each; and their colour's place
+# The moving stars at 0 (the contract note): the column and the row of each
 STARS = [(2, 7), (9, 5), (19, 6), (25, 4), (33, 7), (40, 5), (47, 4), (55, 6)]
-STAR_COLOUR = 8
+# The places in GameFrame.h's palette: the treat's purple (and its glint after it), the stars' last
+TREAT_COLOUR = 8
 # The score's font (the contract note): each digit's rows from the top row (row 7) down, '#' lit.
 # The last digit's right column is 59, a dark column between two digits.
 DIGITS = ["### #.# #.# ###", ".#. ##. .#. ###", "##. ..# .#. ###", "### .## ..# ###", "#.# #.# ### ..#",
           "### ##. ..# ##.", "#.. ### #.# ###", "### ..# .#. .#.", "### #.# ### ###", "### #.# ### ..#"]
-ITEM = r"[abcr]-?[0-9]{1,2}|p[0-7]{2}|e[0-2]|s[0-9]{1,2}|n[0-9]{1,3}"
+ITEM = r"[abcrt]-?[0-9]{1,2}|p[0-7]{2}|e[0-2]|s[0-9]{1,2}|n[0-9]{1,3}"
+# A column's colour in a picture worked out here: a place in the palette; RUNNER (the runner's
+# colour digit, flashing to the beat); or SCORE (the wheel's colour, flashing to the beat)
+RUNNER, SCORE = "runner", "score"
 
 
 def frame_bytes(text, keys=2):
@@ -67,18 +78,19 @@ def frame_bytes(text, keys=2):
 
 
 # ---- what a frame's text draws -----------------------------------------------------------------
-def picture(env, text):
-    """One face of the frame: for each of the 60 columns (row byte, bit 1 the bottom row; the
-    colour digit; the right shift of its colour). None for a text that is no frame."""
+def picture(env, text, look=0):
+    """One face of the frame, its treat in look number `look`: for each of the 60 columns (row byte,
+    bit 1 the bottom row; the colour: a place in the palette, RUNNER or SCORE; the right shift of
+    its colour). And the frame's effect, and its runner's colour digit. None for a text that is no frame."""
     m = re.fullmatch(r"([0-7])([01])((?:%s)*)" % ITEM, text)
     if not m:
         return None
     items = re.findall(ITEM, m.group(3))
     kinds = [i[0] for i in items]
-    if any(kinds.count(k) > 1 for k in "rpesn") or sum(k in "abc" for k in kinds) > 4:
+    if any(kinds.count(k) > 1 for k in "rpesnt") or sum(k in "abc" for k in kinds) > 4:
         return None
     rise, pose = int(m.group(1)), int(m.group(2))
-    runner_col, colours, effect, stars, score = 2, "62", 0, None, ""
+    runner_col, colours, effect, stars, score, treat = 2, "62", 0, None, "", None
     for i in items:
         if i[0] == "r":
             runner_col = int(i[1:])
@@ -88,18 +100,34 @@ def picture(env, text):
             effect = int(i[1:])
         elif i[0] == "n":
             score = i[1:]
+        elif i[0] == "t":
+            treat = int(i[1:])
         elif i[0] == "s":
             stars = int(i[1:])
             if stars >= PANEL:
                 return None
     lit = [set() for _ in range(PANEL)]          # the lit rows of each column, 1 = the bottom row
     colour = [0] * PANEL
+    # from the weakest colour to the strongest: the runner, the score, the treat, the obstacles
     icon = env["runner"][pose * env["runner_cols"]:(pose + 1) * env["runner_cols"]]
     for i, byte in enumerate(icon):
         rows = {r + rise for r in range(1, 8) if byte >> r & 1 and r + rise <= 7}
         if rows and 0 <= runner_col + i < PANEL:
             lit[runner_col + i] |= rows
-            colour[runner_col + i] = int(colours[0])
+            colour[runner_col + i] = RUNNER if int(colours[0]) else 0
+    for d, digit in enumerate(score):
+        left = PANEL - 3 - 4 * (len(score) - 1 - d)
+        for top, line in enumerate(DIGITS[int(digit)].split()):
+            for j, led in enumerate(line):
+                if led == "#":
+                    lit[left + j].add(7 - top)
+                    colour[left + j] = SCORE
+    for j in range(env["treat_cols"] if treat is not None else 0):
+        byte, tint = env["treat"][(look * env["treat_cols"] + j) * 2:(look * env["treat_cols"] + j) * 2 + 2]
+        rows = {r for r in range(1, 8) if byte >> r & 1}
+        if rows and 0 <= treat + j < PANEL:
+            lit[treat + j] |= rows
+            colour[treat + j] = TREAT_COLOUR + tint
     for i in items:
         if i[0] in SHAPES:
             for n, height in enumerate(SHAPES[i[0]]):
@@ -107,13 +135,6 @@ def picture(env, text):
                 if 0 <= c < PANEL:
                     lit[c] |= set(range(1, height + 1))
                     colour[c] = int(colours[1])
-    for d, digit in enumerate(score):          # (its columns are the obstacles': in their colour)
-        left = PANEL - 3 - 4 * (len(score) - 1 - d)
-        for top, line in enumerate(DIGITS[int(digit)].split()):
-            for j, led in enumerate(line):
-                if led == "#":
-                    lit[left + j].add(7 - top)
-                    colour[left + j] = int(colours[1])
     shift = 0
     if effect == 2:
         # the colours first, then the negative: what colour 0 leaves dark is lit like all that is dark
@@ -125,28 +146,53 @@ def picture(env, text):
         for column, row in STARS:
             c = (column - stars) % PANEL
             if not lit[c]:
-                lit[c], colour[c] = {row}, STAR_COLOUR
-    return [(sum(1 << r for r in rows), colour[c], shift) for c, rows in enumerate(lit)], effect
+                lit[c], colour[c] = {row}, env["star_colour"]
+    return [(sum(1 << r for r in rows), colour[c], shift) for c, rows in enumerate(lit)], effect, int(colours[0])
+
+
+def sent(rgb, shift=0):
+    """The three bytes an LED asked to be (r, g, b) goes out as, 'rrggbb': red and blue with the
+    carry flag set (v | v >> 1), green as it is (tests/fixes_test.py's as_sent; the palette's values
+    are runs of one-bits, which it leaves as they are)."""
+    r, g, b = (v >> shift for v in rgb)
+    return "%02x%02x%02x" % (A.carried(r), g, A.carried(b))
 
 
 def as_sent(env, digit, shift):
-    return "".join("%02x" % (v >> shift) for v in env["palette"][digit * 3:digit * 3 + 3])
+    return sent(env["palette"][digit * 3:digit * 3 + 3], shift)
 
 
-def frame_is(env, frame, want, stars=0):
+def fade(v, since):
+    """MarqueeColour.h's beatFade, as the contract writes it: white at the beat, back over 250 ms."""
+    return v if since >= 250 else (255 * (250 - since) + v * since) // 250
+
+
+def wheel(env, k):
+    """The marquee's wheel at step k (the contract's three parts of 256 steps, through Gamma.h)."""
+    part, step = divmod(k % 768, 256)
+    up, down = env["gamma"][step], env["gamma"][255 - step]
+    return [(up, down, 0), (down, 0, up), (0, up, down)][part]
+
+
+def frame_is(env, frame, want, stars=0, beat=None, runner=6, steps=None):
     """None when the frame is this picture on both faces, LED for LED and colour for colour, or
     says what is not. With `stars`: up to that many more LEDs, one to a column the picture leaves
-    dark, each in one of the colours 1 to 7; the same on both faces."""
+    dark, each in one of the colours 1 to 7; the same on both faces. `beat` is the range of ms since
+    the last beat the sign's clock can have said when it worked the colours out (None: no beat, as
+    from 250 ms on); `runner` the frame's runner colour digit. The score's columns are all in one
+    colour, the wheel's at some step as the beat makes it; the steps it can be go into `steps`."""
     if frame.bits != COLS * 24 or not frame.clean:
         return "not 120 columns of clean bits (%d bits)" % frame.bits
     if not frame.equal:
         return "the two faces differ"
     if frame.pause > A.MAX_PAUSE_US:
         return "a pause of %.1f us inside the frame" % frame.pause
-    extra = 0
-    for c, (rows, digit, shift) in enumerate(want):
-        sent = as_sent(env, digit, shift)
-        if sent == "000000":
+    since = range(max(0, beat[0]), min(250, beat[1]) + 1) if beat and beat[0] < 250 else range(250, 251)
+    flashed = {sent([fade(v, s) for v in env["palette"][runner * 3:runner * 3 + 3]]) for s in since}
+    extra, scored = 0, set()
+    for c, (rows, colour, shift) in enumerate(want):
+        allowed = flashed if colour == RUNNER else None if colour == SCORE else {as_sent(env, colour, shift)}
+        if allowed == {"000000"}:
             rows = 0
         if stars and not rows and frame.mask[c]:
             extra += 1
@@ -155,11 +201,33 @@ def frame_is(env, frame, want, stars=0):
             continue
         if frame.mask[c] != rows:
             return "column %d: rows %s, not %s" % (c, bin(frame.mask[c]), bin(rows))
-        if rows and frame.colours[c] != sent:
-            return "column %d: colour %s, not %s" % (c, frame.colours[c], sent)
+        if rows and colour == SCORE:
+            scored.add(frame.colours[c])
+        elif rows and frame.colours[c] not in allowed:
+            return "column %d: colour %s, not %s" % (c, frame.colours[c], " or ".join(sorted(allowed)[:3]))
     if extra > stars:
         return "%d stars" % extra
+    if scored:
+        places = {k for k, s in env["wheel_sent"].get(next(iter(scored)), []) if s in since} if len(scored) == 1 else ()
+        if not places:
+            return "the score is in %s, not in one colour of the wheel%s" % (
+                ", ".join(sorted(scored)), " (a beat %d to %d ms ago)" % (since[0], since[-1]) if beat else "")
+        if steps is not None:
+            steps.append((frame.t, places))
     return None
+
+
+def drawn_as(env, frame, text, stars=0, beat=None, steps=None):
+    """frame_is for the frame of this text, its treat in whichever of its looks it is."""
+    looks = range(env["treat_looks"]) if "t" in text else [0]
+    problems = []
+    for look in looks:
+        want, _, runner = picture(env, text, look)
+        problem = frame_is(env, frame, want, stars, beat, runner, steps)
+        if problem is None:
+            return None
+        problems.append(problem)
+    return problems[0] + ("" if len(problems) == 1 else " (in look 0; in none of the %d looks)" % len(problems))
 
 
 # ---- running the emulator ------------------------------------------------------------------------
@@ -200,11 +268,13 @@ class Run:
         if status != 0:
             raise RuntimeError("%s: sign-emu exited with status %s: %s"
                                % (name, status, open(log).read().strip()[-300:]))
-        self.requests, self.said, self.frames, cache = [], "", [], {}
+        self.requests, self.said, self.frames, self.beats, cache = [], "", [], [], {}
         for line in open(dump, encoding="utf-8"):
             d = json.loads(line)
             if d["type"] == "frame":
                 self.frames.append(A.Frame(d, cache))
+            elif d["type"] == "beat":
+                self.beats.append(d["t"])
             elif d["type"] == "tx":
                 if d.get("char") == "~":
                     self.requests.append(d["t"])
@@ -263,6 +333,11 @@ PICTURES = (
     + ["70n999s3", "70p20n58s3", "00p60n9a20", "00e1n7", "00e1n999", "30e1a20n64"]  # ... the stars, colour 0, sparkle
     + ["00e2n36", "00e2p35n9a57", "30e2p02n147s12", "00n5a20s12", "11b30c45e0r5p34n678"]  # ... the flash; any order
     + ["71a-99b-99c-99a-99r-99p77e2s59n999"]                                        # the longest with the score
+    + ["70t20", "70t0", "70t44", "70t57", "70t-1", "70t-2", "70t-3", "70t58", "70t59", "70t60"]   # the treat; cut
+    + ["00t8", "30t10", "00p02t8", "71r40t42"]                                       # ... over the runner
+    + ["00t20a21", "00b19t20", "00c18t20", "00p60t20a22", "70t56n9"]                 # ... an obstacle, a digit
+    + ["00e2t20", "00e2p02t8", "70t0s0", "70t17s0", "00e1t20", "00a12t30s41n17"]      # ... flash, stars, sparkle
+    + ["71a-99b-99c-99a-99r-99p77e2s59n999t-99", "11b30c45e0r5p34n678t20"]           # the longest; any order
 )
 
 
@@ -273,10 +348,10 @@ def pictures(env, name, port):
     log = ["%d game frames, each drawn once as its text reads, on both faces" % len(PICTURES)]
     wrong, starry = [], []
     for i, text in enumerate(PICTURES):
-        want, effect = picture(env, text)
+        want, effect, _ = picture(env, text)
         frames = run.between(i)
         problem = "%d frames" % len(frames) if len(frames) != 1 else \
-            frame_is(env, frames[0], want, env["stars"] if effect == 1 else 0)
+            drawn_as(env, frames[0], text, env["stars"] if effect == 1 else 0)
         if problem:
             wrong.append("%s: %s" % (text, problem))
         elif effect == 1:
@@ -347,6 +422,7 @@ def miss_table(env):
         ("five obstacles", frame_bytes("30a1a9b20b30c40")),
         ("a column of three digits", frame_bytes("30a100")),
         ("a score of four digits", frame_bytes("30a17n1234")),
+        ("a treat's column of three digits", frame_bytes("30a17t100")),
         ("nine bytes that are nobody's, outside the text and in it: one more than a frame may lose",
          noisy("30a17", 9)),
     ]
@@ -389,7 +465,7 @@ def misses(env, name, port):
 
     def drawn(i, text):
         frames = run.between(i)
-        return len(frames) == 1 and frame_is(env, frames[0], picture(env, text)[0]) is None
+        return len(frames) == 1 and drawn_as(env, frames[0], text) is None
 
     log = ["answers that are not a good frame: nothing is drawn, nothing is said, the sign asks again"]
     check(log, run.said == "", "in the whole run the sign sends nothing but its requests: no error text (%r)" % run.said)
@@ -416,10 +492,10 @@ def misses(env, name, port):
     # Late: the answer comes when the sign has given it up and asked again. It is a good frame
     # and may be drawn; whatever is drawn after it is a frame that was sent, in the order sent; and
     # the last frames are drawn each in its own exchange again.
-    sent = [picture(env, t)[0] for t in after_late]
+    sent_texts = list(after_late)
     shown, order_ok = [], True
     for f in run.between(late_at, last_good + 1):
-        which = [k for k, want in enumerate(sent) if frame_is(env, f, want) is None]
+        which = [k for k, text in enumerate(sent_texts) if drawn_as(env, f, text) is None]
         order_ok = order_ok and bool(which) and (not shown or which[0] > shown[-1])
         shown += which[:1]
     in_step = drawn(last_good - 1, after_late[-2]) and drawn(last_good, after_late[-1])
@@ -428,7 +504,7 @@ def misses(env, name, port):
           "an answer %d ms late: nothing is drawn while it is awaited, every frame drawn after it is one that "
           "was sent, in the order sent (frames %s of 0 to %d), and the last two are drawn in their own exchanges "
           "again (%s ms for the %d requests)"
-          % (late_ms, ",".join(map(str, shown)) or "none", len(sent) - 1,
+          % (late_ms, ",".join(map(str, shown)) or "none", len(sent_texts) - 1,
              "%.0f" % took if took is not None else "?", len(after_late)))
 
     # No answers at all: the sign asks quickly until GAME_LEAVE_MS is over, then the ordinary way
@@ -479,33 +555,94 @@ def misses(env, name, port):
 
 
 # ---- pace --------------------------------------------------------------------------------------------
-def game_script(n, stars=False, score=False):
+def game_script(n, stars=False, score=False, treat=False):
     """A game as the app would send it: two obstacles coming in from the right, a jump over each,
     the runner's two pictures in turn. With `stars`: and the moving stars, a column every 4 frames.
-    With `score`: and a score in every frame, the frame's number (one, two and three digits)."""
+    With `score`: and a score in every frame, the frame's number (one, two and three digits). With
+    `treat`: and a treat in every frame, after the obstacles as the app writes it, from column 44
+    to -3 and again."""
     jump = [1, 3, 5, 6, 7, 7, 7, 7, 6, 5, 3, 1]
     out = []
     for k in range(n):
         first, second = 59 - k % 65, 59 - (k + 33) % 65
         text = "%d%d" % (max([jump[j] for j in range(len(jump)) if 20 - j in (first, second)] or [0]), k // 4 % 2)
         text += "abc"[k // 65 % 3] + str(first) + "bca"[(k + 33) // 65 % 3] + str(second)
+        text += "t%d" % (44 - k % 48) if treat else ""
         out.append(text + ("s%d" % (k // 4 % PANEL) if stars else "") + ("n%d" % k if score else ""))
     return out
 
 
 def pace(env, name, port, latency):
     return (pace_of(env, name, port, latency, False, False) + pace_of(env, name + "_stars", port, latency, True, False)
-            + pace_of(env, name + "_stars_score", port, latency, True, True))
+            + pace_of(env, name + "_stars_score", port, latency, True, True)
+            + pace_of(env, name + "_stars_score_treat_beat", port, latency, True, True, True))
 
 
-def pace_of(env, name, port, latency, stars, score):
-    script = game_script(240, stars, score)
-    run = Run(env, name, [frame_bytes(t) for t in script], port, 60, ("--link-latency-ms", str(latency)))
-    log = ["a game of %d frames%s%s, the app answering %d ms after each request"
-           % (len(script), " with the moving stars" if stars else "", " and the score" if score else "", latency)]
-    wrong = [t for i, t in enumerate(script) if len(run.between(i)) != 1
-             or frame_is(env, run.between(i)[0], picture(env, t)[0]) is not None]
-    check(log, not wrong and run.said == "", "every frame is drawn once, as its text reads (%d are not)" % len(wrong))
+def beat_window(beats, t):
+    """The ms since the last beat that the sign's clock can say when it works out the colours of a
+    frame latched at t (s): they are worked out up to 7 ms before the latch, and the sign's clock
+    runs slower than the emulator's while frames go out (by 0.88 measured; 0.8 taken), and moves by
+    1 or 2 ms. A beat in those 7 ms may come after the colours (while the frame goes out, interrupts
+    are off: the beat is taken when it is over): then the beat before it counts, or none. None when
+    no beat has come."""
+    before = [b for b in beats if b <= t]
+    if not before:
+        return None
+    d = (t - before[-1]) * 1000
+    if d >= 7:
+        return int(0.8 * (d - 7)) - 3, int(math.ceil(d)) + 2
+    return 0, int(math.ceil((t - before[-2]) * 1000)) + 2 if len(before) > 1 else 250
+
+
+def turn_s(steps):
+    """From the score's places on the wheel in a run's frames, (time, possible steps): how many s a
+    whole turn of 768 steps takes, and whether every frame is at or after the frame before (by 0 to
+    20 steps). The place is followed from frame to frame, the nearest step forward."""
+    if len(steps) < 2:
+        return None, False
+    at, forward, walked = min(steps[0][1]), True, 0
+    for _, places in steps[1:]:
+        ahead = min((k - at) % 768 for k in places)
+        forward = forward and ahead <= 20
+        walked += ahead
+        at = (at + ahead) % 768
+    return 768.0 * (steps[-1][0] - steps[0][0]) / walked if walked else None, forward
+
+
+def pace_of(env, name, port, latency, stars, score, treat=False):
+    script = game_script(240, stars, score, treat)
+    options = ("--link-latency-ms", str(latency)) + (("--bpm", "138") if treat else ())
+    run = Run(env, name, [frame_bytes(t) for t in script], port, 60, options)
+    log = ["a game of %d frames%s%s%s, the app answering %d ms after each request"
+           % (len(script), " with the moving stars" if stars else "", " and the score" if score else "",
+              ", a treat in every frame and 138 beats a minute" if treat else "", latency)]
+    steps, wrong = [], []
+    for i, t in enumerate(script):
+        frames = run.between(i)
+        problem = "%d frames" % len(frames) if len(frames) != 1 else \
+            drawn_as(env, frames[0], t, beat=beat_window(run.beats, frames[0].t), steps=steps)
+        if problem:
+            wrong.append("%s: %s" % (t, problem))
+    check(log, not wrong and run.said == "", "every frame is drawn once, as its text reads%s (%d are not%s)"
+          % (": its runner and score as the beat before it makes them, its obstacles and treat never flashing"
+             if treat else "", len(wrong), ": " + wrong[0] if wrong else ""))
+    if treat and not wrong:
+        # every beat in the game is seen: the first frame whose colours were worked out after it (latched
+        # more than 7 ms after it) comes within the longest gap between two frames, and was held above
+        # to the flash of that moment (a flash fades over 250 ms)
+        shown = [run.between(i)[0].t for i in range(len(script))]
+        gap = max(b - a for a, b in zip(shown, shown[1:]))
+        beats = [b for b in run.beats if shown[0] < b < shown[-1] - gap]
+        seen = [b for b in beats if any(b + 0.007 < t <= b + 0.007 + gap for t in shown)]
+        check(log, len(beats) >= 10 and seen == beats,
+              "the beat came %d times in the game; after each of %d of them a frame was drawn within %.0f ms (7 ms "
+              "and the longest gap between two frames), its runner and score white or nearly (as worked out above)"
+              % (len(beats), len(seen), (0.007 + gap) * 1000))
+    if score:
+        turn, forward = turn_s(steps)
+        check(log, forward and turn is not None and 10 <= turn <= 20,
+              "the score's colour goes round the marquee's wheel, step after step, a whole turn in %s s of play "
+              "(10 to 20)" % ("%.1f" % turn if turn else "?"))
     check(log, run.asked(len(script)), "after the last frame the sign asks for the next one")
     if wrong or not run.asked(len(script)):
         return log
@@ -524,7 +661,7 @@ def pace_of(env, name, port, latency, stars, score):
                "delivery latency (the app has a press -> the frame with it is on the LEDs) %.0f to %.0f ms, "
                "%.0f ms on average"
                % (min(sizes), max(sizes), rate, min(exchange), max(exchange), soonest, latest, mean))
-    env["measured"][latency, stars, score] = (rate, soonest, mean, latest)
+    env["measured"][latency, stars, score, treat] = (rate, soonest, mean, latest)
     check(log, rate >= env["least_rate"] and latest <= 2000 / env["least_rate"],
           "at least %d frames a second, and no frame is delivered later than two frames at that rate (%d ms)"
           % (env["least_rate"], 2000 / env["least_rate"]))
@@ -539,15 +676,18 @@ def main():
     def read(name):
         return open(os.path.join(root, name), encoding="utf-8", errors="replace").read()
 
-    fonts, sketch, display = read("Fonts.h"), read("LED_Marquee.ino"), read("GameDisplay.h")
+    fonts, sketch, display, frame_h = read("Fonts.h"), read("LED_Marquee.ino"), read("GameDisplay.h"), read("GameFrame.h")
     gamma = A.table(read("Gamma.h"), "gamma[]")
     std = A.table(fonts, "FontStd5x7[]")
     icon = A.table(read("Icons.h"), "DREAMSTATE =")
-    palette = A.table(display, "gamePalette[")
+    palette = A.table(frame_h, "gamePalette[")
+    treat = A.table(frame_h, "gameTreat[")
     flash = re.search(r"^#define\s+GAME_FLASH_SHIFT\s+(\d+)\s*$", display, re.M)
     stars = re.search(r"^#define\s+GAME_SPARKLE_STARS\s+(\d+)\s*$", display, re.M)
-    if len(icon) != 1 + 2 * icon[0] or len(palette) != 27 or not flash or not stars or len(std) != 95 * 5 + 7:
-        sys.exit("Icons.h, GameDisplay.h or Fonts.h is not what this test expects")
+    looks, treat_cols = A.setting(frame_h, "GAME_TREAT_LOOKS", 0), A.setting(frame_h, "GAME_TREAT_COLS", 0)
+    if len(icon) != 1 + 2 * icon[0] or len(palette) != 33 or not flash or not stars or len(std) != 95 * 5 + 7 \
+            or treat_cols != 3 or not looks or len(treat) != looks * treat_cols * 2:
+        sys.exit("Icons.h, GameFrame.h, GameDisplay.h or Fonts.h is not what this test expects")
     env = {
         "emu": sys.argv[1], "hex": sys.argv[2], "work": sys.argv[4],
         "std": A.Font(std, 5, 7), "gamma": gamma,
@@ -561,7 +701,13 @@ def main():
         "runner": icon[1:], "runner_cols": icon[0], "palette": palette,
         "flash_shift": int(flash.group(1)), "stars": int(stars.group(1)),
         "measured": {}, "least_rate": 20,
+        "treat": treat, "treat_looks": looks, "treat_cols": treat_cols, "star_colour": len(palette) // 3 - 1,
     }
+    # every colour the score can be sent in, and at which step of the wheel and how long after a beat
+    env["wheel_sent"] = {}
+    for k in range(768):
+        for since in range(251):
+            env["wheel_sent"].setdefault(sent([fade(v, since) for v in wheel(env, k)]), []).append((k, since))
     env["star_colours"] = {as_sent(env, d, 0) for d in range(1, 8)}
     port = int(sys.argv[5]) if len(sys.argv) > 5 else 14470
     os.makedirs(env["work"], exist_ok=True)
