@@ -7,6 +7,16 @@
 // A frame is the whole picture: all 120 columns are sent, so nothing is cleared before it and
 // nothing of the picture before it stays.
 //
+// A frame is read as every message is: through the chooser's reader (ChooserReader, in
+// ChooserDisplay.h), so that ArduinoJson's parser is built once in the image. So the bytes that are
+// nobody's (outside a text every byte that is neither white space nor 0x20 to 0x7E, inside a text
+// a byte above 0x7F that is no part of a UTF-8 character: what noise on the line is received as)
+// are dropped before the frame is read, up to CHOOSER_MAX_NOISE of them in one frame, and a frame
+// that is good without them is drawn. From the next one on they are read as they come, as in every
+// message. And as any byte does, a byte that is dropped gives the next one GAME_MISS_MS again: a line
+// that carries only noise is a miss GAME_MISS_MS behind its last such byte (and never later than
+// GAME_LEAVE_MS allows).
+//
 // WHEN AN ANSWER IS NOT A GOOD FRAME (it does not come, it stops half way, it never ends, it is no
 // JSON, it is an object without a type or with an empty one, it has more than GAME_MAX_KEYS keys,
 // it is a game frame the sign cannot read) there is one rule for all of it:
@@ -25,7 +35,7 @@
 //
 // This file is part of the sketch: LED_Marquee.ino includes it after everything it uses (the GAME_*
 // settings at the top of the sketch, MSGTYPE_GAME, the Dreamstate icon, sendColumnRGB, show,
-// startSerial, stopSerial, softSerial and its AppSerial, json).
+// startSerial, stopSerial, softSerial and its AppSerial, json, ChooserReader).
 //
 
 #ifndef LED_MARQUEE_GAMEDISPLAY_H
@@ -131,7 +141,8 @@ bool showAsGame() {
         startSerial(); // (this starts with an empty buffer)
         softSerial.setTimeout(GAME_MISS_MS);
         softSerial.print('~');
-        whole = deserializeJson(json, softSerial) == DeserializationError::Ok;
+        ChooserReader reader = {false, false, false, false, 0, 0, -1}; // (no brace taken in front)
+        whole = deserializeJson(json, reader) == DeserializationError::Ok;
         softSerial.setTimeout(1000);
     }
 }
