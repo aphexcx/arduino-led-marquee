@@ -19,7 +19,9 @@
 #      bench image (make firmware-debug: its numbers on panel B and its line of
 #      numbers to the app are read and held against the wire; and a copy of that
 #      run with panel B left on an older attention must fail), then fake_app.py
-#      --contract 3 at real-time speed, checked the same way
+#      --contract 3 at real-time speed, checked the same way; and bytes of the
+#      app's that begin while the sign's own request goes out, with the answer
+#      right behind them (tests/cross_test.py)
 #   6. the ads on the real firmware: letters one by one and chonky, short
 #      texts and texts wider than a panel, hearts, and how long each stays
 #      (tests/ads_test.py)
@@ -42,9 +44,9 @@
 #
 # The TCP ports can be moved with SIGN_EMU_TEST_PORT (default 14417; the link
 # tests use the eleven after it, the push tests the four after those, the ads
-# test three from the sixteenth, the test of 7 seven from the twenty-fourth, the
-# test of 8 two from the thirty-first, the tests of 9 six from the fortieth) so
-# two lanes can run the tests at once.
+# test three from the sixteenth, the cross test the twentieth, the test of 7
+# seven from the twenty-fourth, the test of 8 two from the thirty-first, the
+# tests of 9 six from the fortieth) so two lanes can run the tests at once.
 set -eu
 cd "$(dirname "$0")"
 
@@ -168,6 +170,14 @@ if [ -n "$contract3" ]; then
         exit 1
     fi
     python3 tests/push_test.py check ../Fonts.h "$OUT/chooser_push.jsonl"
+
+    if grep -q changedAt ../SoftwareSerial/SoftwareSerial.cpp; then
+        echo "== chooser contract 3: bytes that begin while the sign's request goes out, and the answer behind them"
+        python3 tests/cross_test.py build/sign-emu "$HEX" ../Fonts.h build/tests/cross $((PORT + 20))
+    else
+        echo "== chooser contract 3: bytes under the sign's request: SKIPPED, this firmware's serial port"
+        echo "   does not find its step again behind them (no changedAt in ../SoftwareSerial/SoftwareSerial.cpp)"
+    fi
 else
     echo "== chooser contract 3: SKIPPED, this firmware does not have it (no"
     echo "   CHOOSER_ATTN_FIRST_BYTE_MS in ../LED_Marquee.ino). The break directive itself was"

@@ -580,6 +580,7 @@ def environment(root, emu=None, image=None, work=None):
         "std": A.Font(std, 5, 7), "chonk": A.Font(chonk, 8, 8), "gamma": gamma,
         "letter": A.setting(sketch, "CHARS_ONEBYONE_DELAY"), "step": A.setting(sketch, "AD_SCROLL_STEP_MS"),
         "hold": A.setting(sketch, "AD_SCROLL_HOLD_MS"), "wave": A.setting(sketch, "AD_WAVE_FRAME_MS"),
+        "request_quiet": A.request_quiet(sketch),
     }
 
 

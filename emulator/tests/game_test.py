@@ -410,12 +410,21 @@ def misses(env, name, port):
     run = Run(env, name + "_endless", [frame_bytes(good[0]), endless], port, 30)
     drawn_at = run.between(0)[-1].t if drawn(0, good[0]) else None
     left_after = (run.requests[2] - drawn_at) * 1000 if drawn_at is not None and run.asked(2) else None
-    check(log, left_after is not None and env["leave"] - 2.5 <= left_after <= env["leave"] + 6
-          and not run.between(1) and run.said == "",
+    # When the sign stops reading is seen in the time of its next request, the ordinary one: a
+    # firmware that asks at once asks GAME_LEAVE_MS after the last good frame. A firmware that waits
+    # for a quiet line before every request (REQUEST_QUIET_MS) cannot ask while these bytes are still
+    # arriving: it asks when they are over and it has listened CHOOSER_ATTN_FIRST_BYTE_MS behind the
+    # last LOW it saw. Its request then says only that the game asked nothing more and drew nothing.
+    low, high, what = env["leave"] - 2.5, env["leave"] + 6, "the sign reads no more of it and asks the ordinary way"
+    if env["request_quiet"] and drawn_at is not None and run.asked(1):
+        over = (run.requests[1] - drawn_at) * 1000 + LATENCY_MS + (1 + len(endless)) * BYTE_S * 1000
+        low, high = max(low, over + env["attn"] - 2.5), max(high, over + env["attn"] + 6)
+        what = ("the game has asked nothing more, and the ordinary request waits for the line: it goes out "
+                "%d ms behind the blanks' end (%.1f ms)" % (env["attn"], over))
+    check(log, left_after is not None and low <= left_after <= high and not run.between(1) and run.said == "",
           "an answer that never ends (blanks for %.2f s): the last picture stays, nothing is said, and %s ms after "
-          "the last good frame (%.0f to %d) the sign reads no more of it and asks the ordinary way"
-          % (len(endless) * BYTE_S, "%.1f" % left_after if left_after is not None else "?",
-             env["leave"] - 2.5, env["leave"] + 6))
+          "the last good frame (%.0f to %.0f) %s"
+          % (len(endless) * BYTE_S, "%.1f" % left_after if left_after is not None else "?", low, high, what))
     return log
 
 
@@ -496,6 +505,9 @@ def main():
         "hold": A.setting(sketch, "AD_SCROLL_HOLD_MS"), "wave": A.setting(sketch, "AD_WAVE_FRAME_MS"),
         "miss": A.setting(sketch, "GAME_MISS_MS"), "quiet": A.setting(sketch, "GAME_QUIET_MS"),
         "leave": A.setting(sketch, "GAME_LEAVE_MS"),
+        # (the wait for a quiet line before every request, which ads_test.py's checks of the probe
+        # want; and how long such a firmware listens behind the last LOW it saw before it asks)
+        "request_quiet": A.request_quiet(sketch), "attn": A.setting(sketch, "CHOOSER_ATTN_FIRST_BYTE_MS", 0),
         "runner": icon[1:], "runner_cols": icon[0], "palette": palette,
         "flash_shift": int(flash.group(1)), "stars": int(stars.group(1)),
         "measured": {}, "least_rate": 20,

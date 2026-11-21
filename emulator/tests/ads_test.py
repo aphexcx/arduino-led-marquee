@@ -19,7 +19,9 @@ For every 'O' and 'C' message:
   - no gap between two frames is longer than the pace allows, and no pause inside a frame is
     longer than the firmware's frames had before (a long pause would end the frame early)
   - from the first frame that shows the complete text (for a long text: its end) to the sign's
-    next request is `dly`, within 2 percent or 10 ms, whichever is larger
+    next request is `dly`, within 2 percent or 10 ms, whichever is larger. (Firmware that waits
+    for a quiet line before every request, REQUEST_QUIET_MS in the sketch, asks that much later
+    in every style: the last picture of a message then stays for `dly` and that wait.)
 
 usage: ads_test.py <sign-emu> <firmware.hex> <repo root> <work dir> [port]
 Python 3 standard library only. Uses three TCP ports from `port` (default 14440).
@@ -97,11 +99,27 @@ def ink(cols):
     return lit[-1] + 1 if lit else 0
 
 
-def setting(sketch, name):
+def setting(sketch, name, default=None):
     m = re.search(r"^#define\s+%s\s+(\d+)\s*$" % name, sketch, re.M)
     if not m:
+        if default is not None:
+            return default
         sys.exit("LED_Marquee.ino has no #define %s <number>" % name)
     return int(m.group(1))
+
+
+def request_quiet(sketch):
+    """The firmware's wait for a quiet line before every request, in ms (REQUEST_QUIET_MS; 0 for a
+    firmware that asks at once: master's before chooser contract 3). Every test that uses the checks
+    here keeps it as env["request_quiet"]."""
+    return setting(sketch, "REQUEST_QUIET_MS", 0)
+
+
+def quiet_note(env):
+    """For the text of a hold's check: what the firmware adds to every hold, if anything."""
+    if not env["request_quiet"]:
+        return ""
+    return " and the %d ms this firmware waits for a quiet line before every request" % env["request_quiet"]
 
 
 def carried(v):
@@ -225,9 +243,10 @@ def hold_check(log, env, message, style, complete_t, start, end):
     dly = message.get("dly", 0)
     hold_ms = (end - complete_t) * 1000
     allowed = max(dly * 0.02, 10)
-    check(log, abs(hold_ms - dly) <= allowed,
-          "from the first frame with the %s to the next request: %.2f ms for dly %d (within %.0f ms)"
-          % ("end of the text" if message.get("_long") else "complete text", hold_ms, dly, allowed))
+    check(log, abs(hold_ms - dly - env["request_quiet"]) <= allowed,
+          "from the first frame with the %s to the next request: %.2f ms for dly %d%s (within %.0f ms)"
+          % ("end of the text" if message.get("_long") else "complete text", hold_ms, dly,
+             quiet_note(env), allowed))
     measured.append((message["_order"], style, message.get("str", ""), dly, hold_ms, end - start))
 
 
@@ -437,9 +456,11 @@ def check_nudge(env, message, start, end, frames):
     # request, which is held to the same tolerance as every hold (2 percent or 10 ms)
     dly = message["dly"]
     worst = max([abs(s - dly) for s in shown[:-1]] or [0])
-    last_ok = bool(shown) and abs(shown[-1] - dly) <= max(dly * 0.02, 10)
-    check(log, len(shown) == positions and worst <= 1 and last_ok, "each column is shown for dly (%s ms for dly %d)"
-          % (" ".join("%.2f" % s for s in shown), message["dly"]))
+    last_ok = bool(shown) and abs(shown[-1] - dly - env["request_quiet"]) <= max(dly * 0.02, 10)
+    check(log, len(shown) == positions and worst <= 1 and last_ok, "each column is shown for dly (%s ms for dly %d%s)"
+          % (" ".join("%.2f" % s for s in shown), message["dly"],
+             "" if not env["request_quiet"] else "; the last one also for the %d ms" % env["request_quiet"]
+             + quiet_note(env)[len(" and the %d ms" % env["request_quiet"]):]))
     return log
 
 
@@ -473,6 +494,7 @@ def main():
         "std": Font(std, 5, 7), "chonk": Font(chonk, 8, 8), "gamma": gamma,
         "letter": setting(sketch, "CHARS_ONEBYONE_DELAY"), "step": setting(sketch, "AD_SCROLL_STEP_MS"),
         "hold": setting(sketch, "AD_SCROLL_HOLD_MS"), "wave": setting(sketch, "AD_WAVE_FRAME_MS"),
+        "request_quiet": request_quiet(sketch),
     }
     port = int(sys.argv[5]) if len(sys.argv) > 5 else 14440
     os.makedirs(env["work"], exist_ok=True)

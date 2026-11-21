@@ -103,30 +103,79 @@ PROGMEM = "                    ";
 #define COUNTDOWN_DELAY 500
 
 // ---- Chooser preview (MSGTYPE_CHOOSER): a message too wide for the space beside the count scrolls.
+// ---- (Contract VERSION 3: the app pushes changes; the sign asks nothing while a text moves. See ChooserDisplay.h)
 // ---- These six values are the ones to tune:
 //How long the start of a scrolling message stands still before it moves (and again every time round), in ms
 #define CHOOSER_HOLD_MS 600
 //Time per scrolled LED column in ms, lower is faster. 35 is about 4.8 characters a second
-//(on the sign a step measures 36 to 37 ms: the millisecond clock stands still while a frame is sent)
+//(on the sign a step measures 36 to 37 ms: the clock loses a tick or two while a frame is sent)
 #define CHOOSER_SCROLL_DELAY_MS 35
 //Blank columns between the end of the message and its start coming round again. 18 is three spaces. 1 to 240
 #define CHOOSER_GAP_COLS 18
 //Brightness of scrolling text, 0-255 before gamma correction. 145 is where the fade blink of a short message starts
 #define CHOOSER_TEXT_BRIGHTNESS 145
-//While scrolling, ask the app "anything changed?" ('?') every this many columns. Lower reacts faster to !next
-#define CHOOSER_POLL_EVERY_COLS 6
-//While a text scrolls the app is only asked for a checksum of its message. The message itself is read again
-//every time the text has come round, and at the latest after this many ms (one short hitch if the text is moving).
-//Lower is safer against a wrong preview staying up, higher hitches long texts less often. 1000 to 30000
+//A message that fits beside the count blinks: it fades to black in a tenth of a second and then stays dark for
+//this many ms before it starts again. (Until now the dark time was however long the app took to answer the read
+//after every blink, about this long on the sign.) Lower blinks faster. 0 to 60000
+#define CHOOSER_BLINK_PAUSE_MS 200
+//A message that fits is read again from the app every this many ms, in case a push was lost; the read is done in
+//the dark pause of the blink. A scrolling message is read again each time it has come round instead, at its
+//stand-still. Lower corrects a wrong short preview sooner (and is how fast the sign follows an app that does not
+//push yet). 1000 to 30000. (These are ms of the sign's own clock, which loses time while frames are sent one
+//after the other: 8000 measures about 9.7 s.)
 #define CHOOSER_REFRESH_MS 8000
-// ---- The rest rarely needs touching:
-//Ask the app at least every this many ms, whatever the scroll is doing (the app lane counts on 250 at most)
-#define CHOOSER_POLL_EVERY_MS 200
-//How long to wait for each byte of the app's answer to a chooser poll, in ms. A late answer costs one visible hitch
-#define CHOOSER_POLL_TIMEOUT_MS 60
-//After this many requests in a row without a usable answer, ask the normal way (which waits up to a second).
-//If the same chooser message comes back the scroll carries on from where it was
-#define CHOOSER_MAX_FAILED_POLLS 3
+// ---- The rest rarely needs touching (the first three are the contract's numbers on the sign's side):
+//After the receive line was seen LOW (the app's "attention"), wait at most this long for it to be HIGH again, in ms
+#define CHOOSER_ATTN_HIGH_WAIT_MS 100
+//... then at most this long for the first byte of the message the app sends unasked (contract: ATTN_FIRST_BYTE_MS).
+//If none comes the sign asks with '~'. That is how the chooser ENDS (contract 3.1: on leaving chooser mode the app
+//gives attention and sends nothing), so this is also the pause before the next message after "leave chooser".
+//On the sign the app's first byte was measured 26 to 38 ms after the end of its break
+#define CHOOSER_ATTN_FIRST_BYTE_MS 150
+//... and this long for each byte after it. The app may pause inside a message (its sending thread is held up
+//for 40 to 80 ms a few times a minute), so this is longer than that
+#define CHOOSER_ATTN_BYTE_MS 100
+//The line counts as HIGH again once it has been HIGH for this long without a gap, in ms (one byte is 0.7 ms)
+#define CHOOSER_LINE_QUIET_MS 3
+//A LOW that lasts this long (microseconds) is the app raising its hand: a break, or the first of the 0x00 bytes it
+//may send instead of one (nine bit times LOW, 625 us at 14400 baud). No other byte holds the line LOW that long:
+//the longest is 0x80 with eight bit times, 556 us, and no character of ASCII text has more than seven
+#define CHOOSER_BREAK_MIN_US 590UL
+//After a message has been read, wait at most this long for whatever the app writes straight behind it (a newline)
+//to end
+#define CHOOSER_TRAILER_WAIT_MS 100
+//What the app writes behind a message may also come late (it may pause before it as before any byte). Bytes that
+//come late and are over within this many ms are that, and not the app raising its hand: room for fourteen bytes
+//back to back. Bytes that go on for longer are a message going by (the shortest message is 25 bytes, 17 ms, of
+//which the sign may miss the first 5 while it sends a frame)
+#define CHOOSER_TRAILER_LATE_MS 10
+//Longer than the line is ever HIGH between two bytes sent back to back (nine bit times, 0.63 ms), in ms. For this
+//long the sign watches the line with its receiver already on before it sends a request (the last part of
+//REQUEST_QUIET_MS); and the line must be HIGH this long before it asks again after a read that ended because a
+//byte did not come in its time
+#define REQUEST_GAP_MS 1
+//Before any '~' is sent (in every mode), the line from the app must have been quiet for this long, in ms, or
+//the answer would be read starting in the middle of whatever the app is sending. (The app wants about 10 ms of
+//silence between a message it pushed and the next request.) Every request in every mode is this much later
+#define REQUEST_QUIET_MS 10
+//A line that stays LOW without a gap for this long (ms) is dead (nothing drives it, or it is held): the request
+//is not sent and counts as unanswered
+#define REQUEST_QUIET_WAIT_MS 500
+//... and this is how long (ms) the app may go on sending before the sign gives up waiting for it to finish.
+//The longest message, 600 characters all written as \uXXXX escapes, is 2.5 s on the wire
+#define REQUEST_BUSY_WAIT_MS 4000
+//How long any '~' read waits for the first byte of its answer, in ms (the same as for every later byte)
+#define ANSWER_FIRST_BYTE_MS 1000
+//... and how much longer than that it may wait, once, when the app raised its hand late in that wait
+#define ANSWER_AFTER_BREAK_MS (CHOOSER_ATTN_HIGH_WAIT_MS + CHOOSER_ATTN_FIRST_BYTE_MS)
+//After this many reads in a row that brought nothing usable, go back to loop() and its normal '~'
+#define CHOOSER_MAX_FAILED_READS 3
+//1 = show on panel B what was measured at the last attention (the Uno cannot print), and send the same numbers
+//to the app as a line of text in front of the next '~' (see ChooserDisplay.h). For the bench, not for a show:
+//ms to the first byte (green), ms to the end of the message (blue), attentions (white), fallbacks to '~' (red)
+#ifndef CHOOSER_DEBUG_PANEL_B
+#define CHOOSER_DEBUG_PANEL_B 0
+#endif
 
 // ---- Ads (MSGTYPE_ONE_BY_ONE, MSGTYPE_CHONKY_SLIDE): a text wider than a panel scrolls to its end by itself.
 // ---- Their "dly" is real milliseconds. These three values are the ones to tune (see AdDisplay.h):
@@ -192,7 +241,18 @@ static_assert(CHOOSER_GLYPH_COLS == FONTSTD_WIDTH && CHOOSER_HEART_COLS == HEART
 static_assert(CHOOSER_CHAR_VT == VT && CHOOSER_CHAR_HEART == HEART, "ChooserScroll.h: special characters");
 static_assert(CHOOSER_GAP_COLS >= 1 && CHOOSER_GAP_COLS <= 240, "CHOOSER_GAP_COLS must be 1 to 240");
 static_assert(CHOOSER_REFRESH_MS >= 1000 && CHOOSER_REFRESH_MS <= 30000, "CHOOSER_REFRESH_MS must be 1000 to 30000");
-static_assert(CHOOSER_POLL_EVERY_MS <= 250, "the app expects a chooser poll at least every 250 ms");
+static_assert(CHOOSER_HOLD_MS >= 1 && CHOOSER_HOLD_MS <= 60000 && CHOOSER_SCROLL_DELAY_MS >= 1 &&
+              CHOOSER_SCROLL_DELAY_MS <= 1000 && CHOOSER_BLINK_PAUSE_MS >= 0 && CHOOSER_BLINK_PAUSE_MS <= 60000,
+              "the chooser's waits are counted in microseconds in 32 bits");
+static_assert(ANSWER_FIRST_BYTE_MS + REQUEST_BUSY_WAIT_MS <= 60000 && CHOOSER_ATTN_BYTE_MS <= ANSWER_FIRST_BYTE_MS,
+              "the time a byte is given is counted in ms in 16 bits");
+static_assert(CHOOSER_TRAILER_LATE_MS >= 1 && CHOOSER_TRAILER_LATE_MS <= 12,
+              "what comes late behind a message must stay shorter than the shortest message less a frame (17 - 5 ms)");
+static_assert(REQUEST_GAP_MS >= 1 && REQUEST_GAP_MS < REQUEST_QUIET_MS,
+              "the gap must be longer than the line is HIGH inside a run of bytes (0.63 ms at most)");
+static_assert(CHOOSER_LINE_QUIET_MS >= 1 && CHOOSER_LINE_QUIET_MS < CHOOSER_ATTN_HIGH_WAIT_MS &&
+              CHOOSER_LINE_QUIET_MS < CHOOSER_TRAILER_WAIT_MS,
+              "the line must be seen HIGH for longer than it is inside a run of bytes (0.63 ms at most)");
 
 // TextWindow.h (the column arithmetic) and AdDisplay.h keep their own copies of these so that they compile without the sketch
 static_assert(TEXT_CHAR_VT == VT && TEXT_CHAR_HEART == HEART && INTERCHAR_SPACE == 1, "TextWindow.h: special characters");
@@ -775,8 +835,50 @@ void marquee(const char* marqueePtr, const Font& font = fontStd, bool pad = true
     free(paddingString);
 }
 
-// The chooser display (MSGTYPE_CHOOSER): showAsChooser() with its scrolling and polling, and the two
-// decisions readSerialData() and loop() make about a reply (chooserReadMessage, chooserDispatch).
+// The level of the serial line from the app, read straight from the pin (SoftwareSerial is not involved and need
+// not be listening). The line idles HIGH. The app holds it LOW to say "I have a new chooser message for you".
+static inline bool chooserLineLow() {
+    return digitalRead(rxPin) == LOW;
+}
+
+// Sends one byte to the app and says whether the line FROM the app changed while it went out. SoftwareSerial
+// sends the start bit and the eight data bits with interrupts off, so its receiver cannot take a byte that begins
+// in that time. That something began is known, not guessed: the receive pin's change flag, which the pin sets with
+// interrupts off too (PB2 is the only pin of its group that is watched, and only while the sign listens).
+// THE SIGN LISTENS FROM THE MOMENT ITS OWN BYTE CAN BE ANSWERED. With the last data bit the byte is in the app's
+// hands: a quick UART looks at the stop bit half way and may begin its answer in the 35 us that are left of it.
+// So the flag is last looked at where the stop bit begins, and interrupts are back on from there: the bundled
+// SoftwareSerial's write() does both (see rxChangedDuringWrite() there). What begins in the stop bit or later is
+// received like any byte and is not reported.
+// AND IT LOSES ONE BYTE, NOT WHAT FOLLOWS IT. write() looks at the flag after every bit it sends, so it knows in
+// which bit time the app's byte began and when it is over. It keeps the receiver off until then (it returns up
+// to eight bit times, 0.56 ms, later for that) and switches it on between that byte and the next: whatever the
+// app sends behind the byte that crossed, back to back or later, is received whole. (If what crossed was no byte
+// but noise, the receiver is off for that long all the same.) What the sign does about a crossing is in
+// chooserRequest().
+static bool chooserSendByte(char c) {
+    softSerial.write(c);
+    return softSerial.rxChangedDuringWrite();
+}
+
+// Sends a request byte, UNLESS A BYTE OF THE APP'S HAS BEEN RECEIVED AND NOT READ: then nothing is sent
+// (SEND_HELD). The sign must not ask with something of the app's already heard: what it hears after its request
+// would then be the middle of that, and it could not tell where the answer begins. Looking at the receive buffer
+// first is not enough: a byte that begins after that look is received by the interrupt, which holds the program
+// for the length of the byte and then lets it go on to send. So the look is made inside the bundled
+// SoftwareSerial, with interrupts off, right in front of the start bit (writeUnlessReceived() there).
+#define SEND_SENT 0    // the byte went out, and nothing of the app's began meanwhile
+#define SEND_CROSSED 1 // it went out, and something of the app's began while it did (see chooserSendByte)
+#define SEND_HELD 2    // it was not sent: a byte of the app's is in the receive buffer
+static uint chooserSendRequest(char c) {
+    if (!softSerial.writeUnlessReceived(c)) {
+        return SEND_HELD;
+    }
+    return softSerial.rxChangedDuringWrite() ? SEND_CROSSED : SEND_SENT;
+}
+
+// The chooser display (MSGTYPE_CHOOSER): showAsChooser() with its scrolling and its watch on the receive line,
+// and the two decisions readSerialData() and loop() make about a reply (chooserReadMessage, chooserDispatch).
 // It is in its own file so that the host test can run it against a fake sign and a fake app.
 #include "ChooserDisplay.h"
 
@@ -787,7 +889,6 @@ void marquee(const char* marqueePtr, const Font& font = fontStd, bool pad = true
 
 // Notifies the IMX that we're ready to retrieve custom message data
 bool readSerialData() {
-    startSerial();
     // Flushing Serial input buffer
 //            while (softSerial.available())
 //                softSerial.read();
@@ -797,22 +898,27 @@ bool readSerialData() {
 //            }
 
     // send special symbol so IMX knows to respond with custom message data
-    softSerial.print('~');
+    // (once the line is quiet: not into a message the app is pushing)
 //    int firstByte = softSerial.read();
 //
 //    switch (firstByte) {
 //
 //    }
 
-    // Read the JSON document from the serial port (stepping over a late answer to a chooser poll,
-    // which is an object without a "type" and not a message)
-    DeserializationError err = chooserReadMessage();
+    // ... and read the JSON document from the serial port (stepping over what is not a message: the
+    // 0x00 a break is received as, white space, an object without a "type"; and letting by, without
+    // an error, the rest of a message the app sent by itself while the sign could not listen)
+    DeserializationError err = chooserExchange();
 
     if (err == DeserializationError::Ok) {
         stopSerial();
         diagnosticBlink();
         return true;
     } else if (err == DeserializationError::EmptyInput) {
+        // Stop listening here too. The stars that follow are drawn with interrupts off: a message
+        // that came in meanwhile (the app pushes without being asked now) would be received in
+        // pieces and make the next read fail with an error on the sign.
+        stopSerial();
         return false;
     } else {
         softSerial.print(err.c_str());
@@ -875,18 +981,24 @@ void loop() {
     diagnosticLedOff();
 
     if (readSuccessful) {
-        // A chooser message is shown in there, for as long as the chooser is on screen (the app is
-        // asked '?' between frames); what comes back is the type of the message that ended it.
-        // 0 means there is nothing to show: what was read is not a message (it has no "type"), or
-        // the chooser's reads kept failing. Draw nothing and ask again with a normal '~'.
+        // A chooser message is shown in there, for as long as the chooser is on screen (the app
+        // pushes what changes; the receive line is watched between frames); what comes back is
+        // the type of the message that ended it.
         char msgType = chooserDispatch();
         // A game frame is shown in there too, for as long as the app answers with game frames.
         // What ended the game is then in `json` (a chooser message is shown in turn); nothing is,
         // when the app's frames stopped coming: ask again with a normal '~'.
         while (msgType == MSGTYPE_GAME) {
-            msgType = showAsGame() ? chooserDispatch() : 0;
+            msgType = showAsGame() ? chooserDispatch() : CHOOSER_DISPATCH_NOTHING;
         }
-        if (!msgType) {
+        // Two answers mean there is no message to show: what was read is not one (it has no "type":
+        // draw nothing and ask again), or the chooser ended because the app stopped answering.
+        if (msgType == CHOOSER_DISPATCH_NOTHING) {
+            loopcount++;
+            return;
+        }
+        if (msgType == CHOOSER_DISPATCH_NO_ANSWER) {
+            showstarfieldcustom(600); // as after any request that was not answered
             loopcount++;
             return;
         }
@@ -1028,7 +1140,6 @@ void loop() {
             }
         }
     } else {
-        chooserLeft(); // the starfield (or the error flash before it) replaces the chooser picture
         showstarfieldcustom(600);
     }
 
