@@ -3,7 +3,8 @@
 // readForMs is not 0, no byte is read from the line once that many ms have gone by since
 // readSinceMs, whatever is still arriving: a read that is waiting then ends at once, as if its
 // timeout had run out. (It is here and not in a reader of the game's own, because deserializeJson()
-// is built once for every kind of thing it reads from: a second kind costs 1.6 KB of flash.)
+// is built once for every kind of thing it reads from, and a second kind costs 1.6 KB of flash: the
+// game reads its frames through the chooser's reader, which reads from this port.)
 //
 // (In a file of its own because the build writes a declaration for every function it finds in the
 // sketch, a class's too.)
