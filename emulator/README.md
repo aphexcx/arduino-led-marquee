@@ -50,8 +50,11 @@ emulator/game_app.py               # g or Enter starts, SPACE or the up arrow ju
 
 `game_app.py` starts the emulator with its live view and plays the app's side
 itself: a stand-in with the app's rules and shows, by this computer's clock,
-so the emulator runs at real-time speed. `--auto 4` presses for the first four
-obstacles by itself; options after `--` go to the emulator (`--record game.gif`).
+so the emulator runs at real-time speed, with the treat (eat it by jumping up
+into it: +3). There is no music here, so it pulses the sign's beat input 138
+times a minute: the runner and the score flash to it. `--auto 4` presses for
+the first four obstacles by itself; options after `--` go to the emulator
+(`--record game.gif`).
 It connects only when its own emulator has said that it listens, and ends with
 a status that is not 0 when that never comes or the emulator ends with an error
 (also one it makes as it ends: a recording it could not finish). However it
@@ -517,7 +520,7 @@ Seen while building this; the firmware is not changed by this directory.
 | `tests/fixes_test.py` | messages the sign must survive and draw as they read, on the real firmware: brightness numbers of any size, keyboard lines of any length, empty texts, a negative number of stars, icons it does not have. Every frame of every part of a message (the clear, the fade, the count, the last blink, the starfield) is worked out from the sketch's senders with `Fonts.h`, `Gamma.h` and the brightness shift, and the drawn frames are held against that one for one; (a star's place from the sign's random numbers, a colour's bytes as `sendBitx8` sends them); every list has a limit of simulated time, so a message that never ends is a failed check |
 | `tests/fixes_selftest.py` | the checks of `fixes_test.py` and `leftover_test.py` themselves, on frames in memory (no emulator): what the reviews of those tests found, by name; the right frames of every message must pass; and every message with one of its parts missing, one frame long, half as long, dark, moved, stuck, a frame short or long, backwards, a bit or a column off in length, a column to the right or half as bright must fail |
 | `tests/leftover_test.py` | a track id (`T`) and the icons (`I`) after a white text that fills both sides to their last column: the sign is cleared first, every frame after that is worked out from `Fonts.h` or `Icons.h` and compared column for column and in its length to the bit, and no column a frame does not write is lit; the marquees (`T`, and `D` and `N` as they are, with their stars) also in their colour, which goes round with the characters |
-| `tests/game_test.py` | the jump game's frame (`G`) on the real firmware: every frame of a list against `Icons.h`, the shapes and the palette, on both sides; one table of answers that are not a good frame (absent, torn, no JSON, no message, late): the picture stays, nothing is said, the sign asks again when it should and leaves the game after a second of them; and a scripted game's frames a second and time from a press to the LEDs |
+| `tests/game_test.py` | the jump game's frame (`G`) on the real firmware: every frame of a list against `Icons.h`, the shapes, the palette and the treat's looks, on both sides, the score in a colour of the marquee's wheel; one table of answers that are not a good frame (absent, torn, no JSON, no message, late): the picture stays, nothing is said, the sign asks again when it should and leaves the game after a second of them; and a scripted game's frames a second and time from a press to the LEDs, also with a treat in every frame and the beat input pulsed (the runner and the score flash to each beat, the score goes round the wheel in 10 to 20 s) |
 | `tests/record_fail_test.py` | recordings that cannot be created, written or closed |
 | `tests/cli_test.py` | command line values that are refused; outputs that are the firmware, the report's file or one another under any name; and that nothing is emptied before the run begins |
 | `tests/fake_app_wire_test.py` | what `fake_app.py --contract 3` writes when it leaves chooser mode, as a listener on the sign's receive pin decodes it: nothing behind a break before the guard |
