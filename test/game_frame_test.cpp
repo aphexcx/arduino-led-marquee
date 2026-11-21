@@ -471,6 +471,14 @@ static void colourTable() {
             }
         }
     }
+    // The fade itself (MarqueeColour.h, the marquee's too): every value at every ms of it, and after
+    for (int value = 0; value < 256; value++) {
+        for (unsigned long since = 0; since <= 260; since++) {
+            assert(beatFade((uint8_t) value, since) == noteFade(value, since));
+        }
+        assert(beatFade((uint8_t) value, 0xFFFFFFFFUL) == value);
+        checks++;
+    }
     // The palette (the treat's colours and the stars' too) is the contract's, every value a run of
     // one-bits from bit 0 up (so that it reaches the LEDs as written)
     for (int c = 0; c < GAME_PALETTE; c++) {

@@ -39,13 +39,14 @@ static Color marqueeWheel(uint sector, uint step) {
 }
 
 // One channel of a colour `sinceBeat` ms after a beat: full brightness at the beat, then back to
-// `value` over FADE_MILLIS, in a straight line; from FADE_MILLIS on, `value` itself.
+// `value` over FADE_MILLIS, in a straight line, rounded down; from FADE_MILLIS on, `value` itself.
+// (255 (250 - d) + value d is 63750 - (255 - value) d: 16 bits are enough for every d below 250.)
 static uint beatFade(uint value, unsigned long sinceBeat) {
     if (sinceBeat >= FADE_MILLIS) {
         return value;
     }
-    return (uint) (((unsigned long) JAB_MAX_BRIGHTNESS * (FADE_MILLIS - sinceBeat) + (unsigned long) value * sinceBeat)
-                   / FADE_MILLIS);
+    return (uint) (((uint16_t) JAB_MAX_BRIGHTNESS * FADE_MILLIS
+                    - (uint16_t) (JAB_MAX_BRIGHTNESS - value) * (uint16_t) sinceBeat) / FADE_MILLIS);
 }
 
 #endif //LED_MARQUEE_MARQUEECOLOUR_H

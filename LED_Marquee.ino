@@ -68,13 +68,14 @@ ISR (PCINT1_vect) {
 }
 
 // How many ms ago the last beat was (for beatFade). The beat's interrupt writes the time of the
-// beat, four bytes, so it is read with interrupts off.
+// beat, four bytes, so it is read with interrupts off, and the clock with it: a beat that comes
+// between the two would otherwise be counted from the beat before.
 static unsigned long msSinceBeat() {
     const uint8_t sreg = SREG;
     cli();
-    const unsigned long beat = timeOfLastBeat;
+    const unsigned long since = millis() - timeOfLastBeat;
     SREG = sreg;
-    return millis() - beat;
+    return since;
 }
 
 #define rxPin 10
