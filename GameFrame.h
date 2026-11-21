@@ -135,15 +135,16 @@ static const uint8_t gameDigits[10 * GAME_DIGIT_COLS] PROGMEM = {
 // changes every GAME_TWINKLE_MS of the sign's clock, through GAME_TREAT_LOOKS pictures, and comes
 // round again. A picture is two bytes a column, left to right: the rows it lights there (bit 1 is
 // the bottom row, as the obstacles'), and their colour: 0 the treat's purple, 1 its glint.
-//   a gem, the glint going across it and a rest:  .#.  ###  .#.  (rows 7, 6, 5)
+//   a star that twinkles: its centre lights, it turns into a bright x, and back:  .#.  ###  .#.  (rows 7, 6, 5)
+//   (the x:  #.#  .#.  #.#)
 #define GAME_TREAT_COLS 3
 #define GAME_TREAT_LOOKS 6
 #define GAME_TWINKLE_MS 100
 static const uint8_t gameTreat[GAME_TREAT_LOOKS * GAME_TREAT_COLS * 2] PROGMEM = {
-        0x40, 1, 0xE0, 0, 0x40, 0,
-        0x40, 0, 0xE0, 1, 0x40, 0,
-        0x40, 0, 0xE0, 0, 0x40, 1,
         0x40, 0, 0xE0, 0, 0x40, 0,
+        0x40, 0, 0xE0, 1, 0x40, 0,
+        0xA0, 1, 0x40, 1, 0xA0, 1,
+        0x40, 0, 0xE0, 1, 0x40, 0,
         0x40, 0, 0xE0, 0, 0x40, 0,
         0x40, 0, 0xE0, 0, 0x40, 0,
 };

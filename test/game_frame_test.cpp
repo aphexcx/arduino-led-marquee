@@ -53,8 +53,8 @@ static const int NOTE_DIGIT_ROWS = sizeof NOTE_DIGITS[0] / sizeof NOTE_DIGITS[0]
 // A look lasts NOTE_TWINKLE_MS of the sign's clock; after the last the first comes again.
 static const int NOTE_TWINKLE_MS = 100;
 static const char* const NOTE_TREAT[][3] = {
-        {".#.G", "###P", ".#.P"}, {".#.P", "###G", ".#.P"}, {".#.P", "###P", ".#.G"},
-        {".#.P", "###P", ".#.P"}, {".#.P", "###P", ".#.P"}, {".#.P", "###P", ".#.P"}};
+        {".#.P", "###P", ".#.P"}, {".#.P", "###G", ".#.P"}, {"#.#G", ".#.G", "#.#G"},
+        {".#.P", "###G", ".#.P"}, {".#.P", "###P", ".#.P"}, {".#.P", "###P", ".#.P"}};
 static const int NOTE_LOOKS = sizeof NOTE_TREAT / sizeof NOTE_TREAT[0];
 // ... and the colours as red, green, blue: the digits 0 to 7, the treat's purple and its glint,
 // the moving stars'
@@ -417,13 +417,14 @@ static const ColourRow COLOURS[] = {
         {"00a4", 0, 0, 3, {255, 255, 255}},
         {"00p35a4", 0, 100, 5, {0, 255, 0}},
         {"70p60a57n8", 0, 0, 57, {0, 0, 0}},
-        // the treat's columns do not flash, the runner's rows in them neither (at 0 ms: the glint
-        // in its first column)
-        {"00t8", 0, 0, 8, {255, 127, 255}},
+        // the treat's columns do not flash, the runner's rows in them neither (at 0 ms all purple,
+        // at 100 ms its centre the glint, at 200 ms the bright x)
+        {"00t8", 0, 0, 8, {127, 0, 255}},
         {"00t8", 0, 0, 9, {127, 0, 255}},
         {"00t8", 0, 0, 7, {255, 255, 255}},
         {"00t8", 100, 0, 8, {127, 0, 255}},
         {"00t8", 100, 0, 9, {255, 127, 255}},
+        {"00t8", 200, 0, 8, {255, 127, 255}},
         // nothing flashes in the flash e2: every column is in the obstacles' colour
         {"00e2n42", 0, 0, 2, {255, 0, 0}},
         {"00e2n42", 0, 0, 57, {255, 0, 0}},
