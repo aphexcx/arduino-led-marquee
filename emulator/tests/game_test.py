@@ -351,6 +351,9 @@ def miss_table(env):
          noisy("30a17", 9)),
     ]
     rows = [("absent", b"@none\n", 0, miss + quiet),
+            # (a byte that is dropped gives the next one the time any byte has: so noise and then
+            # silence is a miss that much behind the noise, as a torn answer is)
+            ("noise and then nothing: one LOW pulse (0xFF), no frame", b"\xff", 1, miss + quiet),
             ("torn in the text", b'{"str":"30a17b4', len(b'{"str":"30a17b4'), miss + quiet),
             ("torn after the text", b'{"str":"30a17b45","ty', len(b'{"str":"30a17b45","ty'), miss + quiet)]
     rows += [(what, data, len(data), quiet) for what, data in whole]

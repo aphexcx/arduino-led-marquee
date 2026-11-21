@@ -12,7 +12,10 @@
 // nobody's (outside a text every byte that is neither white space nor 0x20 to 0x7E, inside a text
 // a byte above 0x7F that is no part of a UTF-8 character: what noise on the line is received as)
 // are dropped before the frame is read, up to CHOOSER_MAX_NOISE of them in one frame, and a frame
-// that is good without them is drawn. A byte more of them and the answer is not a good frame.
+// that is good without them is drawn. From the next one on they are read as they come, as in every
+// message. And as any byte does, a byte that is dropped gives the next one GAME_MISS_MS again: a line
+// that carries only noise is a miss GAME_MISS_MS behind its last such byte (and never later than
+// GAME_LEAVE_MS allows).
 //
 // WHEN AN ANSWER IS NOT A GOOD FRAME (it does not come, it stops half way, it never ends, it is no
 // JSON, it is an object without a type or with an empty one, it has more than GAME_MAX_KEYS keys,
