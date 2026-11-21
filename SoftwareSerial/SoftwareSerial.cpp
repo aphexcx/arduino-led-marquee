@@ -238,6 +238,9 @@ ISR(PCINT3_vect, ISR_ALIASOF(PCINT0_vect));
 // Constructor
 //
 SoftwareSerial::SoftwareSerial(uint8_t receivePin, uint8_t transmitPin, bool inverse_logic /* = false */) :
+        _pcint_flagvalue(0),
+        _rx_changed_during_write(false),
+        _hold_if_received(false),
         _rx_delay_centering(0),
         _rx_delay_intrabit(0),
         _rx_delay_stopbit(0),
@@ -299,7 +302,12 @@ void SoftwareSerial::begin(long speed) {
     // 12 (gcc 4.8.2) or 14 (gcc 4.3.2) cycles from last bit to stop bit
     // These are all close enough to just use 15 cycles, since the inter-bit
     // timings are the most critical (deviations stack 8 times)
-    _tx_delay = subtract_cap(bit_delay, 15 / 4);
+    // (LED_Marquee) and 6 more for write()'s look at the pin change flag after every bit:
+    // 21 between bits as avr-gcc 7.3.0 compiles it. Measured on the pin in the emulator at
+    // 14400 baud, for a '~': its stop bit begins 9983 cycles after its start bit, where
+    // 10000 is exact (a bit is 1109 to 1110 cycles for 1111.1); with the 15 it was 10000.
+    // The delay counts in steps of 4 cycles a bit, so the next step is as far off the other way.
+    _tx_delay = subtract_cap(bit_delay, 21 / 4);
 
     // Only setup rx when we have a valid PCINT for this pin
     if (digitalPinToPCICR((int8_t) _receivePin)) {
@@ -348,6 +356,8 @@ void SoftwareSerial::begin(long speed) {
         // can be used inside the ISR without costing too much time.
         _pcint_maskreg = digitalPinToPCMSK(_receivePin);
         _pcint_maskvalue = _BV(digitalPinToPCMSKbit(_receivePin));
+        // (LED_Marquee) the same pin's group in the pin change flag register, for write()
+        _pcint_flagvalue = _BV(digitalPinToPCICRbit(_receivePin));
 
         tunedDelay(_tx_delay); // if we were low this establishes the end
     }
@@ -410,11 +420,24 @@ size_t SoftwareSerial::write(uint8_t b) {
     uint8_t oldSREG = SREG;
     bool inv = _inverse_logic;
     uint16_t delay = _tx_delay;
+    // (LED_Marquee) the receive pin's change flag, and in which of our bits it was first found
+    // set: 1 = the start bit, 2 to 9 = the data bits, 0 = it never was
+    uint8_t flag = _pcint_flagvalue;
+    uint8_t changedAt = 0;
 
     if (inv)
         b = ~b;
 
     cli();  // turn off interrupts for a clean txmit
+
+    // (LED_Marquee) writeUnlessReceived(): has a byte been received that nobody has read? Then
+    // nothing is sent. The look is made here, with interrupts already off: no byte can be
+    // received between this look and our start bit. (A byte whose start bit falls from here on
+    // is one that begins under ours: the looks at the flag below.)
+    if (_hold_if_received && _receive_buffer_head != _receive_buffer_tail) {
+        SREG = oldSREG;
+        return 0;
+    }
 
     // Write the start bit
     if (inv)
@@ -423,6 +446,13 @@ size_t SoftwareSerial::write(uint8_t b) {
         *reg &= inv_mask;
 
     tunedDelay(delay);
+    // (LED_Marquee) Did the receive pin change while this bit went out, with interrupts off? Its
+    // pin change flag says so. It is looked at after every bit, so that write() knows not only
+    // that a byte of the other side's began under ours, but in which of our bits: see below.
+    // (Only while this object listens: the flag is set by the pins of the group that are in the
+    // pin change mask. The looks take 6 cycles a bit; begin() takes them off the bit's delay.)
+    if (PCIFR & flag)
+        changedAt = 1;
 
     // Write each of the 8 bits
     for (uint8_t i = 8; i > 0; --i) {
@@ -433,6 +463,8 @@ size_t SoftwareSerial::write(uint8_t b) {
 
         tunedDelay(delay);
         b >>= 1;
+        if (!changedAt && (PCIFR & flag))
+            changedAt = 10 - i;
     }
 
     // restore pin to natural state
@@ -440,6 +472,45 @@ size_t SoftwareSerial::write(uint8_t b) {
         *reg &= inv_mask;
     else
         *reg |= reg_mask;
+
+    // (LED_Marquee) The stop bit has begun, and the last look at the flag was made where it
+    // began: the other side has the whole byte now and may begin its answer before the stop bit
+    // is over, and that is a byte to receive, not a change to report.
+    _rx_changed_during_write = changedAt != 0;
+
+    if (changedAt && active_object == this) {
+        // A BYTE OF THE OTHER SIDE'S BEGAN UNDER OURS. Its start bit was not seen, so the
+        // receiver must not be let loose on it: it would take one of its data bits for a start
+        // bit, and then every byte that follows back to back from its middle. But it is known
+        // when that byte is over. Its start bit fell in bit number changedAt of ours, that is
+        // between changedAt - 1 and changedAt bit times after our start bit. So its last falling
+        // edge (into its eighth data bit) comes before changedAt + 8 bit times, and the byte
+        // behind it cannot begin before changedAt + 9. The receiver is switched off now and on
+        // again half way between the two, with the flag wiped: it is then in step with the
+        // other side again. One byte is lost, the one that crossed ours; whatever follows it is
+        // received whole, however close behind (other bytes of the same write, the answer to
+        // the byte we have just sent).
+        // (If what began was no byte but the line held LOW, the receiver is switched on with
+        // the line LOW and receives nothing of it: no falling edge follows before a rising one.)
+        // (The flag is wiped before interrupts come back on, too: its interrupt is still
+        // waiting, and would take whatever level the line has at this moment for a start bit.)
+        // (And not in the very next cycle: the pin's change reaches the flag two or three
+        // cycles after the edge, so an edge that came just before the mask would set the flag
+        // again behind a clear that followed at once.)
+        setRxIntMsk(false);
+        tunedDelay(2);
+        PCIFR = flag; // (written as a one, the flag is cleared)
+        SREG = oldSREG; // turn interrupts back on
+        tunedDelay(delay / 2 - 2);
+        for (uint8_t n = changedAt; n > 1; --n)
+            tunedDelay(_tx_delay);
+        cli();
+        PCIFR = flag;
+        setRxIntMsk(true);
+        SREG = oldSREG;
+        tunedDelay(delay / 2); // (the rest of our own stop bit, if it is not over yet)
+        return 1;
+    }
 
     SREG = oldSREG; // turn interrupts back on
     tunedDelay(_tx_delay);

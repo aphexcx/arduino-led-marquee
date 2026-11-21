@@ -57,6 +57,11 @@ private:
     volatile uint8_t *_transmitPortRegister;
     volatile uint8_t *_pcint_maskreg;
     uint8_t _pcint_maskvalue;
+    // (LED_Marquee) the receive pin's group in PCIFR (0 until begin() has found it), and whether
+    // write() found it set after one of the bits it sent
+    uint8_t _pcint_flagvalue;
+    bool _rx_changed_during_write;
+    bool _hold_if_received; // (LED_Marquee) write() is being called by writeUnlessReceived()
 
     // Expressed as 4-cycle delays (must never be 0!)
     uint16_t _rx_delay_centering;
@@ -110,6 +115,26 @@ public:
         bool ret = _buffer_overflow;
         if (ret) _buffer_overflow = false;
         return ret;
+    }
+
+    // (LED_Marquee) True if the receive pin changed while the last write() sent its start bit
+    // and its data bits, when interrupts were off and nothing could be received: something of
+    // the other side's began then. If it was a byte, that one byte is lost. write() has let it
+    // go by (it returns up to eight bit times later for that) and the receiver is in step
+    // again: what follows that byte is received whole. A change in the stop bit or later is not
+    // reported: reception is on again from the beginning of the stop bit.
+    bool rxChangedDuringWrite() { return _rx_changed_during_write; }
+
+    // (LED_Marquee) write(), unless a byte has been received and not read yet: then nothing is
+    // sent and 0 is returned. A caller that looks at the receive buffer and then sends cannot
+    // know that no byte came in between (the receiver's interrupt holds the program for the
+    // length of a byte and then lets it go on to send). Here the look is made with interrupts
+    // off, right in front of the start bit.
+    size_t writeUnlessReceived(uint8_t b) {
+        _hold_if_received = true;
+        size_t sent = write(b);
+        _hold_if_received = false;
+        return sent;
     }
 
     int peek();

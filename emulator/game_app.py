@@ -4,7 +4,9 @@
 This is a STAND-IN for the Android app's side of the game: the app's rules and its three shows
 (energy-sign, JumpGame.kt: the 900 ms jump, 30 rising to 54 columns a second, the three obstacle
 kinds and their spacing, the collisions LED for LED, the stars behind the play that move at a
-quarter of the ground's speed), written again here so that the game can be played without the app. The sign's side is the real firmware image, running in sign-emu.
+quarter of the ground's speed, the score at the top right of the play and of the hit's picture,
+999 at the most; HIGH SCORE in the big font for a new best), written again here so that the game
+can be played without the app. The sign's side is the real firmware image, running in sign-emu.
 
 It starts sign-emu with its live view, answers every request of the sign itself and reads the
 keys in the same window:
@@ -72,9 +74,10 @@ class Rules:
 
 
 class Frame:
-    def __init__(self, rise, picture, obstacles, runner_at=None, colours=None, effect=0, stars=None):
+    def __init__(self, rise, picture, obstacles, runner_at=None, colours=None, effect=0, stars=None, score=None):
         self.rise, self.picture, self.obstacles = rise, picture, obstacles
         self.runner_at, self.colours, self.effect, self.stars = runner_at, colours, effect, stars
+        self.score = score
 
     def text(self):
         """The frame as the sign reads it (the firmware's GameFrame.h)."""
@@ -89,6 +92,8 @@ class Frame:
             out += "e%d" % self.effect
         if self.stars is not None:
             out += "s%d" % (self.stars % Rules.star_columns)
+        if self.score is not None:
+            out += "n%d" % min(max(self.score, 0), 999)
         return out
 
 
@@ -124,7 +129,7 @@ class JumpGame:
         stride = 0 if self.jumped_at >= 0 else self.ticks * r.tick_ms // r.stride_ms % 2
         return Frame(min(self.rise(), r.rows), stride,
                      [(kind, math.floor(x)) for kind, x, _ in self.coming if x < r.face_columns],
-                     stars=r.stars(self.ground))
+                     stars=r.stars(self.ground), score=self.score)
 
     def speed(self):
         r = self.rules
@@ -197,14 +202,17 @@ class Shows:
                                   stars=Rules.stars(-(500 - t) * Rules.start_speed / 1000.0))),
         ]
 
-    def hit(self, last):
+    def hit(self, score, last):
+        """The picture of the hit (`last`, the last frame sent) for a moment, with the game's final
+        `score`: the last tick may have given a point the last frame did not carry."""
         return (700, lambda t: Frame(last.rise if last else 0, 0, last.obstacles if last else [],
                                      colours=(2 if t // 100 % 2 == 0 else 0, 2), effect=2 if t < 100 else 0,
-                                     stars=last.stars if last else None))      # (the stars stand where they stood)
+                                     stars=last.stars if last else None,       # (the stars stand where they stood)
+                                     score=score))
 
     def over(self, score, best, last):
         return [
-            self.hit(last),
+            self.hit(score, last),
             colour_message("I", "X", self.crash_colour),
             self.flash("GAME" + VT + "OVER"),
             colour_message("O", "SCORE %d" % score, self.score_colour, dly=1000),
@@ -215,9 +223,11 @@ class Shows:
     def new_best(self, score, last):
         digits = str(score)
         return [
-            self.hit(last),
+            self.hit(score, last),
             colour_message("I", "X", self.crash_colour),
-            self.flash("NEW" + VT + "BEST!"),
+            # HIGH SCORE in the big font, 88 columns: the sign holds "HIGH SC", slides to "H SCORE"
+            # by itself and holds that for this second
+            colour_message("C", "HIGH SCORE", self.score_colour, dly=1000, scroll=False),
             colour_message("C", digits.rjust((6 + len(digits)) // 2).ljust(6), self.score_colour, dly=1500, scroll=False),
             (2000, lambda t: Frame(int(abs(math.sin(t / 140.0)) * 3), 0, [], runner_at=2 + 45 * t // 2000,
                                    colours=(1 + t // 120 % 7, 2), effect=1,
