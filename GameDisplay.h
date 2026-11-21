@@ -49,23 +49,6 @@ static_assert(GAME_QUIET_MS >= 10 && GAME_QUIET_MS <= 100, "GAME_QUIET_MS must b
 static_assert(GAME_LEAVE_MS >= 2 * (GAME_MISS_MS + GAME_QUIET_MS) && GAME_LEAVE_MS <= 10000,
               "GAME_LEAVE_MS must be at least two missed answers and at most 10000");
 
-// The colours of the digits 0 to 7, as red, green, blue: dark, white, red, orange, yellow, green,
-// blue, pink. Every value is a run of one-bits from bit 0 up, and stays one when it is shifted
-// right, so it reaches the LEDs as it is written here whatever the carry flag holds when
-// sendBitx8 begins (see AdDisplay.h), at every brightness shift.
-// After them the moving stars' colour (GAME_STAR_COLOUR): white at an eighth of colour 1.
-static const uint8_t gamePalette[(GAME_COLOURS + 1) * 3] PROGMEM = {
-        0x00, 0x00, 0x00,
-        0x7F, 0x7F, 0x7F,
-        0xFF, 0x00, 0x00,
-        0xFF, 0x1F, 0x00,
-        0xFF, 0x7F, 0x00,
-        0x00, 0xFF, 0x00,
-        0x00, 0x00, 0xFF,
-        0xFF, 0x00, 0x7F,
-        0x0F, 0x0F, 0x0F,
-};
-
 // A frame has two keys. An answer with more than this many is not a good frame (the document has
 // room for eight; a ninth with a short name would fit beside them in its room for the text).
 #define GAME_MAX_KEYS 8
@@ -89,15 +72,17 @@ static void gameSparkle(GamePicture& pic) {
     }
 }
 
-// Sends the picture to both faces and latches it.
+// Sends the picture to both faces and latches it: in the colours of this moment, the score where
+// the sign's clock has it on the wheel, the runner and the score as the last beat makes them.
 static void gameDraw(const GamePicture& pic) {
+    uint8_t colours[GAME_FRAME_COLOURS * 3];
+    gameColours(pic, millis(), msSinceBeat(), colours);
     const uint shift = pic.effect == GAME_EFFECT_FLASH ? GAME_FLASH_SHIFT : 0;
     cli();
     for (uint face = NUM_PANELS; face; face--) {
         for (uint c = 0; c < GAME_COLS; c++) {
-            const uint8_t* rgb = gamePalette + pic.colour[c] * 3;
-            sendColumnRGB(pic.rows[c], pgm_read_byte_near(rgb) >> shift, pgm_read_byte_near(rgb + 1) >> shift,
-                          pgm_read_byte_near(rgb + 2) >> shift);
+            const uint8_t* rgb = colours + pic.colour[c] * 3;
+            sendColumnRGB(pic.rows[c], rgb[0] >> shift, rgb[1] >> shift, rgb[2] >> shift);
         }
     }
     sei();
@@ -130,7 +115,7 @@ bool showAsGame() {
         }
 
         GamePicture pic;
-        const bool good = type && json.size() <= GAME_MAX_KEYS && gameRender(json["str"], DREAMSTATE.data, pic);
+        const bool good = type && json.size() <= GAME_MAX_KEYS && gameRender(json["str"], DREAMSTATE.data, millis(), pic);
         if (!good) {
             // Whatever is still arriving goes by, until the line is silent. (Not for longer than
             // the game may go without a frame: a line that never falls silent ends the game.)

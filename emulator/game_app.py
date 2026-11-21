@@ -5,8 +5,12 @@ This is a STAND-IN for the Android app's side of the game: the app's rules and i
 (energy-sign, JumpGame.kt: the 900 ms jump, 30 rising to 54 columns a second, the three obstacle
 kinds and their spacing, the collisions LED for LED, the stars behind the play that move at a
 quarter of the ground's speed, the score at the top right of the play and of the hit's picture,
-999 at the most; HIGH SCORE in the big font for a new best), written again here so that the game
-can be played without the app. The sign's side is the real firmware image, running in sign-emu.
+999 at the most; the purple treat, one in the gap after every 10 to 15 obstacles, a third of them
+placed as a dilemma, eaten by a jump on its way up into it for +3 and 400 ms of sparkle, as the
+app lane's artifacts/led-sign/es-osx/treat-rules.md has them; HIGH SCORE in the big font for a new
+best), written again here so that the game can be played without the app. The sign's side is the
+real firmware image, running in sign-emu, whose beat input is pulsed 138 times a minute (there is
+no music here): the runner and the score flash to it.
 
 It starts sign-emu with its live view, answers every request of the sign itself and reads the
 keys in the same window:
@@ -66,24 +70,42 @@ class Rules:
     stride_ms = 160
     stars_share = 0.25          # the stars behind the play move at this share of the ground's speed
     star_columns = 60           # ... and their place is a column, counted up to this
+    # the treat (es-osx/treat-rules.md)
+    treat_every = (10, 15)      # one in the gap after every 10 to 15 obstacles, drawn each time
+    dilemma_share = 1 / 3.0     # ... this share of them placed as a dilemma
+    treat_cols = 3              # counted as the whole box: 3 columns from its left one, rows 5 to 7
+    treat_rows = 0b1110000
+    free_before = 4             # a free one's left column is this far in front of the next obstacle's
+    eat_until_ms = 450          # eaten only by a runner on its way up: rise 1 or more, less than this since the press
+    treat_score = 3
+    sparkle_ms = 400            # e1 in every frame for this long from the tick it is eaten
+    treat_up_to = 44            # it is sent while its left column is at or left of this
 
     @classmethod
     def stars(cls, ground_columns):
         """Where the stars stand when the ground has moved that many columns (before the start: less than none)."""
         return math.floor(ground_columns * cls.stars_share + 1e-6) % cls.star_columns
 
+    @classmethod
+    def dilemma_before(cls, speed):
+        """How far a dilemma treat's left column is in front of the next obstacle's, at this speed."""
+        return int(math.floor(0.77 * speed - 6.5 + 0.5))
+
 
 class Frame:
-    def __init__(self, rise, picture, obstacles, runner_at=None, colours=None, effect=0, stars=None, score=None):
+    def __init__(self, rise, picture, obstacles, runner_at=None, colours=None, effect=0, stars=None, score=None,
+                 treat=None):
         self.rise, self.picture, self.obstacles = rise, picture, obstacles
         self.runner_at, self.colours, self.effect, self.stars = runner_at, colours, effect, stars
-        self.score = score
+        self.score, self.treat = score, treat
 
     def text(self):
-        """The frame as the sign reads it (the firmware's GameFrame.h)."""
+        """The frame as the sign reads it (the firmware's GameFrame.h); the treat after the obstacles, as the app writes it."""
         out = "%d%d" % (min(max(self.rise, 0), 7), min(max(self.picture, 0), 1))
         for kind, column in [o for o in self.obstacles if 0 <= o[0] <= 2 and -99 <= o[1] <= 99][:4]:
             out += "abc"[kind] + str(column)
+        if self.treat is not None and -99 <= self.treat <= 99:
+            out += "t%d" % self.treat
         if self.runner_at is not None:
             out += "r%d" % min(max(self.runner_at, -99), 99)
         if self.colours is not None:
@@ -106,6 +128,11 @@ class JumpGame:
         self.coming = []            # [kind, x, passed]
         self.next_after = 0.0
         self.ground = 0.0           # the columns the ground has moved since the game began: what the stars go by
+        self.placed = 0             # obstacles placed so far
+        self.treat_with = 0         # the treat comes in the gap after the obstacle of this number
+        self.treat = None           # [x, decided]: decided once, at the first tick it meets the runner
+        self.dilemmas = 0           # treats placed as a dilemma (for the status line)
+        self.sparkle_until = -1     # e1 in the frames of the ticks before this one
 
     def start(self, now):
         self.running, self.ended, self.score = True, None, 0
@@ -113,6 +140,8 @@ class JumpGame:
         self.coming = []
         self.next_after = float(self.rules.first_after_columns)
         self.ground = 0.0
+        self.placed, self.treat, self.dilemmas, self.sparkle_until = 0, None, 0, -1
+        self.treat_with = self.rng.randint(*self.rules.treat_every)
 
     def jump(self, now):
         self.work_out_to(now)
@@ -127,9 +156,11 @@ class JumpGame:
             return None
         r = self.rules
         stride = 0 if self.jumped_at >= 0 else self.ticks * r.tick_ms // r.stride_ms % 2
+        treat = math.floor(self.treat[0]) if self.treat is not None else None
         return Frame(min(self.rise(), r.rows), stride,
                      [(kind, math.floor(x)) for kind, x, _ in self.coming if x < r.face_columns],
-                     stars=r.stars(self.ground), score=self.score)
+                     effect=1 if self.ticks < self.sparkle_until else 0, stars=r.stars(self.ground), score=self.score,
+                     treat=treat if treat is not None and treat <= r.treat_up_to else None)
 
     def speed(self):
         r = self.rules
@@ -154,12 +185,36 @@ class JumpGame:
                 obstacle[2] = True
                 self.score += 1
         self.coming = [o for o in self.coming if o[1] + len(r.obstacles[o[0]]) > 0]
+        if self.treat is not None:
+            self.treat[0] -= moved
+            if self.treat[0] + r.treat_cols <= 0:
+                self.treat = None                                 # off the face: gone
         self.next_after -= moved
         if self.next_after <= 0:
             self.coming.append([self.rng.randrange(len(r.obstacles)), float(r.face_columns), False])
             self.next_after = (speed * (r.jump_ms + r.reaction_ms) / 1000.0 + len(r.runner)
                                + self.rng.randrange(r.spread + 1))
+            self.placed += 1
+            if self.placed == self.treat_with:
+                # in the gap behind this obstacle, D columns in front of the next one
+                self.treat_with += self.rng.randint(*r.treat_every)
+                dilemma = self.rng.random() < r.dilemma_share
+                self.dilemmas += dilemma
+                before = r.dilemma_before(speed) if dilemma else r.free_before
+                self.treat = [float(r.face_columns) + self.next_after - before, False]
         up = self.rise()
+        if self.treat is not None and not self.treat[1]:
+            left = math.floor(self.treat[0])
+            for i in range(r.treat_cols):
+                column = left + i - r.runner_at
+                if 0 <= column < len(r.runner) and (r.runner[column] << up) & r.treat_rows:
+                    # it meets the runner: eaten if the runner is on its way up, else never
+                    self.treat[1] = True
+                    if up >= 1 and (self.ticks - self.jumped_at) * r.tick_ms < r.eat_until_ms:
+                        self.score += r.treat_score
+                        self.treat = None
+                        self.sparkle_until = self.ticks + r.sparkle_ms // r.tick_ms
+                    break
         for kind, x, _ in self.coming:
             left = math.floor(x)
             for i, lit in enumerate(r.obstacles[kind]):
@@ -208,7 +263,7 @@ class Shows:
         return (700, lambda t: Frame(last.rise if last else 0, 0, last.obstacles if last else [],
                                      colours=(2 if t // 100 % 2 == 0 else 0, 2), effect=2 if t < 100 else 0,
                                      stars=last.stars if last else None,       # (the stars stand where they stood)
-                                     score=score))
+                                     score=score, treat=last.treat if last else None))
 
     def over(self, score, best, last):
         return [
@@ -294,13 +349,15 @@ class GameOnTheSign:
     def status(self):
         if self.stage == "PLAY":
             press = "" if self.press_ms is None else "   last press: in the frame sent %d ms later" % self.press_ms
-            return "PLAYING   score %d   best %d   %.0f columns a second%s" % (
-                self.game.score, self.best, self.game.speed(), press)
+            treat = "   A TREAT: +3" if self.game.ticks < self.game.sparkle_until else ""
+            return "PLAYING   score %d   best %d   %.0f columns a second%s%s" % (
+                self.game.score, self.best, self.game.speed(), press, treat)
         return self.said + ("" if self.stage != "NONE" else "   (g or Enter starts a game)")
 
 
 # ---- the window: sign-emu's live view with two lines of ours on top, and the keys --------------------
 IDLE = {"str": "", "type": "S", "stars": 20}       # what a request gets when no game is on
+BEAT_BPM = 138                                      # the beat the sign's beat input gets (there is no music here)
 HOME = b"\x1b[H\x1b[0m"                             # sign-emu begins every redraw with this ...
 END = b"\x1b[J"                                     # ... and ends it with this
 
@@ -397,8 +454,9 @@ def main():
         tty.setcbreak(keys)
         # sign_emu.Emu: first the emulator's own word that it listens on the port, then the
         # connection. Whoever else listens there (another sign-emu) is not connected to.
-        emu = sign_emu.Emu([args.emu, "--speed", "1", "--port", str(port), "--wait-client", "20",
-                            "--until-disconnect"] + args.emu_options + [args.hex], port, said=said, wait_s=20,
+        emu = sign_emu.Emu([args.emu, "--speed", "1", "--bpm", str(BEAT_BPM), "--port", str(port),
+                            "--wait-client", "20", "--until-disconnect"] + args.emu_options + [args.hex],
+                           port, said=said, wait_s=20,
                            stdin=subprocess.DEVNULL, stdout=slave, stderr=slave, start_new_session=True)
         os.close(slave)
         sock = emu.connect()
